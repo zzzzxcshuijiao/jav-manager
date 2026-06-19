@@ -176,6 +176,21 @@ fn scanner_prefers_scraper_style_ps_poster_images_for_local_cover() {
         Some(ps_poster.to_string_lossy().to_string())
     );
 }
+#[test]
+fn scanner_falls_back_to_code_named_cover_for_multi_cd_video_stem() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("inbox").join("IDBD-815");
+    std::fs::create_dir_all(&source).unwrap();
+    let video = source.join("IDBD-815-cd2.mp4");
+    let cover = source.join("IDBD-815.jpg");
+    std::fs::write(&video, b"video").unwrap();
+    std::fs::write(&cover, b"poster").unwrap();
+    let items = Scanner::scan_sources(&[temp.path().join("inbox")]).unwrap();
+    assert_eq!(
+        items[0].metadata.as_ref().unwrap().cover_url,
+        Some(cover.to_string_lossy().to_string())
+    );
+}
 
 #[test]
 fn scanner_marks_exact_same_file_content_as_duplicate_candidates() {
@@ -236,6 +251,29 @@ fn parses_ffprobe_json_media_info_from_video_stream() {
 fn tiny_files_are_not_sent_to_ffprobe() {
     assert!(!should_probe_media_file(5));
     assert!(should_probe_media_file(1024));
+}
+
+#[test]
+fn sample_file_fingerprint_hashes_large_files_without_loading_whole_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let big = temp.path().join("big.mp4");
+    let big_copy = temp.path().join("big-copy.mp4");
+    let big_variant = temp.path().join("big-variant.mp4");
+    // 4 MB: larger than the 3 MB head/mid/tail threshold so the large-file path runs.
+    let content = vec![0xAB_u8; 4 * 1024 * 1024];
+    std::fs::write(&big, &content).unwrap();
+    std::fs::write(&big_copy, &content).unwrap();
+    let mut variant = content.clone();
+    variant[0] = 0xCD; // change the head region so the fingerprint must differ
+    std::fs::write(&big_variant, &variant).unwrap();
+
+    let fp = media_manager::scanner::sample_file_fingerprint(&big).unwrap();
+    let fp_copy = media_manager::scanner::sample_file_fingerprint(&big_copy).unwrap();
+    let fp_variant = media_manager::scanner::sample_file_fingerprint(&big_variant).unwrap();
+
+    assert!(fp.starts_with("fp:"), "fingerprint should carry the fp: prefix");
+    assert_eq!(fp, fp_copy, "identical large files share a fingerprint");
+    assert_ne!(fp, fp_variant, "differing head bytes change the fingerprint");
 }
 
 #[test]

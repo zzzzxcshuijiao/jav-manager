@@ -65,6 +65,7 @@ impl Scanner {
                 } else {
                     MediaInfo::default()
                 };
+                let local_metadata = local_metadata_for(path, normalized_code.as_deref());
                 let mut review_reasons = Vec::new();
                 if normalized_code.is_none() {
                     review_reasons.push(ReviewReason::MissingCode);
@@ -88,9 +89,9 @@ impl Scanner {
                     decision: IngestDecision::NeedsReview,
                     review_reasons,
                     code_conflict,
-                    metadata: local_metadata_for(path),
+                    metadata: local_metadata,
                     candidate_work_id: None,
-                    file_hash: sha256_file_hash(path).ok(),
+                    file_hash: sample_file_fingerprint(path).ok(),
                 });
             }
         }
@@ -207,10 +208,37 @@ fn mark_duplicate_file_candidates(items: &mut [IngestItem]) {
     }
 }
 
-fn sha256_file_hash(path: &Path) -> Result<String> {
-    let bytes = fs::read(path)?;
-    let digest = Sha256::digest(bytes);
-    Ok(format!("{digest:x}"))
+/// Bounded-memory file fingerprint: hashes file size plus head/mid/tail 1MB
+/// regions so multi-GB videos never load into RAM. For files up to 3MB the
+/// entire content is hashed, so tiny identical files still match exactly.
+/// Results are prefixed `fp:` to distinguish from any future full-hash path.
+pub fn sample_file_fingerprint(path: &Path) -> Result<String> {
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB per sampled region
+    let mut file = fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut hasher = Sha256::new();
+    // Include size first so different-sized files never collide.
+    hasher.update(size.to_le_bytes());
+
+    use std::io::{Read, Seek, SeekFrom};
+    if size <= (CHUNK_SIZE * 3) as u64 {
+        // Small file: hash entire content (degrades to a full hash).
+        let mut reader = std::io::BufReader::new(&mut file);
+        std::io::copy(&mut reader, &mut hasher)?;
+    } else {
+        let mut buf = vec![0u8; CHUNK_SIZE];
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+        file.seek(SeekFrom::Start(size / 2))?;
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+        file.seek(SeekFrom::Start(size - CHUNK_SIZE as u64))?;
+        file.read_exact(&mut buf)?;
+        hasher.update(&buf);
+    }
+
+    let digest = hasher.finalize();
+    Ok(format!("fp:{digest:x}"))
 }
 
 fn push_review_reason(item: &mut IngestItem, reason: ReviewReason) {
@@ -246,9 +274,13 @@ fn extract_code_from_path(path: &Path) -> Option<String> {
         })
 }
 
-fn local_metadata_for(video_path: &Path) -> Option<ProviderMetadata> {
+fn local_metadata_for(video_path: &Path, normalized_code: Option<&str>) -> Option<ProviderMetadata> {
     let nfo = find_local_nfo(video_path);
-    let cover = find_local_cover(video_path);
+    let cover = find_local_cover(video_path).or_else(|| {
+        // Real scraper output often names the cover after the code
+        // (e.g. IDBD-815.jpg) rather than a multi-CD video stem.
+        normalized_code.and_then(|code| find_image_by_stem(video_path.parent()?, code))
+    });
     if nfo.is_none() && cover.is_none() {
         return None;
     }
