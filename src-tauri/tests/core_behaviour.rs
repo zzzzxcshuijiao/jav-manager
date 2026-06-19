@@ -1704,6 +1704,55 @@ fn execute_archive_actions_moves_file_and_persists_log_and_archived_path() {
 }
 
 #[test]
+fn full_archive_pipeline_plans_executes_logs_and_excludes_archived() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source").join("IDBD-815");
+    let archive = temp.path().join("archive");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&archive).unwrap();
+    let video = source.join("IDBD-815-cd2.mp4");
+    std::fs::write(&video, b"video-bytes").unwrap();
+    std::fs::write(
+        source.join("IDBD-815.nfo"),
+        r#"<movie><num>IDBD-815</num><title>Sample Title</title><premiered>2020-02-13</premiered></movie>"#,
+    )
+    .unwrap();
+    std::fs::write(source.join("IDBD-815.jpg"), b"cover").unwrap();
+    let mut items = Scanner::scan_sources(&[temp.path().join("source")]).unwrap();
+    assert_eq!(items.len(), 1);
+    let engine = IngestEngine::new(media_manager::provider::DisabledProvider);
+    items = items.into_iter().map(|i| engine.decide(i)).collect();
+    assert_eq!(items[0].decision, IngestDecision::AutoArchive);
+    assert_eq!(items[0].normalized_code.as_deref(), Some("IDBD-815"));
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let job_id = repo.create_ingest_job(&[temp.path().join("source")], &items).unwrap();
+    let item_id = repo.list_ingest_items(job_id).unwrap()[0].id.unwrap();
+    let work_id = repo.resolve_ingest_item(item_id, None).unwrap();
+    let candidates = repo.list_archive_candidate_items_for_job(job_id).unwrap();
+    assert_eq!(candidates.len(), 1);
+    let plan = ArchivePlanner::new(archive.clone()).preview(&candidates).unwrap();
+    assert!(plan.conflicts.is_empty());
+    assert_eq!(plan.actions.len(), 1);
+    assert_eq!(plan.actions[0].normalized_file_name, "IDBD-815.mp4");
+    let logs = execute_archive_actions(&plan.actions, &[temp.path().join("source")], &archive, Some(&repo)).unwrap();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].status, "moved");
+    let dest = plan.actions[0].to_path.clone();
+    assert!(!video.exists());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"video-bytes");
+    let stored_logs = repo.list_archive_action_logs().unwrap();
+    assert_eq!(stored_logs.len(), 1);
+    assert_eq!(stored_logs[0].to_path, dest);
+    assert_eq!(stored_logs[0].status, "moved");
+    let versions = repo.list_file_versions_for_work(work_id).unwrap();
+    assert_eq!(versions[0].archived_path, Some(dest.clone()));
+    let remaining = repo.list_archive_candidate_items_for_job(job_id).unwrap();
+    assert!(remaining.is_empty(), "archived item must be excluded from future candidates");
+}
+
+#[test]
 fn execute_archive_actions_marks_failed_moves_for_review() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("source");
