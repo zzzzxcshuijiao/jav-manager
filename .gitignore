@@ -1,0 +1,10 @@
+.ai_state/
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+.vite/
+.DS_Store
+*.log
+*.tmp
+.tmp-ingest/
