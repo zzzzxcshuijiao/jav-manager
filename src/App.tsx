@@ -123,6 +123,7 @@ export function App() {
   const [libraryStatusFilter, setLibraryStatusFilter] = useState<WorkStatusFilter>("All");
   const [selectedLibraryWorkId, setSelectedLibraryWorkId] = useState<number | null>(null);
   const [libraryFileVersions, setLibraryFileVersions] = useState<FileVersion[]>([]);
+  const hasBackend = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const [status, setStatus] = useState("演示数据已载入；Tauri 桌面环境可以扫描真实目录并写入 SQLite。");
 
   const stats = useMemo(() => buildDashboardStats(items), [items]);
@@ -832,8 +833,6 @@ export function App() {
         <section className="source-panel">
           <label>来源目录</label>
           <textarea value={sourceRoots} onChange={(event) => setSourceRoots(event.target.value)} />
-          <label>归档根目录</label>
-          <input value={archiveRoot} onChange={(event) => setArchiveRoot(event.target.value)} />
           <button className="primary" type="button" onClick={runScan}>
             <RefreshCw size={16} /> 扫描
           </button>
@@ -842,6 +841,9 @@ export function App() {
 
       <section className="workspace">
         <header className="topbar">
+          {!hasBackend && (
+            <div className="backend-warning">未连接到 Tauri 桌面后端：扫描、归档等操作不可用。请在 Tauri 桌面应用中运行（npm run tauri:dev:win），而不是普通浏览器。</div>
+          )}
           <div>
             <h1>{workbenchViewTitle(activeView)}</h1>
             <p>{status}</p>

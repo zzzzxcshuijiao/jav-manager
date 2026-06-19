@@ -160,6 +160,18 @@ h2 {
   font-size: 13px;
 }
 
+.backend-warning {
+  background: #fef3cd;
+  border: 1px solid #f5c67a;
+  color: #7a5400;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
