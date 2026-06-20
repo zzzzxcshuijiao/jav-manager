@@ -405,6 +405,12 @@ export function App() {
     setSelectedIds(new Set());
   }
 
+  function toggleAllVisibleItems() {
+    const selectableIds = tableItems.filter((item) => item.id != null).map((item) => item.id as number);
+    const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.has(id));
+    setSelectedIds(allSelected ? new Set() : new Set(selectableIds));
+  }
+
   function toggleFileVersion(version: FileVersion) {
     if (version.id == null) {
       return;
@@ -422,6 +428,12 @@ export function App() {
 
   function clearFileVersionSelection() {
     setSelectedFileVersionIds(new Set());
+  }
+
+  function toggleAllFileVersions() {
+    const selectableIds = fileVersions.filter((v) => v.id != null).map((v) => v.id as number);
+    const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedFileVersionIds.has(id));
+    setSelectedFileVersionIds(allSelected ? new Set() : new Set(selectableIds));
   }
 
   function parsedSourceRoots() {
@@ -1161,6 +1173,9 @@ export function App() {
                 <button type="button" onClick={confirmBatchMatches} disabled={resolvableBatchItems.length === 0}>
                   <CheckCircle2 size={15} /> 批量确认匹配
                 </button>
+                <button type="button" onClick={toggleAllVisibleItems} disabled={tableItems.every((item) => item.id == null)}>
+                  {tableItems.filter((item) => item.id != null).every((item) => selectedIds.has(item.id as number)) ? "取消全选" : "全选"}
+                </button>
                 <button type="button" onClick={clearBatchSelection} disabled={selectedBatchIds.length === 0}>
                   清空选择
                 </button>
@@ -1355,6 +1370,13 @@ export function App() {
                           disabled={selectedFileVersionIds.size === 0 || !mergeVersionTargetWorkId}
                         >
                           <CheckCircle2 size={15} /> 合并版本
+                        </button>
+                        <button
+                          type="button"
+                          onClick={toggleAllFileVersions}
+                          disabled={fileVersions.every((v) => v.id == null)}
+                        >
+                          {fileVersions.filter((v) => v.id != null).every((v) => selectedFileVersionIds.has(v.id as number)) ? "取消全选" : "全选"}
                         </button>
                         <button type="button" onClick={clearFileVersionSelection} disabled={selectedFileVersionIds.size === 0}>
                           清空
