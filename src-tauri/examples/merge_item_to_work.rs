@@ -22,6 +22,10 @@ fn main() -> anyhow::Result<()> {
         lists: vec![],
         rating: None,
         watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
     })?;
     let items = vec![
         ingest_item("ABP-525", "ABP-525.mp4"),

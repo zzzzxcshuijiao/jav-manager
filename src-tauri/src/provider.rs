@@ -23,6 +23,10 @@ impl MetadataProvider for ExampleProvider {
             cover_url: None,
             release_date: None,
             confidence: 0.85,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
         }))
     }
 }

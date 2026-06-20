@@ -1,5 +1,5 @@
 ﻿use crate::domain::{
-    ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
+    Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, WatchStatus, Work,
 };
 use crate::archive::normalized_file_name;
@@ -120,6 +120,32 @@ impl Repository {
         self.ensure_column("file_versions", "codec", "TEXT")?;
         self.ensure_column("file_versions", "file_hash", "TEXT")?;
         self.ensure_column("archive_action_logs", "job_id", "INTEGER")?;
+        self.ensure_work_metadata_columns()?;
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS actors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                primary_name TEXT NOT NULL,
+                avatar_path TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS actor_names (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+                name TEXT NOT NULL UNIQUE,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                source TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS work_actors (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
+                PRIMARY KEY (work_id, actor_id)
+            );
+            ",
+        )?;
         Ok(())
     }
 
@@ -192,6 +218,14 @@ impl Repository {
         Ok(())
     }
 
+    fn ensure_work_metadata_columns(&self) -> Result<()> {
+        self.ensure_column("works", "genres_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_column("works", "studio", "TEXT")?;
+        self.ensure_column("works", "director", "TEXT")?;
+        self.ensure_column("works", "release_date", "TEXT")?;
+        Ok(())
+    }
+
     pub fn upsert_work(&self, work: &Work) -> Result<i64> {
         self.conn.execute(
             "
@@ -249,7 +283,8 @@ impl Repository {
         let mut statement = self.conn.prepare(
             "
             SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status
+                   cover_path, tags_json, lists_json, rating, watch_status,
+                   genres_json, studio, director, release_date
             FROM works
             WHERE normalized_code = ?1
             ",
@@ -277,6 +312,10 @@ impl Repository {
             lists: serde_json::from_str(&lists_json)?,
             rating: row.get::<_, Option<u8>>(9)?,
             watch_status: parse_watch_status(&status),
+            genres: serde_json::from_str(&row.get::<_, String>(11)?)?,
+            studio: row.get(12)?,
+            director: row.get(13)?,
+            release_date: row.get(14)?,
         }))
     }
 
@@ -284,7 +323,8 @@ impl Repository {
         let mut statement = self.conn.prepare(
             "
             SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status
+                   cover_path, tags_json, lists_json, rating, watch_status,
+                   genres_json, studio, director, release_date
             FROM works
             ORDER BY normalized_code ASC
             ",
@@ -307,6 +347,10 @@ impl Repository {
                 lists: serde_json::from_str(&lists_json).unwrap_or_default(),
                 rating: row.get::<_, Option<u8>>(9)?,
                 watch_status: parse_watch_status(&status),
+                genres: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+                studio: row.get(12).ok().flatten(),
+                director: row.get(13).ok().flatten(),
+                release_date: row.get(14).ok().flatten(),
             })
         })?;
 
@@ -764,7 +808,8 @@ impl Repository {
         let mut statement = self.conn.prepare(
             "
             SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status
+                   cover_path, tags_json, lists_json, rating, watch_status,
+                   genres_json, studio, director, release_date
             FROM works
             WHERE id = ?1
             ",
@@ -791,6 +836,10 @@ impl Repository {
             lists: serde_json::from_str(&lists_json)?,
             rating: row.get::<_, Option<u8>>(9)?,
             watch_status: parse_watch_status(&status),
+            genres: serde_json::from_str(&row.get::<_, String>(11)?)?,
+            studio: row.get(12)?,
+            director: row.get(13)?,
+            release_date: row.get(14)?,
         }))
     }
 
@@ -1264,6 +1313,75 @@ impl Repository {
         )?;
         Ok(())
     }
+
+// ===== actor entity + alias model =====
+
+    fn resolve_actor_by_name(&self, name: &str, source: &str) -> Result<i64> {
+        if let Some(id) = self.conn.query_row("SELECT actor_id FROM actor_names WHERE name = ?1", params![name], |row| row.get(0)).optional()? {
+            return Ok(id);
+        }
+        self.conn.execute("INSERT INTO actors (primary_name) VALUES (?1)", params![name])?;
+        let actor_id: i64 = self.conn.last_insert_rowid();
+        self.conn.execute("INSERT INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 1, ?3)", params![actor_id, name, source])?;
+        Ok(actor_id)
+    }
+
+    pub fn set_work_actors(&self, work_id: i64, names: &[String], source: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM work_actors WHERE work_id = ?1", params![work_id])?;
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() { continue; }
+            let actor_id = self.resolve_actor_by_name(trimmed, source)?;
+            self.conn.execute("INSERT OR IGNORE INTO work_actors (work_id, actor_id) VALUES (?1, ?2)", params![work_id, actor_id])?;
+        }
+        Ok(())
+    }
+
+    pub fn list_work_actors(&self, work_id: i64) -> Result<Vec<Actor>> {
+        let mut stmt = self.conn.prepare("SELECT a.id, a.primary_name, a.avatar_path FROM actors a JOIN work_actors w ON w.actor_id = a.id WHERE w.work_id = ?1 ORDER BY a.primary_name")?;
+        let rows = stmt.query_map(params![work_id], |row| {
+            Ok(Actor {
+                id: row.get(0)?,
+                primary_name: row.get(1)?,
+                avatar_path: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+            })
+        })?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    pub fn list_actor_names(&self, actor_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT name FROM actor_names WHERE actor_id = ?1 ORDER BY is_primary DESC, name")?;
+        let rows = stmt.query_map(params![actor_id], |row| row.get::<_, String>(0))?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    pub fn add_actor_alias(&self, actor_id: i64, name: &str, source: &str) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 0, ?3)", params![actor_id, name, source])?;
+        Ok(())
+    }
+
+    pub fn merge_actors(&self, primary_id: i64, secondary_id: i64) -> Result<i64> {
+        if primary_id == secondary_id { return Ok(primary_id); }
+        let secondary_names: Vec<(i64, String, Option<String>)> = {
+            let mut stmt = self.conn.prepare("SELECT id, name, source FROM actor_names WHERE actor_id = ?1")?;
+            let rows = stmt.query_map(params![secondary_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+            })?;
+            let collected: rusqlite::Result<Vec<_>> = rows.collect();
+            collected?
+        };
+        for (name_id, name, source) in &secondary_names {
+            self.conn.execute("DELETE FROM actor_names WHERE id = ?1", params![name_id])?;
+            self.conn.execute("INSERT OR IGNORE INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 0, ?3)", params![primary_id, name, source])?;
+        }
+        self.conn.execute("UPDATE OR IGNORE work_actors SET actor_id = ?1 WHERE actor_id = ?2", params![primary_id, secondary_id])?;
+        self.conn.execute("DELETE FROM work_actors WHERE actor_id = ?1", params![secondary_id])?;
+        self.conn.execute("DELETE FROM actors WHERE id = ?1", params![secondary_id])?;
+        Ok(primary_id)
+    }
+
 }
 
 fn parse_watch_status(value: &str) -> WatchStatus {
@@ -1356,6 +1474,20 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
         lists: vec![],
         rating: None,
         watch_status: WatchStatus::Unwatched,
+        genres: item
+            .metadata
+            .as_ref()
+            .map(|metadata| metadata.genres.clone())
+            .unwrap_or_default(),
+        studio: item.metadata.as_ref().and_then(|metadata| metadata.studio.clone()),
+        director: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.director.clone()),
+        release_date: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.release_date.clone()),
     }
 }
 

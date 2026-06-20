@@ -385,6 +385,10 @@ fn same_code_files_attach_as_versions_of_one_work() {
         lists: vec![],
         rating: None,
         watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
     };
     let mut version = FileVersion {
         id: None,
@@ -437,6 +441,10 @@ impl MetadataProvider for LowConfidenceProvider {
             cover_url: None,
             release_date: None,
             confidence: 0.5,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
         }))
     }
 }
@@ -510,6 +518,10 @@ fn local_metadata_promotes_item_to_auto_archive_without_network_provider() {
         cover_url: Some("H:/inbox/ABP-525/cover.jpg".to_string()),
         release_date: None,
         confidence: 0.95,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
     });
 
     let decided = engine.decide(item);
@@ -534,6 +546,10 @@ fn code_conflict_stays_in_review_even_with_high_confidence_local_metadata() {
         cover_url: None,
         release_date: None,
         confidence: 0.95,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
     });
 
     let decided = engine.decide(item);
@@ -755,6 +771,10 @@ fn phase_f_dry_run_report_preserves_item_and_plan_detail() {
         cover_url: Some("H:/covers/ABP-123.jpg".to_string()),
         release_date: None,
         confidence: 0.98,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
     });
     let plan = ArchivePlan {
         id: Some(1),
@@ -879,6 +899,10 @@ fn repository_migrates_and_persists_work_profile() {
         lists: vec!["favorites".to_string()],
         rating: Some(8),
         watch_status: WatchStatus::Favorite,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
     };
 
     let id = repo.upsert_work(&work).unwrap();
@@ -908,6 +932,10 @@ fn repository_lists_works_for_review_queue_merge_selection() {
         lists: vec![],
         rating: None,
         watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
     })
     .unwrap();
     repo.upsert_work(&Work {
@@ -922,6 +950,10 @@ fn repository_lists_works_for_review_queue_merge_selection() {
         lists: vec![],
         rating: None,
         watch_status: WatchStatus::Favorite,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
     })
     .unwrap();
 
@@ -952,6 +984,10 @@ fn repository_updates_work_profile_fields_without_replacing_metadata() {
             lists: vec![],
             rating: None,
             watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
         })
         .unwrap();
 
@@ -995,6 +1031,10 @@ fn repository_upsert_work_does_not_replace_user_profile_fields() {
             lists: vec!["待看".to_string()],
             rating: Some(9),
             watch_status: WatchStatus::Favorite,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
         })
         .unwrap();
 
@@ -1011,6 +1051,10 @@ fn repository_upsert_work_does_not_replace_user_profile_fields() {
             lists: vec![],
             rating: None,
             watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
         })
         .unwrap();
     let stored = repo.get_work_by_code("ABP-525").unwrap().unwrap();
@@ -1191,6 +1235,10 @@ fn repository_persists_ingest_item_local_metadata() {
         cover_url: Some("H:/inbox/ABP-525/cover.jpg".to_string()),
         release_date: Some("2024-01-02".to_string()),
         confidence: 0.95,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
     });
 
     let job_id = repo.create_ingest_job(&[PathBuf::from("H:/inbox")], &[item]).unwrap();
@@ -1411,6 +1459,10 @@ fn repository_resolves_ingest_item_into_work_and_file_version() {
         cover_url: Some("H:/CineMingle/JAV_output/Actress/ABP-525/cover.jpg".to_string()),
         release_date: None,
         confidence: 0.95,
+            actors: vec![],
+            genres: vec![],
+            studio: None,
+            director: None,
     });
     item.review_reasons = vec![ReviewReason::LowConfidence];
     let job_id = repo
@@ -1468,6 +1520,10 @@ fn repository_resolves_ingest_item_into_existing_work_by_work_id() {
             lists: vec![],
             rating: None,
             watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
         })
         .unwrap();
     let mut first = ingest_item("ABP-525", 0.95);
@@ -1939,4 +1995,213 @@ fn repository_delete_skips_already_absent_file_but_marks_ignored() {
 
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].decision, IngestDecision::Ignored);
+}
+
+// ===== local metadata enrichment: actors + genres =====
+
+#[test]
+fn scanner_extracts_actor_names_from_local_nfo_blocks() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("inbox").join("ABP-525");
+    std::fs::create_dir_all(&source).unwrap();
+    let video = source.join("ABP-525.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    std::fs::write(
+        source.join("ABP-525.nfo"),
+        r#"
+        <movie>
+          <title>Sample</title>
+          <actor>
+            <name>Melody Marks</name>
+            <type>Actor</type>
+          </actor>
+          <actor>
+            <name>Yua Mikami</name>
+            <type>Actor</type>
+          </actor>
+          <actor>
+            <name>未知演员</name>
+            <type>Actor</type>
+          </actor>
+        </movie>
+        "#,
+    )
+    .unwrap();
+
+    let items = Scanner::scan_sources(&[temp.path().join("inbox")]).unwrap();
+    let metadata = items[0].metadata.as_ref().unwrap();
+
+    // actors parsed from <actor><name> blocks, scraper placeholder dropped
+    assert_eq!(
+        metadata.actors,
+        vec!["Melody Marks".to_string(), "Yua Mikami".to_string()]
+    );
+}
+
+#[test]
+fn scanner_extracts_genres_and_drops_noise_tags() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("inbox").join("SSNI-452");
+    std::fs::create_dir_all(&source).unwrap();
+    let video = source.join("SSNI-452.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    std::fs::write(
+        source.join("SSNI-452.nfo"),
+        r#"
+        <movie>
+          <title>Sample</title>
+          <genre>H264</genre>
+          <genre>1080P</genre>
+          <genre>SSNI</genre>
+          <genre>性感内衣</genre>
+          <genre>巨乳</genre>
+          <genre>单体作品</genre>
+          <studio>S1 NO.1 STYLE</studio>
+          <director>前田文豪</director>
+        </movie>
+        "#,
+    )
+    .unwrap();
+
+    let items = Scanner::scan_sources(&[temp.path().join("inbox")]).unwrap();
+    let metadata = items[0].metadata.as_ref().unwrap();
+
+    // noise (codecs/resolution/code-prefix) dropped, real genres kept, order preserved
+    assert_eq!(
+        metadata.genres,
+        vec!["性感内衣".to_string(), "巨乳".to_string(), "单体作品".to_string()]
+    );
+    assert_eq!(metadata.studio.as_deref(), Some("S1 NO.1 STYLE"));
+    assert_eq!(metadata.director.as_deref(), Some("前田文豪"));
+}
+
+// ===== actor entity + alias model =====
+
+#[test]
+fn repository_creates_actor_entity_for_new_name_and_links_to_work() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let work_id = repo
+        .upsert_work(&Work {
+            id: None,
+            normalized_code: "ABP-525".to_string(),
+            title_zh: None,
+            original_title: None,
+            aliases: vec![],
+            summary: None,
+            cover_path: None,
+            tags: vec![],
+            lists: vec![],
+            rating: None,
+            watch_status: WatchStatus::Unwatched,
+            genres: vec![],
+            studio: None,
+            director: None,
+            release_date: None,
+        })
+        .unwrap();
+
+    repo.set_work_actors(work_id, &["Melody Marks".to_string()], "local-nfo")
+        .unwrap();
+
+    let actors = repo.list_work_actors(work_id).unwrap();
+    assert_eq!(actors.len(), 1);
+    assert_eq!(actors[0].primary_name, "Melody Marks");
+}
+
+#[test]
+fn repository_resolves_same_actor_name_to_single_entity_across_works() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let w1 = repo.upsert_work(&work_stub("ABP-525")).unwrap();
+    let w2 = repo.upsert_work(&work_stub("SSNI-452")).unwrap();
+
+    repo.set_work_actors(w1, &["三上悠亜".to_string()], "local-nfo").unwrap();
+    repo.set_work_actors(w2, &["三上悠亜".to_string()], "local-nfo").unwrap();
+
+    // same name -> one actor entity, linked from two works
+    let a1 = repo.list_work_actors(w1).unwrap();
+    let a2 = repo.list_work_actors(w2).unwrap();
+    assert_eq!(a1.len(), 1);
+    assert_eq!(a2.len(), 1);
+    assert_eq!(a1[0].id.unwrap(), a2[0].id.unwrap(), "same name must resolve to one actor entity");
+}
+
+#[test]
+fn repository_merges_two_actors_when_alias_added() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let w1 = repo.upsert_work(&work_stub("ABP-525")).unwrap();
+    let w2 = repo.upsert_work(&work_stub("SSNI-452")).unwrap();
+
+    // two different spellings -> two actor entities initially
+    repo.set_work_actors(w1, &["三上悠亜".to_string()], "local-nfo").unwrap();
+    repo.set_work_actors(w2, &["Yua Mikami".to_string()], "local-nfo").unwrap();
+    let a1 = repo.list_work_actors(w1).unwrap();
+    let a2 = repo.list_work_actors(w2).unwrap();
+    assert_ne!(a1[0].id.unwrap(), a2[0].id.unwrap());
+
+    // online enrichment later: mark them as the same person by aliasing
+    let merged_id = repo
+        .merge_actors(a1[0].id.unwrap(), a2[0].id.unwrap())
+        .unwrap();
+    let after1 = repo.list_work_actors(w1).unwrap();
+    let after2 = repo.list_work_actors(w2).unwrap();
+    // both works now point at the merged (surviving) entity
+    let surviving = if merged_id == a1[0].id.unwrap() { a1[0].id.unwrap() } else { a2[0].id.unwrap() };
+    assert_eq!(after1[0].id.unwrap(), surviving);
+    assert_eq!(after2[0].id.unwrap(), surviving);
+    // both names are retained as aliases of the survivor
+    let names = repo.list_actor_names(surviving).unwrap();
+    assert!(names.contains(&"三上悠亜".to_string()));
+    assert!(names.contains(&"Yua Mikami".to_string()));
+}
+
+#[test]
+fn repository_adds_alias_to_existing_actor_without_duplicate_entity() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let w1 = repo.upsert_work(&work_stub("ABP-525")).unwrap();
+    repo.set_work_actors(w1, &["三上悠亜".to_string()], "local-nfo").unwrap();
+    let actor = repo.list_work_actors(w1).unwrap().remove(0);
+
+    // later enrichment: the same actor is also known as Yua Mikami
+    repo.add_actor_alias(actor.id.unwrap(), "Yua Mikami", "online").unwrap();
+
+    // resolving the alias name now returns the SAME entity, not a new one
+    repo.set_work_actors(w1, &["Yua Mikami".to_string()], "online").unwrap();
+    let actors = repo.list_work_actors(w1).unwrap();
+    assert_eq!(actors.len(), 1, "alias must not create a duplicate actor");
+    assert_eq!(actors[0].id.unwrap(), actor.id.unwrap());
+    let names = repo.list_actor_names(actor.id.unwrap()).unwrap();
+    assert!(names.contains(&"三上悠亜".to_string()));
+    assert!(names.contains(&"Yua Mikami".to_string()));
+}
+
+fn work_stub(code: &str) -> Work {
+    Work {
+        id: None,
+        normalized_code: code.to_string(),
+        title_zh: None,
+        original_title: None,
+        aliases: vec![],
+        summary: None,
+        cover_path: None,
+        tags: vec![],
+        lists: vec![],
+        rating: None,
+        watch_status: WatchStatus::Unwatched,
+        genres: vec![],
+        studio: None,
+        director: None,
+        release_date: None,
+    }
 }

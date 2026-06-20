@@ -301,6 +301,11 @@ fn local_metadata_for(video_path: &Path, normalized_code: Option<&str>) -> Optio
             .or_else(|| extract_xml_tag(&nfo_text, "releasedate"))
             .or_else(|| extract_xml_tag(&nfo_text, "release_date")),
         confidence: 0.95,
+        actors: extract_actor_names(&nfo_text),
+        genres: clean_genres(&extract_all_xml_tags(&nfo_text, "genre")),
+        studio: extract_xml_tag(&nfo_text, "studio")
+            .or_else(|| extract_xml_tag(&nfo_text, "maker")),
+        director: extract_xml_tag(&nfo_text, "director"),
     })
 }
 
@@ -400,4 +405,73 @@ fn decode_xml_entities(value: &str) -> String {
         .replace("&amp;", "&")
         .replace("&quot;", "\"")
         .replace("&apos;", "'")
+}
+
+/// Extracts <actor><name>...</name> values from a Kodi-style NFO, dropping
+/// scraper placeholders such as 未知演员 / 未知男優 / empty names.
+fn extract_actor_names(nfo_text: &str) -> Vec<String> {
+    let block = Regex::new(r"(?is)<actor>(.*?)</actor>").unwrap();
+    let name = Regex::new(r"(?is)<name>(.*?)</name>").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for caps in block.captures_iter(nfo_text) {
+        if let Some(nm) = name.captures(caps.get(1).unwrap().as_str()) {
+            let value = decode_xml_entities(nm.get(1).unwrap().as_str().trim());
+            if value.is_empty() {
+                continue;
+            }
+            // drop scraper placeholders (unknown actress / actor)
+            let lower = value.to_lowercase();
+            if lower.contains("未知") || lower == "unknown" || lower == "unknown actor" {
+                continue;
+            }
+            if !out.contains(&value) {
+                out.push(value);
+            }
+        }
+    }
+    out
+}
+
+/// Returns every text value of <tag>...</tag> in document order.
+fn extract_all_xml_tags(text: &str, tag: &str) -> Vec<String> {
+    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>");
+    let re = match Regex::new(&pattern) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    re.captures_iter(text)
+        .filter_map(|c| {
+            let v = c.get(1)?.as_str().trim();
+            if v.is_empty() {
+                None
+            } else {
+                Some(decode_xml_entities(v))
+            }
+        })
+        .collect()
+}
+
+/// Filters codec / resolution / code-prefix noise out of scraped genres so
+/// only real categories survive. Real genres are CJK-heavy; pure ASCII tokens
+/// like H264 / 1080P / 4K / SSNI are scraper technical noise.
+fn clean_genres(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in raw {
+        let value = g.trim();
+        if value.is_empty() {
+            continue;
+        }
+        // drop pure-ASCII tokens (codecs, resolutions, label prefixes)
+        if value.is_ascii() {
+            continue;
+        }
+        // drop code-prefix patterns like "ABP", "SSNI-452"
+        if Regex::new(r"^[A-Z]{2,6}[-_]?d*$").unwrap().is_match(value) {
+            continue;
+        }
+        if !out.iter().any(|g| g == value) {
+            out.push(value.to_string());
+        }
+    }
+    out
 }

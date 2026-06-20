@@ -40,6 +40,10 @@ pub struct Work {
     pub lists: Vec<String>,
     pub rating: Option<u8>,
     pub watch_status: WatchStatus,
+    pub genres: Vec<String>,
+    pub studio: Option<String>,
+    pub director: Option<String>,
+    pub release_date: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +119,10 @@ pub struct ProviderMetadata {
     pub cover_url: Option<String>,
     pub release_date: Option<String>,
     pub confidence: f32,
+    pub actors: Vec<String>,
+    pub genres: Vec<String>,
+    pub studio: Option<String>,
+    pub director: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,4 +169,12 @@ pub struct WorkProfile {
     pub lists: Vec<String>,
     pub rating: Option<u8>,
     pub status: WatchStatus,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Actor {
+    pub id: Option<i64>,
+    pub primary_name: String,
+    pub avatar_path: Option<PathBuf>,
 }
