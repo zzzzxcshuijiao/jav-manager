@@ -11,8 +11,9 @@ import {
   Search,
   Settings,
   Star,
-  Tags,
-  TriangleAlert
+ Tags,
+  TriangleAlert,
+  Trash2
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
@@ -744,6 +745,52 @@ export function App() {
     }
   }
 
+  async function deleteSelectedFile(item: IngestItem) {
+    if (!item.id || !job) {
+      return;
+    }
+    if (item.decision !== "DuplicateCandidate" && item.decision !== "Ignored") {
+      setStatus("只有重复候选或已忽略的条目才能删除文件。");
+      return;
+    }
+    if (!window.confirm(`确定删除源文件吗？此操作不可撤销：\n${item.file_name}\n\n文件将从磁盘永久移除，条目标记为已忽略。`)) {
+      return;
+    }
+    try {
+      const updated = await api.deleteItems([item.id]);
+      await refreshPersistedState(job.id, item.id);
+      setStatus(
+        updated.length > 0
+          ? `${item.file_name} 源文件已删除，条目标记为已忽略。`
+          : `${item.file_name} 未删除，请确认它仍是重复候选或已忽略条目。`
+      );
+    } catch (error) {
+      setStatus(`删除文件失败：${String(error)}`);
+    }
+  }
+
+  async function deleteBatchFiles() {
+    if (!job || ignorableBatchItems.length === 0) {
+      setStatus("请先选择重复候选条目。");
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定删除 ${ignorableBatchItems.length} 个源文件吗？\n\n这些文件将从磁盘永久移除（不可撤销），条目标记为已忽略。`
+      )
+    ) {
+      return;
+    }
+    try {
+      const ids = ignorableBatchItems.map((item) => item.id as number);
+      const updated = await api.deleteItems(ids);
+      await refreshPersistedState(job.id, selectedItemId);
+      setStatus(`文件删除完成：${updated.length} 个源文件已移除并标记为已忽略。`);
+    } catch (error) {
+      setStatus(`批量删除文件失败：${String(error)}`);
+    }
+  }
+
   async function confirmBatchMatches() {
     if (!job || resolvableBatchItems.length === 0) {
       setStatus("请先选择已有番号的待确认条目；缺少番号的条目需要单独编辑。");
@@ -1108,6 +1155,9 @@ export function App() {
                 <button type="button" onClick={ignoreBatchDuplicates} disabled={ignorableBatchItems.length === 0}>
                   <ListChecks size={15} /> 忽略重复项
                 </button>
+                <button type="button" onClick={deleteBatchFiles} disabled={ignorableBatchItems.length === 0}>
+                  <Trash2 size={15} /> 删除源文件
+                </button>
                 <button type="button" onClick={confirmBatchMatches} disabled={resolvableBatchItems.length === 0}>
                   <CheckCircle2 size={15} /> 批量确认匹配
                 </button>
@@ -1250,6 +1300,13 @@ export function App() {
                     disabled={selectedItem.decision !== "DuplicateCandidate" || !selectedItem.review_reasons.includes("DuplicateFile")}
                   >
                     <ListChecks size={16} /> 忽略重复项
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteSelectedFile(selectedItem)}
+                    disabled={selectedItem.decision !== "DuplicateCandidate" && selectedItem.decision !== "Ignored"}
+                  >
+                    <Trash2 size={16} /> 删除源文件
                   </button>
                 </div>
                 <div className="merge-tools">

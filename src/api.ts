@@ -199,10 +199,13 @@ export const api = {
   revalidateMoveFailedItems(itemIds: number[]) {
     return command<IngestItem[]>("revalidate_move_failed_items", { itemIds });
   },
-  ignoreDuplicateItems(itemIds: number[]) {
-    return command<IngestItem[]>("ignore_duplicate_items", { itemIds });
+ ignoreDuplicateItems(itemIds: number[]) {
+   return command<IngestItem[]>("ignore_duplicate_items", { itemIds });
+ },
+  deleteItems(itemIds: number[]) {
+    return command<IngestItem[]>("delete_items", { itemIds });
   },
-  updateWorkProfile(workId: number, tags: string[], lists: string[], rating: number | null, status: WatchStatus) {
+ updateWorkProfile(workId: number, tags: string[], lists: string[], rating: number | null, status: WatchStatus) {
     return command<Work>("update_work_profile", { workId, tags, lists, rating, status });
   },
   openFileInSystem(path: string) {

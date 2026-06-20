@@ -1,4 +1,4 @@
-use crate::archive::ArchivePlanner;
+﻿use crate::archive::ArchivePlanner;
 use crate::domain::{
     ArchiveAction, ArchiveActionLog, ArchivePlan, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus, Work,
@@ -733,6 +733,37 @@ pub fn ignore_duplicate_items(
     Ok(CommandResult { data: updated })
 }
 
+
+#[tauri::command]
+pub fn delete_items(
+    item_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<IngestItem>>, String> {
+    let repo_guard = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let updated = repo
+        .delete_items(&item_ids)
+        .map_err(|error| error.to_string())?;
+
+    let mut items = state
+        .ingest_items
+        .lock()
+        .map_err(|error| error.to_string())?;
+    for updated_item in &updated {
+        if let Some(id) = updated_item.id {
+            if let Some(item) = items.iter_mut().find(|item| item.id == Some(id)) {
+                *item = updated_item.clone();
+            }
+        }
+    }
+    Ok(CommandResult { data: updated })
+}
+
 #[tauri::command]
 pub fn update_work_profile(
     work_id: i64,
@@ -839,6 +870,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             retry_metadata,
             revalidate_move_failed_items,
             ignore_duplicate_items,
+            delete_items,
             update_work_profile,
             open_file_in_system,
             open_path_in_file_manager,

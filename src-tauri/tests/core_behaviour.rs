@@ -23,6 +23,7 @@ use media_manager::thumbnail::{
 };
 use std::path::PathBuf;
 use std::process::Command;
+use std::fs;
 
 #[test]
 fn normalizes_codes_with_case_spacing_and_separators() {
@@ -1857,4 +1858,85 @@ fn ingest_item(code: &str, confidence: f32) -> IngestItem {
         codec: None,
         file_hash: Some("hash".to_string()),
     }
+}
+
+#[test]
+fn repository_deletes_duplicate_candidate_file_and_marks_item_ignored() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = temp.path().join("inbox");
+    fs::create_dir_all(&source_root).unwrap();
+    let file_path = source_root.join("theme_video.mp4");
+    fs::write(&file_path, b"fake ad video bytes").unwrap();
+    assert!(file_path.exists());
+
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let mut dup = ingest_item("ABP-525", 0.8);
+    dup.source_root = source_root.clone();
+    dup.path = file_path.clone();
+    dup.file_name = "theme_video.mp4".to_string();
+    dup.normalized_code = None;
+    dup.decision = IngestDecision::DuplicateCandidate;
+    dup.review_reasons = vec![ReviewReason::DuplicateFile, ReviewReason::MissingCode];
+    let job_id = repo
+        .create_ingest_job(&[source_root.clone()], &[dup])
+        .unwrap();
+    let item_id = repo.list_ingest_items(job_id).unwrap()[0].id.unwrap();
+
+    let updated = repo.delete_items(&[item_id]).unwrap();
+
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].decision, IngestDecision::Ignored);
+    assert!(!file_path.exists(), "source file should be deleted from disk");
+    let stored = repo.list_ingest_items(job_id).unwrap().remove(0);
+    assert_eq!(stored.decision, IngestDecision::Ignored);
+    let stored_job = repo.get_ingest_job(job_id).unwrap().unwrap();
+    assert_eq!(stored_job.review_count, 0);
+}
+
+#[test]
+fn repository_delete_refuses_non_deletable_decisions() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let mut auto = ingest_item("ABP-525", 0.95);
+    auto.decision = IngestDecision::AutoArchive;
+    auto.review_reasons = vec![];
+    let job_id = repo
+        .create_ingest_job(&[auto.source_root.clone()], &[auto])
+        .unwrap();
+    let item_id = repo.list_ingest_items(job_id).unwrap()[0].id.unwrap();
+
+    // AutoArchive items must never be silently deleted - they hold real media.
+    let result = repo.delete_items(&[item_id]);
+    assert!(result.is_err(), "deleting an AutoArchive item must be rejected");
+}
+
+#[test]
+fn repository_delete_skips_already_absent_file_but_marks_ignored() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = temp.path().join("inbox");
+    fs::create_dir_all(&source_root).unwrap();
+    let file_path = source_root.join("gone_trailer.mp4");
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+    let mut dup = ingest_item("ABP-525", 0.8);
+    dup.source_root = source_root.clone();
+    dup.path = file_path.clone();
+    dup.file_name = "gone_trailer.mp4".to_string();
+    dup.normalized_code = None;
+    dup.decision = IngestDecision::DuplicateCandidate;
+    dup.review_reasons = vec![ReviewReason::DuplicateFile];
+    let job_id = repo
+        .create_ingest_job(&[source_root.clone()], &[dup])
+        .unwrap();
+    let item_id = repo.list_ingest_items(job_id).unwrap()[0].id.unwrap();
+
+    let updated = repo.delete_items(&[item_id]).unwrap();
+
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].decision, IngestDecision::Ignored);
 }

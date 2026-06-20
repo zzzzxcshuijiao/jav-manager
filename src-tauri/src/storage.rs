@@ -1,4 +1,4 @@
-use crate::domain::{
+﻿use crate::domain::{
     ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, WatchStatus, Work,
 };
@@ -641,6 +641,55 @@ impl Repository {
             {
                 continue;
             }
+            item.decision = IngestDecision::Ignored;
+            item.review_reasons.clear();
+            self.update_ingest_item_decision(&item)?;
+            if let Some(job_id) = item.job_id {
+                job_ids.insert(job_id);
+            }
+            updated.push(self.get_ingest_item(*item_id)?);
+        }
+
+        for job_id in job_ids {
+            self.refresh_ingest_job_counts(job_id)?;
+        }
+        Ok(updated)
+    }
+
+    /// Physically deletes the source file of each item and marks the item Ignored.
+    ///
+    /// Safety contract: only DuplicateCandidate and Ignored items may be deleted
+    /// (scraper junk such as trailers / theme / ad clips), never AutoArchive,
+    /// NeedsReview or Failed items which may hold real media or unresolved work.
+    /// A missing file is tolerated (already gone) but the item is still marked Ignored.
+    pub fn delete_items(&self, item_ids: &[i64]) -> Result<Vec<IngestItem>> {
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut updated = Vec::new();
+        let mut job_ids = BTreeSet::new();
+        for item_id in item_ids {
+            let item = self.get_ingest_item(*item_id)?;
+            if !matches!(
+                item.decision,
+                IngestDecision::DuplicateCandidate | IngestDecision::Ignored
+            ) {
+                anyhow::bail!(
+                    "item {} is not deletable (decision {:?}); only duplicates and ignored items can be deleted",
+                    item_id,
+                    item.decision
+                );
+            }
+
+            // Best-effort physical delete; a missing file is not an error.
+            if item.path.exists() {
+                std::fs::remove_file(&item.path).map_err(|e| {
+                    anyhow::anyhow!("failed to delete {}: {}", item.path.display(), e)
+                })?;
+            }
+
+            let mut item = item;
             item.decision = IngestDecision::Ignored;
             item.review_reasons.clear();
             self.update_ingest_item_decision(&item)?;
