@@ -178,3 +178,23 @@ pub struct Actor {
     pub primary_name: String,
     pub avatar_path: Option<PathBuf>,
 }
+
+/// Whether a work's code follows the canonical studio pattern or is a
+/// non-standard identifier (free-form site codes, site-release slugs, etc.).
+/// Lets downstream code treat well-formed codes differently from ad-hoc ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodeKind {
+    Standard,
+    Nonstandard,
+}
+
+/// A single normalized rating from one source. Stored per-source so multiple
+/// scrapers (javdb, javlibrary, fanza, ...) can contribute ratings without
+/// overwriting each other before the caller merges them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkRating {
+    pub source: String,
+    pub value: f32,
+    pub max: i32,
+    pub votes: Option<i64>,
+}

@@ -9,6 +9,7 @@ pub mod provider;
 pub mod scanner;
 pub mod storage;
 pub mod thumbnail;
+pub mod nfo;
 
 pub fn run() {
     commands::build_app()
