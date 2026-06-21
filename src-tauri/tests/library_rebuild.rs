@@ -301,6 +301,22 @@ const SAMPLE_WITH_TAGS_B: &str = r#"<movie>
 </movie>"#;
 
 #[test]
+fn preview_rebuild_reports_counts_without_mutating_db() {
+    let sandbox = TestLibrary::new();
+    sandbox.write_nfo("A\\ABP-001\\ABP-001.nfo", SAMPLE_MINIMAL_AV);
+
+    let repo = sandbox.open_repo();
+    repo.migrate().unwrap();
+    let before = repo.list_works().unwrap();
+    let report = repo.preview_rebuild(&[sandbox.root().to_path_buf()]).unwrap();
+    let after = repo.list_works().unwrap();
+
+    assert_eq!(before, after, "preview must not persist any works");
+    assert_eq!(report.nfos_scanned, 1);
+    assert_eq!(report.works_created, 1);
+}
+
+#[test]
 fn query_apis_return_dimension_counts_and_and_filtered_works() {
     let sandbox = TestLibrary::new();
     sandbox.write_nfo("A\\ABP-001\\ABP-001.nfo", SAMPLE_WITH_TAGS_A);

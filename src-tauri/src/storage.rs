@@ -1971,6 +1971,24 @@ impl Repository {
     /// grouped by `<num>` and persisted as one work per group with one
     /// file_version per member. Any write failure rolls the entire rebuild
     /// back, leaving the library as it was before the call.
+    /// Dry-run the same scan + grouping as `rebuild_library` but without
+    /// touching the database: no transaction is opened, no tables cleared, no
+    /// rows written. The returned report describes exactly what a rebuild would
+    /// produce from `roots` (work counts, merges, extracted tags/sets/actors,
+    /// per-NFO parse errors), so the UI can show a preview before the user
+    /// commits to a destructive full rebuild.
+    pub fn preview_rebuild(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<crate::library_rebuild::RebuildReport> {
+        let scanned = crate::scanner::scan_library_roots(roots)?;
+        let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
+        Ok(crate::library_rebuild::summarize_grouped_inputs(
+            &grouped.groups,
+            &grouped.errors,
+        ))
+    }
+
     pub fn rebuild_library(
         &self,
         roots: &[PathBuf],

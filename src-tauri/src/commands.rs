@@ -887,6 +887,40 @@ pub fn list_work_detail(
 }
 
 #[tauri::command]
+pub fn preview_rebuild(
+    source_roots: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<crate::library_rebuild::RebuildReport>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let roots: Vec<PathBuf> = source_roots.into_iter().map(PathBuf::from).collect();
+    Ok(CommandResult {
+        data: repo
+            .preview_rebuild(&roots)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn rebuild_library_from_nfo(
+    source_roots: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<crate::library_rebuild::RebuildReport>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let roots: Vec<PathBuf> = source_roots.into_iter().map(PathBuf::from).collect();
+    Ok(CommandResult {
+        data: repo
+            .rebuild_library(&roots)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
 pub fn update_work_profile(
     work_id: i64,
     tags: Vec<String>,
@@ -990,6 +1024,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             list_work_actors_for_name,
             list_works_filtered,
             list_work_detail,
+            preview_rebuild,
+            rebuild_library_from_nfo,
             list_file_versions_for_work,
             list_work_actors,
             preview_archive_plan,
