@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
+  Actor,
   ArchiveActionLog,
   ArchivePlan,
   FileVersion,
@@ -103,6 +104,7 @@ export function App() {
   const [archiveLogs, setArchiveLogs] = useState<ArchiveActionLog[]>([]);
   const [works, setWorks] = useState<Work[]>([]);
   const [fileVersions, setFileVersions] = useState<FileVersion[]>([]);
+  const [workActors, setWorkActors] = useState<Actor[]>([]);
   const [filter, setFilter] = useState<DecisionFilter>("All");
   const [reviewReasonFilter, setReviewReasonFilter] = useState<ReviewReasonFilter>("All");
   const [codePresenceFilter, setCodePresenceFilter] = useState<CodePresenceFilter>("All");
@@ -124,6 +126,7 @@ export function App() {
   const [libraryStatusFilter, setLibraryStatusFilter] = useState<WorkStatusFilter>("All");
   const [selectedLibraryWorkId, setSelectedLibraryWorkId] = useState<number | null>(null);
   const [libraryFileVersions, setLibraryFileVersions] = useState<FileVersion[]>([]);
+  const [libraryWorkActors, setLibraryWorkActors] = useState<Actor[]>([]);
   const hasBackend = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
   const [status, setStatus] = useState("演示数据已载入；Tauri 桌面环境可以扫描真实目录并写入 SQLite。");
 
@@ -304,22 +307,27 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    async function loadFileVersions() {
-      if (!selectedWork?.id) {
-        setFileVersions([]);
-        return;
+   async function loadFileVersions() {
+  if (!selectedWork?.id) {
+     setFileVersions([]);
+     return;
+   }
+    try {
+      const [versions, actors] = await Promise.all([
+        api.listFileVersionsForWork(selectedWork.id),
+        api.listWorkActors(selectedWork.id),
+      ]);
+      if (!cancelled) {
+        setFileVersions(versions);
+        setWorkActors(actors);
       }
-      try {
-        const versions = await api.listFileVersionsForWork(selectedWork.id);
-        if (!cancelled) {
-          setFileVersions(versions);
-        }
-      } catch {
-        if (!cancelled) {
-          setFileVersions([]);
-        }
+    } catch {
+      if (!cancelled) {
+        setFileVersions([]);
+        setWorkActors([]);
       }
     }
+  }
     loadFileVersions();
     return () => {
       cancelled = true;

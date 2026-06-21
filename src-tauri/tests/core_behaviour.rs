@@ -2205,3 +2205,52 @@ fn work_stub(code: &str) -> Work {
         release_date: None,
     }
 }
+
+
+#[test]
+fn repository_auto_syncs_actors_when_resolving_ingest_item() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("inbox").join("ABP-525");
+    std::fs::create_dir_all(&source).unwrap();
+    let video = source.join("ABP-525.mp4");
+    std::fs::write(&video, b"video").unwrap();
+    std::fs::write(
+        source.join("ABP-525.nfo"),
+        r#"
+        <movie>
+          <title>Sample</title>
+          <actor><name>Melody Marks</name><type>Actor</type></actor>
+          <actor><name>Yua Mikami</name><type>Actor</type></actor>
+        </movie>
+        "#,
+    )
+    .unwrap();
+
+    let db_path = temp.path().join("library.sqlite");
+    let repo = Repository::open(&db_path).unwrap();
+    repo.migrate().unwrap();
+
+    // scan + decide yields an item whose metadata carries the actors
+    let items = Scanner::scan_sources(&[temp.path().join("inbox")]).unwrap();
+    let mut item = items.into_iter().next().unwrap();
+    item.decision = IngestDecision::NeedsReview;
+    item.normalized_code = Some("ABP-525".to_string());
+    let job_id = repo
+        .create_ingest_job(&[temp.path().join("inbox")], &[item.clone()])
+        .unwrap();
+    let item_id = repo.list_ingest_items(job_id).unwrap()[0].id.unwrap();
+
+    // resolving promotes the item into a work AND must sync actors
+    repo.resolve_ingest_item(item_id, Some("ABP-525".to_string())).unwrap();
+    let work_id = repo
+        .get_work_by_code("ABP-525")
+        .unwrap()
+        .unwrap()
+        .id
+        .unwrap();
+
+    let actors = repo.list_work_actors(work_id).unwrap();
+    let names: Vec<String> = actors.iter().map(|a| a.primary_name.clone()).collect();
+    assert!(names.contains(&"Melody Marks".to_string()), "actors = {:?}", names);
+    assert!(names.contains(&"Yua Mikami".to_string()), "actors = {:?}", names);
+}

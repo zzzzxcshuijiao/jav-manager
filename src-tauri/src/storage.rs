@@ -798,6 +798,13 @@ impl Repository {
             ],
         )?;
         self.upsert_file_version(work_id, &normalized_code, &item)?;
+        // Sync actors from local/online metadata into the actor link table.
+        if let Some(names) = item.metadata.as_ref().map(|m| m.actors.clone()) {
+            if !names.is_empty() {
+                let source = item.metadata.as_ref().map(|m| m.provider.as_str()).unwrap_or("local");
+                self.set_work_actors(work_id, &names, source)?;
+            }
+        }
         if let Some(job_id) = item.job_id {
             self.refresh_ingest_job_counts(job_id)?;
         }

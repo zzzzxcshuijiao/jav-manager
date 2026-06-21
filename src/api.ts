@@ -94,6 +94,12 @@ export interface FileVersion {
   file_hash?: string | null;
 }
 
+export interface Actor {
+  id?: number | null;
+  primary_name: string;
+  avatar_path?: string | null;
+}
+
 export interface ArchiveAction {
   item_id?: number | null;
   work_code: string;
@@ -174,6 +180,9 @@ export const api = {
   },
   listWorks() {
     return command<Work[]>("list_works");
+  },
+  listWorkActors(workId: number) {
+    return command<Actor[]>("list_work_actors", { workId });
   },
   listFileVersionsForWork(workId: number) {
     return command<FileVersion[]>("list_file_versions_for_work", { workId });

@@ -1,6 +1,6 @@
 ﻿use crate::archive::ArchivePlanner;
 use crate::domain::{
-    ArchiveAction, ArchiveActionLog, ArchivePlan, FileVersion, IngestDecision, IngestItem,
+    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus, Work,
 };
 use crate::identifier::normalize_code;
@@ -765,6 +765,28 @@ pub fn delete_items(
 }
 
 #[tauri::command]
+pub fn list_work_actors(
+    work_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<Actor>>, String> {
+    if work_id <= 0 {
+        return Err("work_id must be positive".to_string());
+    }
+    let repo_guard = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: repo
+            .list_work_actors(work_id)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
 pub fn update_work_profile(
     work_id: i64,
     tags: Vec<String>,
@@ -862,6 +884,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             list_ingest_items,
             list_works,
             list_file_versions_for_work,
+            list_work_actors,
             preview_archive_plan,
             execute_archive_plan,
             list_archive_action_logs,
