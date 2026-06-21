@@ -30,20 +30,42 @@ pub struct CodeConflictEvidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Work {
     pub id: Option<i64>,
-    pub normalized_code: String,
+    /// Canonical studio-pattern code (ABC-123) when one could be parsed; NULL
+    /// for non-standard identifiers that only carry a `source_code`.
+    pub normalized_code: Option<String>,
+    /// Free-form identifier exactly as captured from filename/NFO/scraper.
+    /// Non-standard works merge on this instead of normalized_code.
+    pub source_code: Option<String>,
+    pub code_kind: CodeKind,
     pub title_zh: Option<String>,
     pub original_title: Option<String>,
     pub aliases: Vec<String>,
     pub summary: Option<String>,
+    pub outline: Option<String>,
     pub cover_path: Option<PathBuf>,
+    pub poster_path: Option<PathBuf>,
+    pub thumb_path: Option<PathBuf>,
+    pub fanart_path: Option<PathBuf>,
     pub tags: Vec<String>,
+    pub sets: Vec<String>,
     pub lists: Vec<String>,
     pub rating: Option<u8>,
+    pub rating_value: Option<f32>,
+    pub rating_max: Option<i32>,
+    pub rating_votes: Option<i64>,
+    pub criticrating: Option<f32>,
     pub watch_status: WatchStatus,
     pub genres: Vec<String>,
     pub studio: Option<String>,
+    pub label: Option<String>,
     pub director: Option<String>,
     pub release_date: Option<String>,
+    pub runtime_minutes: Option<i64>,
+    pub year: Option<i32>,
+    pub website: Option<String>,
+    pub mpaa: Option<String>,
+    pub has_video: bool,
+    pub ratings: Vec<WorkRating>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,4 +220,47 @@ pub struct WorkRating {
     pub value: f32,
     pub max: i32,
     pub votes: Option<i64>,
+}
+
+/// A normalized tag shared across works. The `Work.tags` Vec<String> stays as
+/// the legacy JSON bag; this struct backs the normalized `tags`/`work_tags`
+/// relation tables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tag {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
+/// A named set/collection a work belongs to (NFO `<set>`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkSet {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
+/// A release label. Registry-only in this task (no work link yet).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Label {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
+/// A studio. Registry-only in this task (no work link yet); the scalar
+/// `works.studio` column remains the persisted value on Work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Studio {
+    pub id: Option<i64>,
+    pub name: String,
+}
+
+/// Full-fidelity read model for a single work: the scalar Work plus every
+/// normalized relation (actors, tags, sets, file versions, ratings).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkDetail {
+    pub work: Work,
+    pub actors: Vec<Actor>,
+    pub tags: Vec<Tag>,
+    pub sets: Vec<WorkSet>,
+    pub file_versions: Vec<FileVersion>,
+    pub ratings: Vec<WorkRating>,
 }

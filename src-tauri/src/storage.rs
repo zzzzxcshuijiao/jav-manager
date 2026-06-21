@@ -1,6 +1,7 @@
 ﻿use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, WatchStatus, Work,
+    CodeKind, Tag, WorkDetail, WorkRating, WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -28,7 +29,7 @@ impl Repository {
 
             CREATE TABLE IF NOT EXISTS works (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                normalized_code TEXT NOT NULL UNIQUE,
+                normalized_code TEXT UNIQUE,
                 title_zh TEXT,
                 original_title TEXT,
                 aliases_json TEXT NOT NULL DEFAULT '[]',
@@ -144,6 +145,55 @@ impl Repository {
                 actor_id INTEGER NOT NULL REFERENCES actors(id) ON DELETE CASCADE,
                 PRIMARY KEY (work_id, actor_id)
             );
+
+            -- Normalized NFO relation tables (Task 2). tags/sets/labels/studios
+            -- are registries with UNIQUE names; work_tags/work_sets link them
+            -- to works. work_ratings stores one row per (work, source) so
+            -- multiple scrapers can contribute ratings without overwriting.
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS work_tags (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (work_id, tag_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS sets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS work_sets (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                set_id INTEGER NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+                PRIMARY KEY (work_id, set_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS labels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS studios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS work_ratings (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                value REAL NOT NULL,
+                max INTEGER NOT NULL,
+                votes INTEGER,
+                PRIMARY KEY (work_id, source)
+            );
             ",
         )?;
         Ok(())
@@ -223,136 +273,339 @@ impl Repository {
         self.ensure_column("works", "studio", "TEXT")?;
         self.ensure_column("works", "director", "TEXT")?;
         self.ensure_column("works", "release_date", "TEXT")?;
+        // Rich NFO metadata (Task 2): full-fidelity scalar fields so a Work
+        // survives a round trip through the parser without loss. Defaults keep
+        // existing rows valid; non-standard works leave normalized_code NULL.
+        self.ensure_column("works", "source_code", "TEXT")?;
+        self.ensure_column("works", "code_kind", "TEXT NOT NULL DEFAULT 'standard'")?;
+        self.ensure_column("works", "outline", "TEXT")?;
+        self.ensure_column("works", "poster_path", "TEXT")?;
+        self.ensure_column("works", "thumb_path", "TEXT")?;
+        self.ensure_column("works", "fanart_path", "TEXT")?;
+        self.ensure_column("works", "rating_value", "REAL")?;
+        self.ensure_column("works", "rating_max", "INTEGER")?;
+        self.ensure_column("works", "rating_votes", "INTEGER")?;
+        self.ensure_column("works", "criticrating", "REAL")?;
+        self.ensure_column("works", "label", "TEXT")?;
+        self.ensure_column("works", "runtime_minutes", "INTEGER")?;
+        self.ensure_column("works", "year", "INTEGER")?;
+        self.ensure_column("works", "website", "TEXT")?;
+        self.ensure_column("works", "mpaa", "TEXT")?;
+        self.ensure_column("works", "has_video", "INTEGER NOT NULL DEFAULT 1")?;
         Ok(())
     }
 
     pub fn upsert_work(&self, work: &Work) -> Result<i64> {
-        self.conn.execute(
-            "
-            INSERT INTO works (
-                normalized_code,
-                title_zh,
-                original_title,
-                aliases_json,
-                summary,
-                cover_path,
-                tags_json,
-                lists_json,
-                rating,
-                watch_status
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            ON CONFLICT(normalized_code) DO UPDATE SET
-                title_zh = COALESCE(works.title_zh, excluded.title_zh),
-                original_title = COALESCE(works.original_title, excluded.original_title),
-                aliases_json = CASE
-                    WHEN works.aliases_json = '[]' THEN excluded.aliases_json
-                    ELSE works.aliases_json
-                END,
-                summary = COALESCE(works.summary, excluded.summary),
-                cover_path = COALESCE(works.cover_path, excluded.cover_path),
-                tags_json = works.tags_json,
-                lists_json = works.lists_json,
-                rating = works.rating,
-                watch_status = works.watch_status,
-                updated_at = CURRENT_TIMESTAMP
-            ",
-            params![
-                work.normalized_code,
-                work.title_zh,
-                work.original_title,
-                serde_json::to_string(&work.aliases)?,
-                work.summary,
-                work.cover_path.as_ref().map(|path| path.to_string_lossy().to_string()),
-                serde_json::to_string(&work.tags)?,
-                serde_json::to_string(&work.lists)?,
-                work.rating,
-                format!("{:?}", work.watch_status),
-            ],
-        )?;
+        let code_kind = match work.code_kind {
+            CodeKind::Standard => "standard",
+            CodeKind::Nonstandard => "nonstandard",
+        };
+        let aliases_json = serde_json::to_string(&work.aliases)?;
+        let tags_json = serde_json::to_string(&work.tags)?;
+        let lists_json = serde_json::to_string(&work.lists)?;
+        let genres_json = serde_json::to_string(&work.genres)?;
+        let cover = work.cover_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let poster = work.poster_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let thumb = work.thumb_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let fanart = work.fanart_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let watch_status = format!("{:?}", work.watch_status);
+        let has_video: i64 = if work.has_video { 1 } else { 0 };
 
-        let id = self.conn.query_row(
-            "SELECT id FROM works WHERE normalized_code = ?1",
-            params![work.normalized_code],
-            |row| row.get(0),
-        )?;
+        // Merge decision: a canonical studio code wins and uses the existing
+        // UNIQUE-index upsert. Non-standard works (normalized_code NULL) merge
+        // by source_code: look up first, UPDATE that row, or INSERT if new.
+        let id = if let Some(code) = &work.normalized_code {
+            self.conn.execute(
+                "
+                INSERT INTO works (
+                    normalized_code,
+                    source_code,
+                    code_kind,
+                    title_zh,
+                    original_title,
+                    aliases_json,
+                    summary,
+                    outline,
+                    cover_path,
+                    poster_path,
+                    thumb_path,
+                   fanart_path,
+                   tags_json,
+                   lists_json,
+                   rating,
+                   rating_value,
+                    rating_max,
+                    rating_votes,
+                    criticrating,
+                    watch_status,
+                    genres_json,
+                    studio,
+                    label,
+                    director,
+                    release_date,
+                    runtime_minutes,
+                    year,
+                    website,
+                    mpaa,
+                    has_video
+                )
+                VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
+                )
+                ON CONFLICT(normalized_code) DO UPDATE SET
+                    source_code = COALESCE(works.source_code, excluded.source_code),
+                    code_kind = excluded.code_kind,
+                    title_zh = COALESCE(works.title_zh, excluded.title_zh),
+                    original_title = COALESCE(works.original_title, excluded.original_title),
+                    aliases_json = CASE
+                        WHEN works.aliases_json = '[]' THEN excluded.aliases_json
+                        ELSE works.aliases_json
+                    END,
+                    summary = COALESCE(works.summary, excluded.summary),
+                    outline = COALESCE(works.outline, excluded.outline),
+                    cover_path = COALESCE(works.cover_path, excluded.cover_path),
+                    poster_path = COALESCE(works.poster_path, excluded.poster_path),
+                    thumb_path = COALESCE(works.thumb_path, excluded.thumb_path),
+                    fanart_path = COALESCE(works.fanart_path, excluded.fanart_path),
+                    tags_json = works.tags_json,
+                    lists_json = works.lists_json,
+                    rating = works.rating,
+                    rating_value = COALESCE(works.rating_value, excluded.rating_value),
+                    rating_max = COALESCE(works.rating_max, excluded.rating_max),
+                    rating_votes = COALESCE(works.rating_votes, excluded.rating_votes),
+                    criticrating = COALESCE(works.criticrating, excluded.criticrating),
+                    watch_status = works.watch_status,
+                    genres_json = works.genres_json,
+                    studio = COALESCE(works.studio, excluded.studio),
+                    label = COALESCE(works.label, excluded.label),
+                    director = COALESCE(works.director, excluded.director),
+                    release_date = COALESCE(works.release_date, excluded.release_date),
+                    runtime_minutes = COALESCE(works.runtime_minutes, excluded.runtime_minutes),
+                    year = COALESCE(works.year, excluded.year),
+                    website = COALESCE(works.website, excluded.website),
+                    mpaa = COALESCE(works.mpaa, excluded.mpaa),
+                    has_video = excluded.has_video,
+                    updated_at = CURRENT_TIMESTAMP
+                ",
+                params![
+                    code,
+                    work.source_code,
+                    code_kind,
+                    work.title_zh,
+                    work.original_title,
+                    aliases_json,
+                    work.summary,
+                    work.outline,
+                    cover,
+                    poster,
+                    thumb,
+                    fanart,
+                   tags_json,
+                   lists_json,
+                   work.rating,
+                    work.rating_value,
+                    work.rating_max,
+                    work.rating_votes,
+                    work.criticrating,
+                    watch_status,
+                    genres_json,
+                    work.studio,
+                    work.label,
+                    work.director,
+                    work.release_date,
+                    work.runtime_minutes,
+                    work.year,
+                    work.website,
+                    work.mpaa,
+                    has_video,
+                ],
+            )?;
+            self.conn.query_row(
+                "SELECT id FROM works WHERE normalized_code = ?1",
+                params![code],
+                |row| row.get(0),
+            )?
+        } else {
+            // Non-standard work: merge on source_code. Look up first so a
+            // re-ingest backfills missing fields onto the existing row instead
+            // of creating a duplicate.
+            let existing: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM works WHERE source_code = ?1",
+                    params![work.source_code],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing {
+                self.conn.execute(
+                    "
+                    UPDATE works SET
+                        source_code = COALESCE(works.source_code, ?2),
+                        title_zh = COALESCE(works.title_zh, ?3),
+                        original_title = COALESCE(works.original_title, ?4),
+                        aliases_json = CASE
+                            WHEN works.aliases_json = '[]' THEN ?5
+                            ELSE works.aliases_json
+                        END,
+                        summary = COALESCE(works.summary, ?6),
+                        outline = COALESCE(works.outline, ?7),
+                        cover_path = COALESCE(works.cover_path, ?8),
+                        poster_path = COALESCE(works.poster_path, ?9),
+                        thumb_path = COALESCE(works.thumb_path, ?10),
+                        fanart_path = COALESCE(works.fanart_path, ?11),
+                        rating_value = COALESCE(works.rating_value, ?12),
+                        rating_max = COALESCE(works.rating_max, ?13),
+                        rating_votes = COALESCE(works.rating_votes, ?14),
+                        criticrating = COALESCE(works.criticrating, ?15),
+                        genres_json = CASE
+                            WHEN works.genres_json = '[]' THEN ?16
+                            ELSE works.genres_json
+                        END,
+                        studio = COALESCE(works.studio, ?17),
+                        label = COALESCE(works.label, ?18),
+                        director = COALESCE(works.director, ?19),
+                        release_date = COALESCE(works.release_date, ?20),
+                        runtime_minutes = COALESCE(works.runtime_minutes, ?21),
+                        year = COALESCE(works.year, ?22),
+                        website = COALESCE(works.website, ?23),
+                        mpaa = COALESCE(works.mpaa, ?24),
+                        has_video = ?25,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?1
+                    ",
+                    params![
+                        id,
+                        work.source_code,
+                        work.title_zh,
+                        work.original_title,
+                        aliases_json,
+                        work.summary,
+                        work.outline,
+                        cover,
+                        poster,
+                        thumb,
+                        fanart,
+                        work.rating_value,
+                        work.rating_max,
+                        work.rating_votes,
+                        work.criticrating,
+                        genres_json,
+                        work.studio,
+                        work.label,
+                        work.director,
+                        work.release_date,
+                        work.runtime_minutes,
+                        work.year,
+                        work.website,
+                        work.mpaa,
+                        has_video,
+                    ],
+                )?;
+                id
+            } else {
+                self.conn.execute(
+                    "
+                    INSERT INTO works (
+                        normalized_code,
+                        source_code,
+                        code_kind,
+                        title_zh,
+                        original_title,
+                        aliases_json,
+                        summary,
+                        outline,
+                        cover_path,
+                        poster_path,
+                        thumb_path,
+                       fanart_path,
+                       tags_json,
+                       lists_json,
+                       rating,
+                       rating_value,
+                        rating_max,
+                        rating_votes,
+                        criticrating,
+                        watch_status,
+                        genres_json,
+                        studio,
+                        label,
+                        director,
+                        release_date,
+                        runtime_minutes,
+                        year,
+                        website,
+                        mpaa,
+                        has_video
+                   )
+                   VALUES (
+                       ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                       ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                        ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
+                   )
+                   ",
+                    params![
+                        work.normalized_code,
+                        work.source_code,
+                        code_kind,
+                        work.title_zh,
+                        work.original_title,
+                        aliases_json,
+                        work.summary,
+                        work.outline,
+                        cover,
+                        poster,
+                        thumb,
+                        fanart,
+                       tags_json,
+                       lists_json,
+                       work.rating,
+                        work.rating_value,
+                        work.rating_max,
+                        work.rating_votes,
+                        work.criticrating,
+                        watch_status,
+                        genres_json,
+                        work.studio,
+                        work.label,
+                        work.director,
+                        work.release_date,
+                        work.runtime_minutes,
+                        work.year,
+                        work.website,
+                        work.mpaa,
+                        has_video,
+                    ],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+        };
+
+        self.set_work_tags(id, &work.tags)?;
+        self.set_work_sets(id, &work.sets)?;
+        self.set_work_ratings(id, &work.ratings)?;
         Ok(id)
     }
 
     pub fn get_work_by_code(&self, normalized_code: &str) -> Result<Option<Work>> {
-        let mut statement = self.conn.prepare(
-            "
-            SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status,
-                   genres_json, studio, director, release_date
-            FROM works
-            WHERE normalized_code = ?1
-            ",
-        )?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {WORK_COLUMNS} FROM works WHERE normalized_code = ?1"
+        ))?;
         let mut rows = statement.query(params![normalized_code])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
 
-        let aliases_json: String = row.get(4)?;
-        let tags_json: String = row.get(7)?;
-        let lists_json: String = row.get(8)?;
-        let cover_path: Option<String> = row.get(6)?;
-        let status: String = row.get(10)?;
-
-        Ok(Some(Work {
-            id: row.get(0)?,
-            normalized_code: row.get(1)?,
-            title_zh: row.get(2)?,
-            original_title: row.get(3)?,
-            aliases: serde_json::from_str(&aliases_json)?,
-            summary: row.get(5)?,
-            cover_path: cover_path.map(Into::into),
-            tags: serde_json::from_str(&tags_json)?,
-            lists: serde_json::from_str(&lists_json)?,
-            rating: row.get::<_, Option<u8>>(9)?,
-            watch_status: parse_watch_status(&status),
-            genres: serde_json::from_str(&row.get::<_, String>(11)?)?,
-            studio: row.get(12)?,
-            director: row.get(13)?,
-            release_date: row.get(14)?,
-        }))
+        Ok(Some(work_from_row(&row)?))
     }
 
     pub fn list_works(&self) -> Result<Vec<Work>> {
-        let mut statement = self.conn.prepare(
-            "
-            SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status,
-                   genres_json, studio, director, release_date
-            FROM works
-            ORDER BY normalized_code ASC
-            ",
-        )?;
-        let rows = statement.query_map([], |row| {
-            let aliases_json: String = row.get(4)?;
-            let tags_json: String = row.get(7)?;
-            let lists_json: String = row.get(8)?;
-            let cover_path: Option<String> = row.get(6)?;
-            let status: String = row.get(10)?;
-            Ok(Work {
-                id: row.get(0)?,
-                normalized_code: row.get(1)?,
-                title_zh: row.get(2)?,
-                original_title: row.get(3)?,
-                aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
-                summary: row.get(5)?,
-                cover_path: cover_path.map(Into::into),
-                tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-                lists: serde_json::from_str(&lists_json).unwrap_or_default(),
-                rating: row.get::<_, Option<u8>>(9)?,
-                watch_status: parse_watch_status(&status),
-                genres: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
-                studio: row.get(12).ok().flatten(),
-                director: row.get(13).ok().flatten(),
-                release_date: row.get(14).ok().flatten(),
-            })
-        })?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {WORK_COLUMNS} FROM works ORDER BY normalized_code ASC"
+        ))?;
+        let rows = statement.query_map([], work_from_row)?;
 
         let mut works = Vec::new();
         for row in rows {
@@ -585,7 +838,13 @@ impl Repository {
         let work = self
             .get_work_by_id(work_id)?
             .ok_or_else(|| anyhow::anyhow!("work {work_id} was not found"))?;
-        self.promote_ingest_item_to_work(item_id, item, work_id, work.normalized_code, true)
+        // A work targeted by id always has a canonical code (ingest path), so
+        // this is the standard-merge branch; a non-standard work without one is
+        // not promotable here and surfaces as an explicit error.
+        let normalized_code = work
+            .normalized_code
+            .ok_or_else(|| anyhow::anyhow!("work {work_id} has no canonical code"))?;
+        self.promote_ingest_item_to_work(item_id, item, work_id, normalized_code, true)
     }
 
     fn auto_promote_auto_archive_items(&self, job_id: i64) -> Result<()> {
@@ -812,42 +1071,14 @@ impl Repository {
     }
 
     fn get_work_by_id(&self, work_id: i64) -> Result<Option<Work>> {
-        let mut statement = self.conn.prepare(
-            "
-            SELECT id, normalized_code, title_zh, original_title, aliases_json, summary,
-                   cover_path, tags_json, lists_json, rating, watch_status,
-                   genres_json, studio, director, release_date
-            FROM works
-            WHERE id = ?1
-            ",
-        )?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"
+        ))?;
         let mut rows = statement.query(params![work_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
-        let aliases_json: String = row.get(4)?;
-        let tags_json: String = row.get(7)?;
-        let lists_json: String = row.get(8)?;
-        let cover_path: Option<String> = row.get(6)?;
-        let status: String = row.get(10)?;
-
-        Ok(Some(Work {
-            id: row.get(0)?,
-            normalized_code: row.get(1)?,
-            title_zh: row.get(2)?,
-            original_title: row.get(3)?,
-            aliases: serde_json::from_str(&aliases_json)?,
-            summary: row.get(5)?,
-            cover_path: cover_path.map(Into::into),
-            tags: serde_json::from_str(&tags_json)?,
-            lists: serde_json::from_str(&lists_json)?,
-            rating: row.get::<_, Option<u8>>(9)?,
-            watch_status: parse_watch_status(&status),
-            genres: serde_json::from_str(&row.get::<_, String>(11)?)?,
-            studio: row.get(12)?,
-            director: row.get(13)?,
-            release_date: row.get(14)?,
-        }))
+        Ok(Some(work_from_row(&row)?))
     }
 
     pub fn list_file_versions_for_work(&self, work_id: i64) -> Result<Vec<FileVersion>> {
@@ -917,7 +1148,7 @@ impl Repository {
                 .get_file_version_by_id(*version_id)?
                 .ok_or_else(|| anyhow::anyhow!("file version {version_id} was not found"))?;
             let normalized_file_name = normalized_file_name(
-                &work.normalized_code,
+                work.normalized_code.as_deref().unwrap_or(""),
                 &version.original_path,
                 existing_target_count + offset + 1,
             );
@@ -1389,6 +1620,172 @@ impl Repository {
         Ok(primary_id)
     }
 
+    /// Replace a work's tags with the given names, preserving order. Each name
+    /// is upserted into the `tags` registry (UNIQUE) and linked via `work_tags`.
+    /// Order is encoded by re-inserting links in input order after the clear.
+    pub fn set_work_tags(&self, work_id: i64, names: &[String]) -> Result<()> {
+        self.conn.execute("DELETE FROM work_tags WHERE work_id = ?1", params![work_id])?;
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+                params![trimmed],
+            )?;
+            let tag_id: i64 = self.conn.query_row(
+                "SELECT id FROM tags WHERE name = ?1",
+                params![trimmed],
+                |row| row.get(0),
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO work_tags (work_id, tag_id) VALUES (?1, ?2)",
+                params![work_id, tag_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List a work's tags in link order (insertion order). Tags deleted from
+    /// the registry are skipped, so this never returns dangling names.
+    pub fn list_work_tags(&self, work_id: i64) -> Result<Vec<Tag>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name FROM tags t
+             JOIN work_tags w ON w.tag_id = t.id
+             WHERE w.work_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![work_id], |row| {
+            Ok(Tag {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    /// Replace a work's sets with the given names, preserving order. Mirrors
+    /// `set_work_tags` against the `sets`/`work_sets` tables.
+    pub fn set_work_sets(&self, work_id: i64, names: &[String]) -> Result<()> {
+        self.conn.execute("DELETE FROM work_sets WHERE work_id = ?1", params![work_id])?;
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT OR IGNORE INTO sets (name) VALUES (?1)",
+                params![trimmed],
+            )?;
+            let set_id: i64 = self.conn.query_row(
+                "SELECT id FROM sets WHERE name = ?1",
+                params![trimmed],
+                |row| row.get(0),
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO work_sets (work_id, set_id) VALUES (?1, ?2)",
+                params![work_id, set_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List a work's sets in link order.
+    pub fn list_work_sets(&self, work_id: i64) -> Result<Vec<WorkSet>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name FROM sets s
+             JOIN work_sets w ON w.set_id = s.id
+             WHERE w.work_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![work_id], |row| {
+            Ok(WorkSet {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    /// Replace a work's per-source ratings. Each (work, source) pair is one row;
+    /// callers merge across sources themselves.
+    pub fn set_work_ratings(&self, work_id: i64, ratings: &[WorkRating]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM work_ratings WHERE work_id = ?1", params![work_id])?;
+        for rating in ratings {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO work_ratings (work_id, source, value, max, votes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![work_id, rating.source, rating.value, rating.max, rating.votes],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List a work's per-source ratings.
+    pub fn list_work_ratings(&self, work_id: i64) -> Result<Vec<WorkRating>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source, value, max, votes FROM work_ratings WHERE work_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![work_id], |row| {
+            Ok(WorkRating {
+                source: row.get(0)?,
+                value: row.get(1)?,
+                max: row.get(2)?,
+                votes: row.get(3)?,
+            })
+        })?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    /// Full-fidelity read model for a work: scalar fields plus actors, tags,
+    /// sets, file versions, and per-source ratings. Returns None when the work
+    /// id does not resolve.
+    pub fn get_work_detail(&self, work_id: i64) -> Result<Option<WorkDetail>> {
+        let Some(work) = self.get_work_by_id(work_id)? else {
+            return Ok(None);
+        };
+        let actors = self.list_work_actors(work_id)?;
+        let tags = self.list_work_tags(work_id)?;
+        let sets = self.list_work_sets(work_id)?;
+        let file_versions = self.list_file_versions_for_work(work_id)?;
+        let ratings = self.list_work_ratings(work_id)?;
+        Ok(Some(WorkDetail {
+            work,
+            actors,
+            tags,
+            sets,
+            file_versions,
+            ratings,
+        }))
+    }
+
+    // --- migration-introspection helpers (test/diagnostic use) ---
+
+    /// Column names of a table, via PRAGMA table_info. Lets tests assert the
+    /// schema without poking SQL by hand.
+    pub fn debug_table_columns(&self, table: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let result: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(result?)
+    }
+
+    /// Whether a table exists in sqlite_master.
+    pub fn debug_table_exists(&self, table: &str) -> Result<bool> {
+        let exists: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
 }
 
 fn parse_watch_status(value: &str) -> WatchStatus {
@@ -1397,6 +1794,78 @@ fn parse_watch_status(value: &str) -> WatchStatus {
         "Favorite" => WatchStatus::Favorite,
         _ => WatchStatus::Unwatched,
     }
+}
+
+/// Decode a stored `code_kind` text value. Default column value is 'standard';
+/// any non-'nonstandard' value falls back to Standard so a malformed/legacy
+/// row never panics.
+fn parse_code_kind(value: &str) -> CodeKind {
+    if value.eq_ignore_ascii_case("nonstandard") {
+        CodeKind::Nonstandard
+    } else {
+        CodeKind::Standard
+    }
+}
+
+/// Canonical column list read for a `Work`. Every row-to-Work mapping site
+/// selects exactly this list and maps it through `work_from_row`, so adding a
+/// new persisted field is a one-place change instead of three parallel edits.
+const WORK_COLUMNS: &str = "id, normalized_code, source_code, code_kind, \
+    title_zh, original_title, aliases_json, summary, outline, \
+    cover_path, poster_path, thumb_path, fanart_path, \
+    tags_json, lists_json, rating, rating_value, rating_max, rating_votes, criticrating, \
+    watch_status, genres_json, studio, label, director, release_date, \
+    runtime_minutes, year, website, mpaa, has_video";
+
+/// Build a `Work` from a row whose selected columns match `WORK_COLUMNS`.
+/// Image-path columns come back as TEXT and are wrapped into `PathBuf`.
+fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
+    let aliases_json: String = row.get(6)?;
+    let tags_json: String = row.get(13)?;
+    let lists_json: String = row.get(14)?;
+    let cover: Option<String> = row.get(9)?;
+    let poster: Option<String> = row.get(10)?;
+    let thumb: Option<String> = row.get(11)?;
+    let fanart: Option<String> = row.get(12)?;
+    let status: String = row.get(20)?;
+    let genres_json: String = row.get(21)?;
+    let code_kind: String = row.get(3)?;
+    let has_video: i64 = row.get(30)?;
+    Ok(Work {
+        id: row.get(0)?,
+        normalized_code: row.get(1)?,
+        source_code: row.get(2)?,
+        code_kind: parse_code_kind(&code_kind),
+        title_zh: row.get(4)?,
+        original_title: row.get(5)?,
+        aliases: serde_json::from_str(&aliases_json).unwrap_or_default(),
+        summary: row.get(7)?,
+        outline: row.get(8)?,
+        cover_path: cover.map(PathBuf::from),
+        poster_path: poster.map(PathBuf::from),
+        thumb_path: thumb.map(PathBuf::from),
+        fanart_path: fanart.map(PathBuf::from),
+        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
+        sets: Vec::new(),
+        lists: serde_json::from_str(&lists_json).unwrap_or_default(),
+        rating: row.get::<_, Option<u8>>(15)?,
+        rating_value: row.get(16)?,
+        rating_max: row.get(17)?,
+        rating_votes: row.get(18)?,
+        criticrating: row.get(19)?,
+        watch_status: parse_watch_status(&status),
+        genres: serde_json::from_str(&genres_json).unwrap_or_default(),
+        studio: row.get(22)?,
+        label: row.get(23)?,
+        director: row.get(24)?,
+        release_date: row.get(25)?,
+        runtime_minutes: row.get(26)?,
+        year: row.get(27)?,
+        website: row.get(28)?,
+        mpaa: row.get(29)?,
+        has_video: has_video != 0,
+        ratings: Vec::new(),
+    })
 }
 
 fn parse_ingest_decision(value: &str) -> IngestDecision {
@@ -1460,7 +1929,11 @@ fn archive_action_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Arch
 fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
     Work {
         id: None,
-        normalized_code: normalized_code.to_string(),
+        normalized_code: Some(normalized_code.to_string()),
+        // Ingest-time works are always keyed on a canonical code; non-standard
+        // source_code flows in via the NFO/scraper path, not the ingest path.
+        source_code: None,
+        code_kind: CodeKind::Standard,
         title_zh: item.metadata.as_ref().and_then(|metadata| metadata.title_zh.clone()),
         original_title: item
             .metadata
@@ -1472,14 +1945,23 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
             .map(|metadata| metadata.aliases.clone())
             .unwrap_or_default(),
         summary: item.metadata.as_ref().and_then(|metadata| metadata.summary.clone()),
+        outline: None,
         cover_path: item
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.cover_url.clone())
             .map(PathBuf::from),
+        poster_path: None,
+        thumb_path: None,
+        fanart_path: None,
         tags: vec![],
+        sets: vec![],
         lists: vec![],
         rating: None,
+        rating_value: None,
+        rating_max: None,
+        rating_votes: None,
+        criticrating: None,
         watch_status: WatchStatus::Unwatched,
         genres: item
             .metadata
@@ -1487,6 +1969,7 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
             .map(|metadata| metadata.genres.clone())
             .unwrap_or_default(),
         studio: item.metadata.as_ref().and_then(|metadata| metadata.studio.clone()),
+        label: None,
         director: item
             .metadata
             .as_ref()
@@ -1495,6 +1978,12 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
             .metadata
             .as_ref()
             .and_then(|metadata| metadata.release_date.clone()),
+        runtime_minutes: None,
+        year: None,
+        website: None,
+        mpaa: None,
+        has_video: true,
+        ratings: vec![],
     }
 }
 

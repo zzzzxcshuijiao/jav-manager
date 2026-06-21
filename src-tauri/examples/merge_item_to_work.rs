@@ -1,4 +1,4 @@
-use media_manager::domain::{IngestDecision, IngestItem, WatchStatus, Work};
+use media_manager::domain::{CodeKind, IngestDecision, IngestItem, WatchStatus, Work};
 use media_manager::storage::Repository;
 use std::env;
 use std::path::PathBuf;
@@ -12,20 +12,38 @@ fn main() -> anyhow::Result<()> {
     repo.migrate()?;
     let work_id = repo.upsert_work(&Work {
         id: None,
-        normalized_code: "ABP-525".to_string(),
+        normalized_code: Some("ABP-525".to_string()),
+        source_code: None,
+        code_kind: CodeKind::Standard,
         title_zh: Some("已有作品".to_string()),
         original_title: None,
         aliases: vec![],
         summary: None,
+        outline: None,
         cover_path: None,
+        poster_path: None,
+        thumb_path: None,
+        fanart_path: None,
         tags: vec![],
+        sets: vec![],
         lists: vec![],
         rating: None,
+        rating_value: None,
+        rating_max: None,
+        rating_votes: None,
+        criticrating: None,
         watch_status: WatchStatus::Unwatched,
         genres: vec![],
         studio: None,
+        label: None,
         director: None,
         release_date: None,
+        runtime_minutes: None,
+        year: None,
+        website: None,
+        mpaa: None,
+        has_video: true,
+        ratings: vec![],
     })?;
     let items = vec![
         ingest_item("ABP-525", "ABP-525.mp4"),

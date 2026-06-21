@@ -4,7 +4,11 @@ use std::path::Path;
 pub fn attach_version_to_work(work: &Work, version: &mut FileVersion) {
     version.work_id = work.id;
     let extension = extension_with_dot(&version.original_path);
-    version.normalized_file_name = Some(format!("{}{}", work.normalized_code, extension));
+    version.normalized_file_name = Some(format!(
+        "{}{}",
+        work.normalized_code.as_deref().unwrap_or(""),
+        extension
+    ));
 }
 
 fn extension_with_dot(path: &Path) -> String {
