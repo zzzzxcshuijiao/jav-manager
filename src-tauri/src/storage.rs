@@ -1,7 +1,7 @@
-﻿use crate::domain::{
+use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, WatchStatus, Work,
-    CodeKind, Tag, WorkDetail, WorkRating, WorkSet,
+    CodeKind, DimensionCount, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -586,7 +586,28 @@ impl Repository {
         self.set_work_tags(id, &work.tags)?;
         self.set_work_sets(id, &work.sets)?;
         self.set_work_ratings(id, &work.ratings)?;
+        self.register_dimension_name("studios", &work.studio)?;
+        self.register_dimension_name("labels", &work.label)?;
         Ok(id)
+    }
+
+    /// Mirror the scalar `works.studio`/`works.label` text into the
+    /// `studios`/`labels` registries so the dimension listing and id-based
+    /// filters resolve to real, stable ids. No link table is needed: each work
+    /// carries exactly one studio and one label, so the registry name is the
+    /// join key. Blank names are skipped so empty studios never pollute the
+    /// dimension panel.
+    fn register_dimension_name(&self, table: &str, name: &Option<String>) -> Result<()> {
+        let Some(value) = name else { return Ok(()); };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            &format!("INSERT OR IGNORE INTO {table} (name) VALUES (?1)"),
+            params![trimmed],
+        )?;
+        Ok(())
     }
 
     pub fn get_work_by_code(&self, normalized_code: &str) -> Result<Option<Work>> {
@@ -1752,14 +1773,170 @@ impl Repository {
         let sets = self.list_work_sets(work_id)?;
         let file_versions = self.list_file_versions_for_work(work_id)?;
         let ratings = self.list_work_ratings(work_id)?;
-        Ok(Some(WorkDetail {
-            work,
-            actors,
-            tags,
-            sets,
-            file_versions,
-            ratings,
-        }))
+       Ok(Some(WorkDetail {
+           work,
+           actors,
+           tags,
+           sets,
+           file_versions,
+           ratings,
+       }))
+   }
+
+    // --- metadata dimension queries (Task 4) ---
+
+    /// Tag dimension: each tag paired with how many works carry it. Only tags
+    /// actually linked to at least one work appear, so the dimension panel
+    /// never lists orphaned registry rows.
+    pub fn list_tags(&self) -> Result<Vec<DimensionCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.id, t.name, COUNT(DISTINCT wt.work_id) AS work_count
+             FROM tags t
+             JOIN work_tags wt ON wt.tag_id = t.id
+             GROUP BY t.id, t.name
+             ORDER BY t.name",
+        )?;
+        let rows = stmt.query_map([], dimension_count_from_row)?;
+        collect_rows(rows)
+    }
+
+    /// Set dimension, same shape as tags.
+    pub fn list_sets(&self) -> Result<Vec<DimensionCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name, COUNT(DISTINCT ws.work_id) AS work_count
+             FROM sets s
+             JOIN work_sets ws ON ws.set_id = s.id
+             GROUP BY s.id, s.name
+             ORDER BY s.name",
+        )?;
+        let rows = stmt.query_map([], dimension_count_from_row)?;
+        collect_rows(rows)
+    }
+
+    /// Studio dimension. Studios have no link table; the registry name is
+    /// joined against `works.studio`, so the count reflects how many works name
+    /// each studio. Returns only studios that at least one work uses.
+    pub fn list_studios(&self) -> Result<Vec<DimensionCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.name, COUNT(*) AS work_count
+             FROM studios s
+             JOIN works w ON w.studio = s.name
+             GROUP BY s.id, s.name
+             ORDER BY s.name",
+        )?;
+        let rows = stmt.query_map([], dimension_count_from_row)?;
+        collect_rows(rows)
+    }
+
+    /// Label dimension, same shape as studios against `works.label`.
+    pub fn list_labels(&self) -> Result<Vec<DimensionCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.id, l.name, COUNT(*) AS work_count
+             FROM labels l
+             JOIN works w ON w.label = l.name
+             GROUP BY l.id, l.name
+             ORDER BY l.name",
+        )?;
+        let rows = stmt.query_map([], dimension_count_from_row)?;
+        collect_rows(rows)
+    }
+
+    /// Distinct actor entities reachable by the given name (primary or alias),
+    /// via the `actor_names` table. Used to resolve a typed-in or clicked actor
+    /// name to actor ids for filtering.
+    pub fn list_work_actors_for_name(&self, name: &str) -> Result<Vec<Actor>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT a.id, a.primary_name, a.avatar_path
+             FROM actors a
+             JOIN actor_names n ON n.actor_id = a.id
+             WHERE n.name = ?1
+             ORDER BY a.primary_name",
+        )?;
+        let rows = stmt.query_map(params![name], |row| {
+            Ok(Actor {
+                id: row.get(0)?,
+                primary_name: row.get(1)?,
+                avatar_path: row.get::<_, Option<String>>(2)?.map(PathBuf::from),
+            })
+        })?;
+        collect_rows(rows)
+    }
+
+    /// Works matching every populated dimension. For many-per-work dimensions
+    /// (tags, sets, actors) a work must link every requested id (intersection
+    /// via GROUP BY + HAVING COUNT = requested). For one-per-work dimensions
+    /// (studio, label) the work matches any requested id, since a single
+    /// `works.studio`/`works.label` column cannot equal two names at once.
+    /// `code_kinds` and `has_video` constrain the scalar columns. An
+    /// all-default filter matches every work, matching `list_works`.
+    pub fn list_works_filtered(&self, filters: WorkFilters) -> Result<Vec<Work>> {
+        let mut conditions: Vec<String> = Vec::new();
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+
+        for (link_table, link_col, ids) in [
+            ("work_tags", "tag_id", &filters.tag_ids),
+            ("work_sets", "set_id", &filters.set_ids),
+            ("work_actors", "actor_id", &filters.actor_ids),
+        ] {
+            if ids.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; ids.len()].join(", ");
+            let want = ids.len();
+            params_vec.extend(ids.iter().copied().map(rusqlite::types::Value::Integer));
+            conditions.push(format!(
+                "works.id IN (
+                    SELECT work_id FROM {link_table}
+                    WHERE {link_col} IN ({placeholders})
+                    GROUP BY work_id
+                    HAVING COUNT(DISTINCT {link_col}) = {want}
+                )"
+            ));
+        }
+
+        for (registry, ids) in
+            [("studios", &filters.studio_ids), ("labels", &filters.label_ids)]
+        {
+            if ids.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; ids.len()].join(", ");
+            let work_col = if registry == "studios" { "studio" } else { "label" };
+            params_vec.extend(ids.iter().copied().map(rusqlite::types::Value::Integer));
+            conditions.push(format!(
+                "works.{work_col} IN (SELECT name FROM {registry} WHERE id IN ({placeholders}))"
+            ));
+        }
+
+        if !filters.code_kinds.is_empty() {
+            let placeholders = vec!["?"; filters.code_kinds.len()].join(", ");
+            params_vec.extend(
+                filters
+                    .code_kinds
+                    .iter()
+                    .map(|kind| rusqlite::types::Value::Text(code_kind_str(kind).to_string())),
+            );
+            conditions.push(format!("works.code_kind IN ({placeholders})"));
+        }
+
+        if let Some(has_video) = filters.has_video {
+            params_vec.push(rusqlite::types::Value::Integer(if has_video { 1 } else { 0 }));
+            conditions.push("works.has_video = ?".to_string());
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+        let sql = format!("SELECT {WORK_COLUMNS} FROM works{where_clause} ORDER BY normalized_code ASC");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), work_from_row)?;
+        let mut works = Vec::new();
+        for row in rows {
+            works.push(row?);
+        }
+        Ok(works)
     }
 
     // --- migration-introspection helpers (test/diagnostic use) ---
@@ -1993,6 +2170,36 @@ fn parse_code_kind(value: &str) -> CodeKind {
     } else {
         CodeKind::Standard
     }
+}
+
+/// Inverse of `parse_code_kind`: the lowercase string persisted in
+/// `works.code_kind`. Used by `list_works_filtered` to bind `CodeKind` filter
+/// values against the stored column.
+fn code_kind_str(kind: &CodeKind) -> &'static str {
+    match kind {
+        CodeKind::Standard => "standard",
+        CodeKind::Nonstandard => "nonstandard",
+    }
+}
+
+/// Map a `(id, name, work_count)` row to a `DimensionCount`. Shared by every
+/// dimension listing query so the column-order convention lives in one place.
+fn dimension_count_from_row(row: &rusqlite::Row) -> rusqlite::Result<DimensionCount> {
+    Ok(DimensionCount {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        work_count: row.get(2)?,
+    })
+}
+
+/// Collect a `query_map` iterator into a `Vec`, surfacing the first row error.
+/// Keeps the listing methods free of repeated collect boilerplate.
+fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Canonical column list read for a `Work`. Every row-to-Work mapping site

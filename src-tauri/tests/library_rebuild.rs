@@ -3,6 +3,7 @@ use media_manager::storage::Repository;
 use tempfile::tempdir;
 use std::fs;
 use std::path::Path;
+use media_manager::domain::WorkFilters;
 
 #[test]
 fn migrate_adds_rich_work_columns_and_relation_tables() {
@@ -277,4 +278,77 @@ fn rebuild_rolls_back_when_relation_write_fails() {
     assert!(result.is_err());
     let after = repo.list_works().unwrap();
     assert_eq!(before, after);
+}
+
+// ===== Task 4: metadata dimension queries and AND-filtered works =====
+
+const SAMPLE_WITH_TAGS_A: &str = r#"<movie>
+  <num>ABP-001</num>
+  <title><![CDATA[ABP-001 測試標題]]></title>
+  <studio>Test Studio</studio>
+  <label>Test Label</label>
+  <tag>中文字幕</tag>
+  <tag>巨乳</tag>
+  <actor><name>某演員</name></actor>
+</movie>"#;
+
+const SAMPLE_WITH_TAGS_B: &str = r#"<movie>
+  <num>ABP-002</num>
+  <title><![CDATA[ABP-002 高畫質作品]]></title>
+  <studio>Other Studio</studio>
+  <tag>高畫質</tag>
+  <actor><name>另一位演員</name></actor>
+</movie>"#;
+
+#[test]
+fn query_apis_return_dimension_counts_and_and_filtered_works() {
+    let sandbox = TestLibrary::new();
+    sandbox.write_nfo("A\\ABP-001\\ABP-001.nfo", SAMPLE_WITH_TAGS_A);
+    sandbox.write_nfo("B\\ABP-002\\ABP-002.nfo", SAMPLE_WITH_TAGS_B);
+
+    let repo = sandbox.open_repo();
+    repo.migrate().unwrap();
+    repo.rebuild_library(&[sandbox.root().to_path_buf()]).unwrap();
+
+    let tags = repo.list_tags().unwrap();
+    let giant = tags
+        .iter()
+        .find(|tag| tag.name == "巨乳")
+        .expect("巨乳 tag should be present after rebuild");
+    assert!(giant.work_count >= 1);
+    assert!(giant.id > 0);
+
+    assert!(repo.list_studios().unwrap().iter().any(|d| d.name == "Test Studio"));
+    assert!(repo.list_labels().unwrap().iter().any(|d| d.name == "Test Label"));
+
+    let actors = repo.list_work_actors_for_name("某演員").unwrap();
+    let actor_id = actors[0].id.expect("actor should have an id");
+
+    let filtered = repo
+        .list_works_filtered(WorkFilters {
+            tag_ids: vec![giant.id],
+            actor_ids: vec![actor_id],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].source_code.as_deref(), Some("ABP-001"));
+
+    // has_video filter: both works have no video, so filtering for true is empty.
+    let with_video = repo
+        .list_works_filtered(WorkFilters {
+            has_video: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(with_video.is_empty());
+
+    // code_kind filter: both parsed as standard codes.
+    let standard = repo
+        .list_works_filtered(WorkFilters {
+            code_kinds: vec![CodeKind::Standard],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(standard.len(), 2);
 }

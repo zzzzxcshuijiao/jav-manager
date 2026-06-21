@@ -264,3 +264,29 @@ pub struct WorkDetail {
     pub file_versions: Vec<FileVersion>,
     pub ratings: Vec<WorkRating>,
 }
+
+/// Dimension browsing filter for `list_works_filtered`. Every populated Vec
+/// is AND-ed together: a work must match every requested tag, set, actor,
+/// studio, and label id, plus the code-kind and has-video toggles. Empty Vecs
+/// and a `None` has_video contribute no constraint, so an all-default filter
+/// returns every work.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkFilters {
+    pub tag_ids: Vec<i64>,
+    pub set_ids: Vec<i64>,
+    pub actor_ids: Vec<i64>,
+    pub studio_ids: Vec<i64>,
+    pub label_ids: Vec<i64>,
+    pub code_kinds: Vec<CodeKind>,
+    pub has_video: Option<bool>,
+}
+
+/// One row of a dimension listing (a tag, set, studio, or label) with the
+/// number of works attached to it. Powers the collapsible dimension panel and
+/// the AND-filter UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DimensionCount {
+    pub id: i64,
+    pub name: String,
+    pub work_count: i64,
+}

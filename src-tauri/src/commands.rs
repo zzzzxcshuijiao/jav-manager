@@ -1,7 +1,8 @@
-﻿use crate::archive::ArchivePlanner;
+use crate::archive::ArchivePlanner;
 use crate::domain::{
-    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, FileVersion, IngestDecision, IngestItem,
-    IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus, Work,
+    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, FileVersion,
+    IngestDecision, IngestItem, IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus,
+    Work, WorkDetail, WorkFilters,
 };
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
@@ -787,6 +788,105 @@ pub fn list_work_actors(
 }
 
 #[tauri::command]
+pub fn list_tags(state: State<'_, AppState>) -> Result<CommandResult<Vec<DimensionCount>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo.list_tags().map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_sets(state: State<'_, AppState>) -> Result<CommandResult<Vec<DimensionCount>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo.list_sets().map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_studios(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<DimensionCount>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo.list_studios().map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_labels(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<DimensionCount>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo.list_labels().map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_work_actors_for_name(
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<Actor>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo
+            .list_work_actors_for_name(&name)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_works_filtered(
+    filters: WorkFilters,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<Work>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: vec![] });
+    };
+    Ok(CommandResult {
+        data: repo
+            .list_works_filtered(filters)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn list_work_detail(
+    work_id: i64,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Option<WorkDetail>>, String> {
+    if work_id <= 0 {
+        return Err("work_id must be positive".to_string());
+    }
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Ok(CommandResult { data: None });
+    };
+    Ok(CommandResult {
+        data: repo
+            .get_work_detail(work_id)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
 pub fn update_work_profile(
     work_id: i64,
     tags: Vec<String>,
@@ -883,6 +983,13 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_latest_ingest_job,
             list_ingest_items,
             list_works,
+            list_tags,
+            list_sets,
+            list_studios,
+            list_labels,
+            list_work_actors_for_name,
+            list_works_filtered,
+            list_work_detail,
             list_file_versions_for_work,
             list_work_actors,
             preview_archive_plan,
