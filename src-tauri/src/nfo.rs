@@ -122,6 +122,9 @@ pub fn parse_runtime_minutes(value: &str) -> Option<i64> {
     // (c) Suffixed number: normalize traditional minute glyphs, then peel a
     // trailing 分 / min / minutes unit before parsing the digits.
     let normalized = trimmed.replace("分鐘", "分").replace("分鍾", "分");
+    // Also fold the simplified-Chinese 分钟 (U+949F) — the dominant modern
+    // scraper form — down to the bare 分 unit handled below.
+    let normalized = normalized.replace("分钟", "分");
     let lower = normalized.to_ascii_lowercase();
     let stripped = lower
         .trim_end_matches("分")
@@ -170,7 +173,8 @@ fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
 /// Pull a `name="value"` attribute out of an opening tag's source slice.
 /// Returns the attribute value with surrounding double quotes stripped.
 fn extract_attribute(opening_tag: &str, name: &str) -> Option<String> {
-    let pattern = format!(r#"(?i){name}\s*=\s*"([^"]*)""#);
+    // Leading \b so `name=` can't match inside `username=` / `maxlength=`.
+    let pattern = format!(r#"(?i)\b{name}\s*=\s*"([^"]*)""#);
     let caps = Regex::new(&pattern).ok()?.captures(opening_tag)?;
     Some(caps.get(1)?.as_str().to_string())
 }
@@ -325,6 +329,7 @@ mod tests {
         assert_eq!(parse_runtime_minutes("134"), Some(134));
         assert_eq!(parse_runtime_minutes("9分鍾"), Some(9));
         assert_eq!(parse_runtime_minutes("120 min"), Some(120));
+        assert_eq!(parse_runtime_minutes("9分钟"), Some(9));
         assert_eq!(parse_runtime_minutes("02:15:00"), Some(135));
         assert_eq!(parse_runtime_minutes("garbage"), None);
     }
@@ -370,5 +375,22 @@ mod tests {
             votes: Some(2),
             is_default: true,
         }]);
+    }
+
+    #[test]
+    fn parse_nfo_document_falls_back_to_legacy_top_level_rating() {
+        let xml = r#"<movie>
+  <num>ABC-123</num>
+  <rating max="10">8.2</rating>
+  <votes>150</votes>
+</movie>"#;
+        let parsed = parse_nfo_document(xml).expect("parse should succeed");
+        assert_eq!(parsed.rating_sources.len(), 1);
+        let r = &parsed.rating_sources[0];
+        assert_eq!(r.source, "nfo");
+        assert!((r.value - 8.2).abs() < f32::EPSILON);
+        assert_eq!(r.max, 10);
+        assert_eq!(r.votes, Some(150));
+        assert!(r.is_default);
     }
 }

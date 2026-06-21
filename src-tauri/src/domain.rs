@@ -183,6 +183,7 @@ pub struct Actor {
 /// non-standard identifier (free-form site codes, site-release slugs, etc.).
 /// Lets downstream code treat well-formed codes differently from ad-hoc ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CodeKind {
     Standard,
     Nonstandard,
