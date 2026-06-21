@@ -6,6 +6,7 @@ import type {
   IngestDecision,
   IngestItem,
   IngestItemFilters,
+  RebuildReport,
   ReviewReason,
   Work
 } from "./api";
@@ -400,4 +401,12 @@ function compactSearchText(value: string): string {
 export function formatWorkOption(work: Work): string {
   const title = work.title_zh ?? work.original_title ?? "";
   return title ? `#${work.id} · ${work.normalized_code} · ${title}` : `#${work.id} · ${work.normalized_code}`;
+}
+
+export type RebuildMode = "preview" | "rebuild";
+
+export function formatRebuildReport(mode: RebuildMode, report: RebuildReport): string {
+  const verb = mode === "preview" ? "预览完成" : "重建完成";
+  const errorPart = report.errors.length > 0 ? `，${report.errors.length} 个 NFO 解析失败` : "";
+  return `${verb}：${report.nfos_scanned} 个 NFO，${report.works_created} 个作品，${report.works_merged} 个多文件合并组${errorPart}。`;
 }

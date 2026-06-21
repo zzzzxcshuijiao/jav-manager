@@ -33,7 +33,8 @@ import {
   resolvableSelectedItems,
   selectedItemIds,
   viewItemsForMode,
-  workbenchViewTitle
+  workbenchViewTitle,
+  formatRebuildReport
 } from "./viewModel";
 
 describe("buildDashboardStats", () => {
@@ -471,6 +472,34 @@ describe("work profile form helpers", () => {
     expect(parseProfileRatingInput("")).toBeNull();
     expect(parseProfileRatingInput(" 9 ")).toBe(9);
     expect(parseProfileRatingInput("11")).toBeNull();
-    expect(parseProfileRatingInput("bad")).toBeNull();
+   expect(parseProfileRatingInput("bad")).toBeNull();
+ });
+});
+
+describe("formatRebuildReport", () => {
+  const baseReport = {
+    nfos_scanned: 526,
+    works_created: 480,
+    works_merged: 18,
+    tags_extracted: 900,
+    sets_extracted: 200,
+    actors_extracted: 320,
+    file_versions_created: 550,
+    errors: [],
+  };
+
+  it("formats a clean preview report for the settings status bar", () => {
+    const message = formatRebuildReport("preview", baseReport);
+    expect(message).toContain("预览完成");
+    expect(message).toContain("526");
+    expect(message).toContain("480");
+    expect(message).not.toContain("失败");
+  });
+
+  it("announces rebuild mode and surfaces parse failures when present", () => {
+    const report = { ...baseReport, errors: [{ nfo_path: "x.nfo", message: "boom" }] };
+    const message = formatRebuildReport("rebuild", report);
+    expect(message).toContain("重建完成");
+    expect(message).toContain("1 个 NFO 解析失败");
   });
 });

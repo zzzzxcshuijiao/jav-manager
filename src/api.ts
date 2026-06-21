@@ -138,6 +138,22 @@ export interface ThumbnailCacheSummary {
   total_bytes: number;
 }
 
+export interface RebuildError {
+  nfo_path: string;
+  message: string;
+}
+
+export interface RebuildReport {
+  nfos_scanned: number;
+  works_created: number;
+  works_merged: number;
+  tags_extracted: number;
+  sets_extracted: number;
+  actors_extracted: number;
+  file_versions_created: number;
+  errors: RebuildError[];
+}
+
 export interface CommandResult<T> {
   data: T;
 }
@@ -231,5 +247,11 @@ export const api = {
   },
   clearThumbnailCache() {
     return command<ThumbnailCacheSummary>("clear_thumbnail_cache");
+  },
+  previewRebuild(sourceRoots: string[]) {
+    return command<RebuildReport>("preview_rebuild", { sourceRoots });
+  },
+  rebuildLibraryFromNfo(sourceRoots: string[]) {
+    return command<RebuildReport>("rebuild_library_from_nfo", { sourceRoots });
   }
 };

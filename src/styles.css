@@ -498,6 +498,73 @@ h2 {
   cursor: pointer;
 }
 
+.rebuild-tools {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.rebuild-tools div {
+  display: grid;
+  gap: 3px;
+}
+
+.rebuild-tools strong {
+  color: #25313c;
+}
+
+.rebuild-tools span {
+  color: #61717d;
+  font-size: 13px;
+}
+
+.rebuild-tools button {
+  min-height: 36px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #eef3f6;
+  color: #25313c;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.rebuild-tools button.primary {
+  background: #1f6feb;
+  color: #fff;
+}
+
+.rebuild-report {
+  grid-column: 1 / -1;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e3e9ee;
+  border-radius: 6px;
+  background: #f7fafc;
+  display: grid;
+  gap: 6px;
+}
+
+.rebuild-report span {
+  color: #25313c;
+  font-size: 13px;
+}
+
+.rebuild-report ul {
+  margin: 0;
+  padding-left: 18px;
+  color: #b5483f;
+  font-size: 12px;
+}
+
+.rebuild-report li {
+  word-break: break-all;
+}
+
 .segmented {
   display: inline-flex;
   background: #eef3f6;

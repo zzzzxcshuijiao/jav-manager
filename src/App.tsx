@@ -26,6 +26,7 @@ import type {
   IngestJobSummary,
   ReviewReason,
   ThumbnailCacheSummary,
+  RebuildReport,
   WatchStatus,
   Work
 } from "./api";
@@ -51,6 +52,7 @@ import {
   formatDuration,
   formatFileVersionSummary,
   formatMediaInfo,
+  formatRebuildReport,
   formatWorkOption,
   ignorableDuplicateItems,
   mergeVersionTargetWorks,
@@ -119,7 +121,9 @@ export function App() {
   const [profileRating, setProfileRating] = useState("");
   const [profileStatus, setProfileStatus] = useState<WatchStatus>("Unwatched");
   const [thumbnailPath, setThumbnailPath] = useState<string | null>(null);
-  const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheSummary | null>(null);
+ const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheSummary | null>(null);
+  const [rebuildReport, setRebuildReport] = useState<RebuildReport | null>(null);
+  const [rebuildMode, setRebuildMode] = useState<"preview" | "rebuild">("preview");
   const [selectedFileVersionIds, setSelectedFileVersionIds] = useState<Set<number>>(() => new Set());
   const [mergeVersionTargetWorkId, setMergeVersionTargetWorkId] = useState("");
   const [libraryQuery, setLibraryQuery] = useState("");
@@ -531,6 +535,34 @@ export function App() {
       setStatus(`已清理缩略图缓存：${cleared.file_count} 个文件，释放 ${formatBytes(cleared.total_bytes)}。`);
     } catch (error) {
       setStatus(`清理缩略图缓存失败：${String(error)}`);
+    }
+  }
+
+  async function previewRebuild() {
+    try {
+      const report = await api.previewRebuild(parsedSourceRoots());
+      setRebuildMode("preview");
+      setRebuildReport(report);
+      setStatus(formatRebuildReport("preview", report));
+    } catch (error) {
+      setStatus(`预览重建失败：${String(error)}`);
+    }
+  }
+
+  async function runRebuildLibrary() {
+    if (!window.confirm("重建将清空现有作品数据并从 NFO 重新解析，确定继续？")) {
+      return;
+    }
+    try {
+      setRebuildReport(null);
+      setStatus("正在重建作品库，请稍候…");
+      const report = await api.rebuildLibraryFromNfo(parsedSourceRoots());
+      setRebuildMode("rebuild");
+      setRebuildReport(report);
+      setStatus(formatRebuildReport("rebuild", report));
+      await refreshWorks();
+    } catch (error) {
+      setStatus(`重建作品库失败：${String(error)}`);
     }
   }
 
@@ -1018,6 +1050,38 @@ export function App() {
                 <TriangleAlert size={16} /> 清理缓存
               </button>
             </div>
+            <div className="rebuild-tools">
+              <div>
+                <strong>作品库重建</strong>
+                <span>从来源目录的 NFO 重新解析作品、标签与演员等元数据。</span>
+              </div>
+              <button type="button" onClick={previewRebuild}>
+                <Search size={16} /> 预览重建
+              </button>
+              <button type="button" className="primary" onClick={runRebuildLibrary}>
+                <Database size={16} /> 执行重建
+              </button>
+            </div>
+            {rebuildReport ? (
+              <div className="rebuild-report">
+                <span>
+                  {rebuildMode === "preview" ? "预览" : "重建"}：{rebuildReport.nfos_scanned} 个 NFO
+                  · {rebuildReport.works_created} 个作品 · {rebuildReport.works_merged} 个合并组
+                  · 标签 {rebuildReport.tags_extracted} · 系列 {rebuildReport.sets_extracted}
+                  · 演员 {rebuildReport.actors_extracted} · 文件版本 {rebuildReport.file_versions_created}
+                  {rebuildReport.errors.length > 0
+                    ? ` · ${rebuildReport.errors.length} 个 NFO 解析失败`
+                    : ""}
+                </span>
+                {rebuildReport.errors.length > 0 ? (
+                  <ul>
+                    {rebuildReport.errors.slice(0, 5).map((error, index) => (
+                      <li key={index}>{error.nfo_path}：{error.message}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
           </section>
         ) : null}
 
