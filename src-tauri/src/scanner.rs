@@ -2,6 +2,7 @@ use crate::domain::{CodeConflictEvidence, IngestItem, ProviderMetadata};
 use crate::domain::{IngestDecision, ReviewReason};
 use crate::identifier::extract_code_from_text;
 use anyhow::Result;
+use crate::nfo::{parse_nfo_document, ParsedNfoDocument};
 use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -430,6 +431,124 @@ fn extract_actor_names(nfo_text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+// --- Library rebuild scan: NFO-first pairing of NFO + video files ---
+
+/// Result of an NFO-first library scan: every parseable `.nfo` under the roots
+/// with its paired video, plus (for Task 4+) the raw ingest items. The rebuild
+/// pipeline drives off `nfo_documents`; `items` stays empty for now.
+#[derive(Debug, Clone, Default)]
+pub struct ScannedLibrary {
+    pub items: Vec<IngestItem>,
+    pub nfo_documents: Vec<ScannedNfoDocument>,
+}
+
+/// One scanned NFO and the video paired to it. `source_root` records which
+/// root the NFO was found under so a rebuilt file_version can point back to
+/// its origin.
+#[derive(Debug, Clone)]
+pub struct ScannedNfoDocument {
+    pub nfo_path: PathBuf,
+    pub source_root: PathBuf,
+    pub document: ParsedNfoDocument,
+    pub paired_video: Option<PathBuf>,
+    pub paired_video_size: u64,
+}
+
+/// Walk every root, parse each `.nfo`, and pair it with a video in the same
+/// directory. A video is paired when its stem matches the NFO stem exactly,
+/// or matches after stripping a trailing `-cdN` / `_discN` segment so a
+/// multi-CD NFO still finds its base video. Unparseable NFOs are skipped; the
+/// rebuild report accounts for them as errors via grouping.
+pub fn scan_library_roots(roots: &[PathBuf]) -> Result<ScannedLibrary> {
+    let mut nfo_documents = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(root).follow_links(false) {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let path = entry.path();
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let is_nfo = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("nfo"))
+                .unwrap_or(false);
+            if !is_nfo {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(document) = parse_nfo_document(&text) else {
+                continue;
+            };
+            let (paired_video, paired_video_size) = pair_video_for_nfo(path);
+            nfo_documents.push(ScannedNfoDocument {
+                nfo_path: path.to_path_buf(),
+                source_root: root.clone(),
+                document,
+                paired_video,
+                paired_video_size,
+            });
+        }
+    }
+    Ok(ScannedLibrary {
+        items: Vec::new(),
+        nfo_documents,
+    })
+}
+
+/// Find the video paired to an NFO in its directory and return its byte size.
+/// Exact stem match wins; otherwise a trailing CD/disc/part segment is stripped
+/// so `IPX-607-cd2.nfo` can still resolve `IPX-607.mp4`.
+fn pair_video_for_nfo(nfo_path: &Path) -> (Option<PathBuf>, u64) {
+    let Some(parent) = nfo_path.parent() else {
+        return (None, 0);
+    };
+    let Some(stem) = nfo_path.file_stem().and_then(|s| s.to_str()) else {
+        return (None, 0);
+    };
+
+    if let Some(video) = find_video_by_stem(parent, stem) {
+        return video_with_size(video);
+    }
+    if let Some(base) = strip_cd_segment(stem) {
+        if let Some(video) = find_video_by_stem(parent, &base) {
+            return video_with_size(video);
+        }
+    }
+    (None, 0)
+}
+
+fn video_with_size(video: PathBuf) -> (Option<PathBuf>, u64) {
+    let size = fs::metadata(&video).map(|metadata| metadata.len()).unwrap_or(0);
+    (Some(video), size)
+}
+
+fn find_video_by_stem(parent: &Path, stem: &str) -> Option<PathBuf> {
+    for extension in ["mp4", "mkv", "avi", "mov", "wmv", "m4v", "ts", "flv", "webm"] {
+        let candidate = parent.join(format!("{stem}.{extension}"));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Strip a trailing `-cdN` / `_cdN` / `discN` / `partN` segment (case
+/// insensitive) from a stem, returning the owned base stem when something was
+/// actually removed.
+fn strip_cd_segment(stem: &str) -> Option<String> {
+    let re = Regex::new(r"(?i)[-_]?(cd|disc|part)[-_]?\d+$").ok()?;
+    let stripped = re.replace(stem, "");
+    (stripped.len() < stem.len() && !stripped.is_empty()).then(|| stripped.into_owned())
 }
 
 /// Returns every text value of <tag>...</tag> in document order.

@@ -42,18 +42,21 @@ pub struct ParsedNfoDocument {
     pub runtime_minutes: Option<i64>,
     pub year: Option<i32>,
     pub sets: Vec<String>,
-    pub studio: Option<String>,
-    pub label: Option<String>,
-    pub tags: Vec<String>,
-    pub genres: Vec<String>,
-    pub release_date: Option<String>,
+   pub studio: Option<String>,
+   pub label: Option<String>,
+    pub director: Option<String>,
+   pub tags: Vec<String>,
+   pub genres: Vec<String>,
+    pub actors: Vec<String>,
+   pub release_date: Option<String>,
     pub cover_url: Option<String>,
     pub poster_path: Option<String>,
     pub thumb_path: Option<String>,
     pub fanart_path: Option<String>,
     pub website: Option<String>,
-    pub mpaa: Option<String>,
-    pub rating_sources: Vec<ParsedRatingSource>,
+   pub mpaa: Option<String>,
+    pub criticrating: Option<f32>,
+   pub rating_sources: Vec<ParsedRatingSource>,
 }
 
 /// Trims surrounding whitespace, then strips a matching `<![CDATA[` ... `]]>`
@@ -179,6 +182,32 @@ fn extract_attribute(opening_tag: &str, name: &str) -> Option<String> {
     Some(caps.get(1)?.as_str().to_string())
 }
 
+/// Collect `<actor><name>...</name></actor>` values in document order,
+/// dropping scraper placeholders (empty / 未知 / unknown). Order-preserving
+/// dedup so a repeated actor name across CD NFOs never yields duplicates.
+fn extract_actors(text: &str) -> Vec<String> {
+    let block = Regex::new(r"(?is)<actor>(.*?)</actor>").unwrap();
+    let name = Regex::new(r"(?is)<name>(.*?)</name>").unwrap();
+    let mut out: Vec<String> = Vec::new();
+    for caps in block.captures_iter(text) {
+        let Some(nm) = name.captures(caps.get(1).unwrap().as_str()) else {
+            continue;
+        };
+        let value = normalize_text(nm.get(1).unwrap().as_str());
+        if value.is_empty() {
+            continue;
+        }
+        let lower = value.to_lowercase();
+        if lower.contains("未知") || lower == "unknown" || lower == "unknown actor" {
+            continue;
+        }
+        if !out.contains(&value) {
+            out.push(value);
+        }
+    }
+    out
+}
+
 /// Collect all `<set>` values. A set may be bare text (`<set>Name</set>`) or
 /// contain a `<name>` child (`<set><name>Name</name></set>`); prefer the
 /// `<name>` child when present. Order-preserving dedup.
@@ -296,11 +325,13 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
         .and_then(parse_runtime_minutes);
     doc.year = extract_tag(xml, "year").and_then(|y| y.trim().parse::<i32>().ok());
     doc.sets = extract_sets(xml);
-    doc.studio = extract_tag(xml, "studio").or_else(|| extract_tag(xml, "maker"));
-    doc.label = extract_tag(xml, "label").or_else(|| extract_tag(xml, "publisher"));
-    doc.tags = extract_all_tags(xml, "tag");
-    doc.genres = extract_all_tags(xml, "genre");
-    doc.release_date = extract_tag(xml, "premiered")
+   doc.studio = extract_tag(xml, "studio").or_else(|| extract_tag(xml, "maker"));
+   doc.label = extract_tag(xml, "label").or_else(|| extract_tag(xml, "publisher"));
+    doc.director = extract_tag(xml, "director");
+   doc.tags = extract_all_tags(xml, "tag");
+   doc.genres = extract_all_tags(xml, "genre");
+    doc.actors = extract_actors(xml);
+   doc.release_date = extract_tag(xml, "premiered")
         .or_else(|| extract_tag(xml, "releasedate"))
         .or_else(|| extract_tag(xml, "release"));
     doc.cover_url = extract_tag(xml, "cover");
@@ -308,8 +339,9 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
     doc.thumb_path = extract_tag(xml, "thumb");
     doc.fanart_path = extract_tag(xml, "fanart");
     doc.website = extract_tag(xml, "website");
-    doc.mpaa = extract_tag(xml, "mpaa");
-    doc.rating_sources = parse_rating_sources(xml);
+   doc.mpaa = extract_tag(xml, "mpaa");
+    doc.criticrating = extract_tag(xml, "criticrating").and_then(|v| v.trim().parse::<f32>().ok());
+   doc.rating_sources = parse_rating_sources(xml);
 
     Ok(doc)
 }

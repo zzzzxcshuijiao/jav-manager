@@ -11,6 +11,8 @@ pub mod storage;
 pub mod thumbnail;
 pub mod nfo;
 
+pub mod library_rebuild;
+
 pub fn run() {
     commands::build_app()
         .run(tauri::generate_context!())

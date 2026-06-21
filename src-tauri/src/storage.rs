@@ -1781,9 +1781,197 @@ impl Repository {
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
                 params![table],
                 |row| row.get(0),
-            )
-            .optional()?;
-        Ok(exists.is_some())
+           )
+           .optional()?;
+       Ok(exists.is_some())
+   }
+
+    // --- NFO rebuild: full-fidelity re-ingest from NFO files ---
+
+    /// Rebuild the whole library from NFO files under `roots` inside a single
+    /// transaction. Every work/file/relation table is cleared first (app
+    /// settings and archive logs are preserved), then the scanned NFOs are
+    /// grouped by `<num>` and persisted as one work per group with one
+    /// file_version per member. Any write failure rolls the entire rebuild
+    /// back, leaving the library as it was before the call.
+    pub fn rebuild_library(
+        &self,
+        roots: &[PathBuf],
+    ) -> Result<crate::library_rebuild::RebuildReport> {
+        // unchecked_transaction borrows the connection by shared reference, so
+        // all the &self repository methods below run inside this transaction
+        // and are undone together if any one of them errors.
+        let tx = self.conn.unchecked_transaction()?;
+        self.clear_library_tables()?;
+        let scanned = crate::scanner::scan_library_roots(roots)?;
+        let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
+        self.persist_grouped_rebuild(&grouped)?;
+        tx.commit()?;
+        Ok(crate::library_rebuild::summarize_grouped_inputs(
+            &grouped.groups,
+            &grouped.errors,
+        ))
+    }
+
+    /// Delete every work, file version, and metadata-relation row so the
+    /// rebuild starts from a clean slate. `app_settings` and
+    /// `archive_action_logs` are deliberately untouched: config and history
+    /// survive a rebuild. Children are cleared before their registries so the
+    /// foreign-key graph (PRAGMA foreign_keys = ON) never trips.
+    fn clear_library_tables(&self) -> Result<()> {
+        for table in [
+            "work_tags",
+            "work_sets",
+            "work_ratings",
+            "work_actors",
+            "file_versions",
+            "ingest_items",
+            "ingest_jobs",
+            "tags",
+            "sets",
+            "labels",
+            "studios",
+            "actor_names",
+            "actors",
+            "works",
+        ] {
+            self.conn.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        Ok(())
+    }
+
+    /// Persist the grouped NFO scan: one work per group (merged on
+    /// source_code, with standard/nonstandard classification), one
+    /// file_version per member, plus actors/tags/sets/ratings from the main
+    /// NFO. Hard-errors (`?`) so the surrounding transaction rolls back on any
+    /// write failure.
+    fn persist_grouped_rebuild(
+        &self,
+        grouped: &crate::library_rebuild::GroupedScan,
+    ) -> Result<()> {
+        for group in &grouped.groups {
+            let main = crate::library_rebuild::select_main_nfo(&group.members);
+            let doc = &main.document;
+
+            // A well-formed studio code is normalized; anything else keeps its
+            // raw source_code and is classified Nonstandard.
+            let (normalized_code, code_kind) = match normalize_code(&group.source_code) {
+                Some(code) => (Some(code), CodeKind::Standard),
+                None => (None, CodeKind::Nonstandard),
+            };
+
+            // Scalar rating columns mirror the default (or first) rating
+            // source; the full per-source list is preserved in work_ratings.
+            let default_rating = doc
+                .rating_sources
+                .iter()
+                .find(|rating| rating.is_default)
+                .or_else(|| doc.rating_sources.first());
+            let ratings: Vec<WorkRating> = doc
+                .rating_sources
+                .iter()
+                .map(|rating| WorkRating {
+                    source: rating.source.clone(),
+                    value: rating.value,
+                    max: rating.max,
+                    votes: rating.votes,
+                })
+                .collect();
+
+            // Unified tag bag: NFO <tag> union <genre>, de-duplicated in order.
+            let mut tags: Vec<String> = Vec::new();
+            for tag in doc.tags.iter().chain(doc.genres.iter()) {
+                let trimmed = tag.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if !tags.iter().any(|existing| existing == trimmed) {
+                    tags.push(trimmed.to_string());
+                }
+            }
+
+            let has_video = group.members.iter().any(|member| member.paired_video.is_some());
+
+            let work = Work {
+                id: None,
+                normalized_code,
+                source_code: Some(group.source_code.clone()),
+                code_kind,
+                title_zh: doc.title.clone(),
+                original_title: doc.original_title.clone(),
+                aliases: Vec::new(),
+                summary: doc.summary.clone(),
+                outline: doc.outline.clone(),
+                cover_path: doc.cover_url.as_ref().map(PathBuf::from),
+                poster_path: doc.poster_path.as_ref().map(PathBuf::from),
+                thumb_path: doc.thumb_path.as_ref().map(PathBuf::from),
+                fanart_path: doc.fanart_path.as_ref().map(PathBuf::from),
+                tags,
+                sets: doc.sets.clone(),
+                lists: Vec::new(),
+                rating: None,
+                rating_value: default_rating.map(|rating| rating.value),
+                rating_max: default_rating.map(|rating| rating.max),
+                rating_votes: default_rating.and_then(|rating| rating.votes),
+                criticrating: doc.criticrating,
+                watch_status: WatchStatus::Unwatched,
+                genres: doc.genres.clone(),
+                studio: doc.studio.clone(),
+                label: doc.label.clone(),
+                director: doc.director.clone(),
+                release_date: doc.release_date.clone(),
+                runtime_minutes: doc.runtime_minutes,
+                year: doc.year,
+                website: doc.website.clone(),
+                mpaa: doc.mpaa.clone(),
+                has_video,
+                ratings,
+            };
+
+            let work_id = self.upsert_work(&work)?;
+            // Actors are not written by upsert_work; link them from the NFO.
+            self.set_work_actors(work_id, &doc.actors, "nfo")?;
+
+            // One file_version per member: the paired video when present,
+            // otherwise the NFO itself as a no-video placeholder (size 0).
+            for member in &group.members {
+                let (path, file_name, size_bytes) = match &member.paired_video {
+                    Some(video) => {
+                        let size =
+                            std::fs::metadata(video).map(|metadata| metadata.len()).unwrap_or(
+                                member.paired_video_size,
+                            );
+                        let name = video
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (video.clone(), name, size)
+                    }
+                    None => (member.nfo_path.clone(), member.nfo_file_name.clone(), 0),
+                };
+                self.conn.execute(
+                    "INSERT INTO file_versions
+                        (work_id, source_root, original_path, original_file_name, size_bytes)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        work_id,
+                        member.source_root.to_string_lossy(),
+                        path.to_string_lossy(),
+                        file_name,
+                        size_bytes as i64,
+                    ],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop a table by name. Diagnostic/test helper used to simulate a write
+    /// failure so the rebuild's transaction rollback can be exercised.
+    pub fn debug_drop_table(&self, table: &str) -> Result<()> {
+        self.conn.execute(&format!("DROP TABLE {table}"), [])?;
+        Ok(())
     }
 
 }
