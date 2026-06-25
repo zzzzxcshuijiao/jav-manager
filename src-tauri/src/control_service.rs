@@ -67,7 +67,10 @@ impl std::fmt::Debug for ControlServiceRuntime {
             .debug_struct("ControlServiceRuntime")
             .field("host", &self.config.host)
             .field("port", &self.config.port)
-            .field("metadata_provider_enabled", &self.config.metadata_provider_enabled)
+            .field(
+                "metadata_provider_enabled",
+                &self.config.metadata_provider_enabled,
+            )
             .field("daemon", &self.daemon)
             .finish_non_exhaustive()
     }
@@ -147,6 +150,7 @@ impl ControlServiceRuntime {
         json_response(404, json!({ "ok": false, "error": "not found" }))
     }
 
+    /// Validate Stage 5A API authentication and local frontend Origin rules.
     fn authorize(&self, request: &HttpRequest) -> std::result::Result<(), String> {
         if !origin_allowed(request.header("origin")) {
             return Err(json_response(
@@ -167,9 +171,17 @@ impl ControlServiceRuntime {
         }
     }
 
+    /// Convert a `/v1/*` route result into the shared JSON HTTP envelope.
     fn route_v1(&mut self, request: &HttpRequest) -> String {
         match self.route_v1_result(request) {
             Ok(data) => ok_json(data),
+            Err(error) if error.to_string().starts_with("bad request: ") => json_response(
+                400,
+                json!({
+                    "ok": false,
+                    "error": error.to_string().trim_start_matches("bad request: ")
+                }),
+            ),
             Err(error) if error.to_string() == "not found" => {
                 json_response(404, json!({ "ok": false, "error": "not found" }))
             }
@@ -177,6 +189,7 @@ impl ControlServiceRuntime {
         }
     }
 
+    /// Dispatch authenticated `/v1/*` requests into daemon control helpers.
     fn route_v1_result(&mut self, request: &HttpRequest) -> Result<serde_json::Value> {
         match (request.method.as_str(), request.path.as_str()) {
             ("GET", "/v1/status") => self.status_json(),
@@ -200,12 +213,10 @@ impl ControlServiceRuntime {
             ("GET", "/v1/exceptions") => {
                 Ok(serde_json::to_value(list_exception_entries(&self.repo)?)?)
             }
-            ("GET", "/v1/runs") => {
-                Ok(serde_json::to_value(list_recent_pipeline_runs(&self.repo)?)?)
-            }
-            ("POST", path)
-                if path.starts_with("/v1/exceptions/") && path.ends_with("/resolve") =>
-            {
+            ("GET", "/v1/runs") => Ok(serde_json::to_value(list_recent_pipeline_runs(
+                &self.repo,
+            )?)?),
+            ("POST", path) if path.starts_with("/v1/exceptions/") && path.ends_with("/resolve") => {
                 let id = parse_exception_resolve_path(path)?;
                 let exception = resolve_exception_entry(&self.repo, id, ExceptionStatus::Resolved)?;
                 Ok(serde_json::to_value(exception)?)
@@ -214,6 +225,7 @@ impl ControlServiceRuntime {
         }
     }
 
+    /// Build the current daemon status as a JSON value for REST responses.
     fn status_json(&self) -> Result<serde_json::Value> {
         let status: DaemonControlStatus = build_daemon_status(
             &self.repo,
@@ -262,6 +274,7 @@ pub fn generate_token() -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Run the single-threaded accept loop until shutdown is requested.
 fn run_listener(
     listener: TcpListener,
     mut runtime: ControlServiceRuntime,
@@ -283,6 +296,7 @@ fn run_listener(
     }
 }
 
+/// Read one complete short-lived HTTP request and write one JSON response.
 fn handle_stream(mut stream: TcpStream, runtime: &mut ControlServiceRuntime) -> Result<()> {
     let mut buffer = String::new();
     stream.read_to_string(&mut buffer)?;
@@ -292,6 +306,7 @@ fn handle_stream(mut stream: TcpStream, runtime: &mut ControlServiceRuntime) -> 
     Ok(())
 }
 
+/// Minimal HTTP request representation for the narrow Stage 5A REST surface.
 struct HttpRequest {
     method: String,
     path: String,
@@ -299,6 +314,7 @@ struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// Parse the request line and headers needed by the local control service.
     fn parse(raw: &str) -> Option<Self> {
         let mut lines = raw.lines();
         let first = lines.next()?;
@@ -319,6 +335,7 @@ impl HttpRequest {
         })
     }
 
+    /// Return one case-insensitive header value.
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())
@@ -326,6 +343,7 @@ impl HttpRequest {
     }
 }
 
+/// Allow absent Origin plus known local/Tauri origins; reject everything else.
 fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
@@ -336,19 +354,22 @@ fn origin_allowed(origin: Option<&str>) -> bool {
     }
 }
 
+/// Wrap successful route data in the common `{ ok, data }` envelope.
 fn ok_json(data: serde_json::Value) -> String {
     json_response(200, json!({ "ok": true, "data": data }))
 }
 
+/// Extract the numeric exception id from `/v1/exceptions/{id}/resolve`.
 fn parse_exception_resolve_path(path: &str) -> Result<i64> {
     let id = path
         .strip_prefix("/v1/exceptions/")
         .and_then(|tail| tail.strip_suffix("/resolve"))
-        .ok_or_else(|| anyhow!("invalid exception resolve path"))?;
+        .ok_or_else(|| anyhow!("bad request: invalid exception resolve path"))?;
     id.parse::<i64>()
-        .map_err(|_| anyhow!("invalid exception id"))
+        .map_err(|_| anyhow!("bad request: invalid exception id"))
 }
 
+/// Render a compact HTTP/1.1 JSON response for short loopback requests.
 fn json_response(status: u16, body: serde_json::Value) -> String {
     let reason = match status {
         200 => "OK",
@@ -366,6 +387,7 @@ fn json_response(status: u16, body: serde_json::Value) -> String {
     )
 }
 
+/// Return a simple epoch-second timestamp for discovery documents and tokens.
 fn now_epoch_seconds() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

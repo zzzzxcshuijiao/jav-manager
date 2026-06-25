@@ -232,3 +232,79 @@ fn run_once_and_queue_routes_use_existing_daemon_control_helpers() {
 
     handle.shutdown().unwrap();
 }
+
+#[test]
+fn run_once_without_metadata_source_returns_error_and_keeps_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    let inbox = tmp.path().join("inbox");
+    let video = inbox.join("ABP-599.mp4");
+    std::fs::write(&video, b"stable video bytes").unwrap();
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let response = authorized_post(handle.port(), "/v1/run-once");
+
+    assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+    assert!(response.contains("示例元数据源未开启"));
+    assert!(video.exists());
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
+fn unknown_v1_route_returns_not_found_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let response = authorized_get(handle.port(), "/v1/unknown");
+
+    assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+    assert!(response.contains("\"ok\":false"));
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
+fn invalid_exception_resolve_id_returns_bad_request_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let response = authorized_post(handle.port(), "/v1/exceptions/not-a-number/resolve");
+
+    assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(response.contains("invalid exception id"));
+
+    handle.shutdown().unwrap();
+}

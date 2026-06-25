@@ -1,7 +1,5 @@
 use crate::daemon::{CompletionPolicy, DaemonConfig, HeadlessDaemon, RunOnceReport};
-use crate::domain::{
-    Exception, ExceptionStatus, HoldingEntry, PipelineRun, ScrapedWorkMetadata,
-};
+use crate::domain::{Exception, ExceptionStatus, HoldingEntry, PipelineRun, ScrapedWorkMetadata};
 use crate::pipeline::{ScrapeCoordinator, ScraperSource};
 use crate::storage::Repository;
 use anyhow::{anyhow, bail, Result};
