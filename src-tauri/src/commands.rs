@@ -1,8 +1,15 @@
-﻿use crate::archive::ArchivePlanner;
+use crate::archive::ArchivePlanner;
+use crate::daemon::RunOnceReport;
+use crate::daemon_control::{
+    build_daemon_status, list_exception_entries as read_exception_entries,
+    list_holding_entries as read_holding_entries, list_recent_pipeline_runs,
+    resolve_exception_entry as resolve_exception_in_repo, run_daemon_once, DaemonControlRuntime,
+    DaemonControlStatus,
+};
 use crate::domain::{
-    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, FileVersion,
-    IngestDecision, IngestItem, IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus,
-    Work, WorkDetail, WorkFilters,
+    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, Exception,
+    ExceptionStatus, FileVersion, HoldingEntry, IngestDecision, IngestItem, IngestItemFilters,
+    IngestJobSummary, PipelineRun, ReviewReason, WatchStatus, Work, WorkDetail, WorkFilters,
 };
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
@@ -29,6 +36,7 @@ pub struct AppState {
     pub metadata_provider_enabled: Mutex<bool>,
     pub archive_plans: Mutex<Vec<ArchivePlan>>,
     pub archive_logs: Mutex<Vec<ArchiveActionLog>>,
+    pub daemon_runtime: Mutex<DaemonControlRuntime>,
     pub next_job_id: Mutex<i64>,
     pub next_item_id: Mutex<i64>,
     pub next_plan_id: Mutex<i64>,
@@ -44,6 +52,7 @@ impl Default for AppState {
             metadata_provider_enabled: Mutex::new(false),
             archive_plans: Mutex::new(Vec::new()),
             archive_logs: Mutex::new(Vec::new()),
+            daemon_runtime: Mutex::new(DaemonControlRuntime::default()),
             next_job_id: Mutex::new(1),
             next_item_id: Mutex::new(1),
             next_plan_id: Mutex::new(1),
@@ -143,6 +152,131 @@ pub fn get_metadata_provider_enabled(
             .metadata_provider_enabled
             .lock()
             .map_err(|error| error.to_string())?,
+    })
+}
+
+/// Return the Stage 4 daemon control status for the settings page.
+#[tauri::command]
+pub fn get_daemon_status(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    Ok(CommandResult {
+        data: read_daemon_status(&state)?,
+    })
+}
+
+/// Pause future synchronous daemon runs without interrupting a running file operation.
+#[tauri::command]
+pub fn pause_daemon(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    {
+        let mut runtime = state
+            .daemon_runtime
+            .lock()
+            .map_err(|error| error.to_string())?;
+        runtime.paused = true;
+    }
+    Ok(CommandResult {
+        data: read_daemon_status(&state)?,
+    })
+}
+
+/// Resume future synchronous daemon runs and return the refreshed status.
+#[tauri::command]
+pub fn resume_daemon(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    {
+        let mut runtime = state
+            .daemon_runtime
+            .lock()
+            .map_err(|error| error.to_string())?;
+        runtime.paused = false;
+    }
+    Ok(CommandResult {
+        data: read_daemon_status(&state)?,
+    })
+}
+
+/// Run one Stage 4 daemon pass through the headless core.
+#[tauri::command]
+pub fn run_daemon_once_command(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RunOnceReport>, String> {
+    let metadata_enabled = configured_metadata_provider_enabled(&state)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let mut runtime = state
+        .daemon_runtime
+        .lock()
+        .map_err(|error| error.to_string())?;
+    match run_daemon_once(repo, &mut runtime, metadata_enabled) {
+        Ok(report) => Ok(CommandResult { data: report }),
+        Err(error) => {
+            runtime.last_error = Some(error.to_string());
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Return files parked in the holding pen for manual triage.
+#[tauri::command]
+pub fn list_holding_entries(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<HoldingEntry>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: read_holding_entries(repo).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Return exception queue rows for the automatic pipeline panel.
+#[tauri::command]
+pub fn list_exception_entries(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<Exception>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: read_exception_entries(repo).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Mark one exception as resolved or ignored after user review.
+#[tauri::command]
+pub fn resolve_exception_entry_command(
+    id: i64,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<bool>, String> {
+    let status = parse_exception_status_command(&status)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    resolve_exception_in_repo(repo, id, status).map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: true })
+}
+
+/// Return recent automatic pipeline runs, newest first.
+#[tauri::command]
+pub fn list_pipeline_runs(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<PipelineRun>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: list_recent_pipeline_runs(repo).map_err(|error| error.to_string())?,
     })
 }
 
@@ -1266,6 +1400,14 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_archive_root,
             configure_metadata_provider_enabled,
             get_metadata_provider_enabled,
+            get_daemon_status,
+            pause_daemon,
+            resume_daemon,
+            run_daemon_once_command,
+            list_holding_entries,
+            list_exception_entries,
+            resolve_exception_entry_command,
+            list_pipeline_runs,
             start_scan,
             get_ingest_job,
             get_latest_ingest_job,
@@ -1423,7 +1565,18 @@ fn parse_watch_status(value: &str) -> WatchStatus {
     match value {
         "Watched" | "watched" => WatchStatus::Watched,
         "Favorite" | "favorite" => WatchStatus::Favorite,
+        "WantToWatch" | "want_to_watch" | "wanttowatch" => WatchStatus::WantToWatch,
+        "Watching" | "watching" => WatchStatus::Watching,
+        "OnHold" | "on_hold" | "onhold" => WatchStatus::OnHold,
         _ => WatchStatus::Unwatched,
+    }
+}
+
+fn parse_exception_status_command(value: &str) -> Result<ExceptionStatus, String> {
+    match value {
+        "Ignored" | "ignored" => Ok(ExceptionStatus::Ignored),
+        "Resolved" | "resolved" => Ok(ExceptionStatus::Resolved),
+        _ => Err("exception status must be Ignored or Resolved".to_string()),
     }
 }
 
@@ -1480,6 +1633,19 @@ fn configured_metadata_provider_enabled(state: &State<'_, AppState>) -> Result<b
         .metadata_provider_enabled
         .lock()
         .map_err(|error| error.to_string())?)
+}
+
+fn read_daemon_status(state: &State<'_, AppState>) -> Result<DaemonControlStatus, String> {
+    let metadata_enabled = configured_metadata_provider_enabled(state)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let runtime = state
+        .daemon_runtime
+        .lock()
+        .map_err(|error| error.to_string())?;
+    build_daemon_status(repo, &runtime, metadata_enabled).map_err(|error| error.to_string())
 }
 
 fn canonical_existing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -1544,5 +1710,20 @@ fn nearest_existing_parent(path: &std::path::Path) -> Option<PathBuf> {
             return Some(current.to_path_buf());
         }
         current = current.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_watch_status_parser_accepts_stage1_statuses() {
+        assert_eq!(parse_watch_status("WantToWatch"), WatchStatus::WantToWatch);
+        assert_eq!(parse_watch_status("Watching"), WatchStatus::Watching);
+        assert_eq!(parse_watch_status("OnHold"), WatchStatus::OnHold);
+        assert_eq!(parse_watch_status("watched"), WatchStatus::Watched);
+        assert_eq!(parse_watch_status("favorite"), WatchStatus::Favorite);
+        assert_eq!(parse_watch_status("unknown"), WatchStatus::Unwatched);
     }
 }
