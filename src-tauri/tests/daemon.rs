@@ -250,3 +250,51 @@ fn process_next_routes_scrape_failure_to_exception_queue() {
         ExceptionKind::ScrapeFailed
     );
 }
+
+#[test]
+fn run_once_scans_and_processes_mixed_inbox_with_deterministic_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("ABP-300.mp4"), b"video-300").unwrap();
+    std::fs::write(inbox.join("random.mp4"), b"random-video").unwrap();
+    std::fs::write(inbox.join("ABP-301.mp4"), b"video-301").unwrap();
+    std::fs::write(inbox.join("notes.txt"), b"not-video").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.run_once().unwrap();
+
+    assert_eq!(report.scan.queued_files, 3);
+    assert_eq!(report.process.processed, 3);
+    assert_eq!(report.process.archived, 1);
+    assert_eq!(report.process.holding, 1);
+    assert_eq!(report.process.exceptions, 1);
+    assert_eq!(report.process.failed, 0);
+    assert_eq!(daemon.status().queued, 0);
+}
+
+#[test]
+fn operational_archive_failure_counts_failed_without_content_exception() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = open_repo(&tmp.path().join("library.sqlite"));
+    let inbox = tmp.path().join("inbox");
+    let archive_file = tmp.path().join("archive-is-a-file");
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::write(&archive_file, b"not a directory").unwrap();
+    std::fs::write(inbox.join("ABP-300.mp4"), b"video-300").unwrap();
+    repo.set_source_roots(&[inbox]).unwrap();
+    repo.set_archive_root(&archive_file).unwrap();
+    repo.set_resource_pool_dirs(&[]).unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.run_once().unwrap();
+
+    assert_eq!(report.scan.queued_files, 1);
+    assert_eq!(report.process.processed, 1);
+    assert_eq!(report.process.failed, 1);
+    assert!(repo.list_exceptions().unwrap().is_empty());
+    assert_eq!(repo.list_pipeline_runs().unwrap()[0].status, "failed");
+    assert_eq!(daemon.status().state, DaemonState::Error);
+    assert!(daemon.status().last_error.is_some());
+}

@@ -306,6 +306,27 @@ impl<'a> HeadlessDaemon<'a> {
             }
         }
     }
+
+    /// Run one synchronous daemon pass: scan once, then drain the queue until
+    /// it is empty, paused, or a processing error is recorded.
+    pub fn run_once(&mut self) -> Result<RunOnceReport> {
+        let scan = self.scan_now()?;
+        let mut process = ProcessReport::default();
+
+        while self.state != DaemonState::Paused && !self.queue.is_empty() {
+            let next = self.process_next()?;
+            process.processed += next.processed;
+            process.archived += next.archived;
+            process.holding += next.holding;
+            process.exceptions += next.exceptions;
+            process.failed += next.failed;
+            if next.failed > 0 {
+                break;
+            }
+        }
+
+        Ok(RunOnceReport { scan, process })
+    }
 }
 
 impl QueuedFile {
