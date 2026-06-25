@@ -75,6 +75,9 @@ pub enum WatchStatus {
     Unwatched,
     Watched,
     Favorite,
+    WantToWatch,
+    Watching,
+    OnHold,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

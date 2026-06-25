@@ -2377,6 +2377,9 @@ fn parse_watch_status(value: &str) -> WatchStatus {
     match value {
         "Watched" => WatchStatus::Watched,
         "Favorite" => WatchStatus::Favorite,
+        "WantToWatch" => WatchStatus::WantToWatch,
+        "Watching" => WatchStatus::Watching,
+        "OnHold" => WatchStatus::OnHold,
         _ => WatchStatus::Unwatched,
     }
 }
