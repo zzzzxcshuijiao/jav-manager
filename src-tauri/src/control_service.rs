@@ -18,6 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
+
 /// Configuration for the Stage 5A loopback control service. It contains only
 /// local runtime values; product-level persistence remains in SQLite settings.
 #[derive(Debug, Clone)]
@@ -298,12 +300,50 @@ fn run_listener(
 
 /// Read one complete short-lived HTTP request and write one JSON response.
 fn handle_stream(mut stream: TcpStream, runtime: &mut ControlServiceRuntime) -> Result<()> {
-    let mut buffer = String::new();
-    stream.read_to_string(&mut buffer)?;
+    let buffer = read_http_request(&mut stream)?;
     let response = runtime.handle_raw_http(&buffer);
     stream.write_all(response.as_bytes())?;
     let _ = stream.shutdown(Shutdown::Both);
     Ok(())
+}
+
+/// Read through HTTP headers and the declared body without waiting for EOF.
+fn read_http_request(stream: &mut TcpStream) -> Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 512];
+    loop {
+        let count = stream.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..count]);
+        if buffer.len() > MAX_HTTP_REQUEST_BYTES {
+            return Err(anyhow!("request too large"));
+        }
+        if let Some(required_len) = required_http_request_len(&buffer) {
+            if buffer.len() >= required_len {
+                break;
+            }
+        }
+    }
+    Ok(String::from_utf8(buffer)?)
+}
+
+/// Return the byte length needed for the full request once headers are present.
+fn required_http_request_len(buffer: &[u8]) -> Option<usize> {
+    let header_end = buffer.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let header_len = header_end + 4;
+    let headers = std::str::from_utf8(&buffer[..header_end]).ok()?;
+    let content_len = headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(name, value)| {
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().unwrap_or(0))
+        })
+        .unwrap_or(0);
+    Some(header_len + content_len)
 }
 
 /// Minimal HTTP request representation for the narrow Stage 5A REST surface.

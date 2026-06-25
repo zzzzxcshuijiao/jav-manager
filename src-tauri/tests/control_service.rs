@@ -6,6 +6,7 @@ use media_manager::storage::Repository;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::time::Duration;
 
 fn open_repo(path: &Path) -> Repository {
     let repo = Repository::open(path).unwrap();
@@ -120,6 +121,38 @@ fn service_writes_discovery_file_and_serves_health_without_token() {
     assert_eq!(discovery.port, handle.port());
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(response.contains("\"service\":\"media-manager-control\""));
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
+fn service_responds_after_headers_without_waiting_for_client_shutdown() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = open_repo(&tmp.path().join("library.sqlite"));
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", handle.port())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .unwrap();
+    let mut buffer = [0_u8; 512];
+    let bytes = stream.read(&mut buffer).unwrap();
+    let response = String::from_utf8_lossy(&buffer[..bytes]);
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
 
     handle.shutdown().unwrap();
 }
