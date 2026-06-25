@@ -2,8 +2,15 @@ use crate::daemon_control::DaemonControlRuntime;
 use crate::storage::Repository;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for the Stage 5A loopback control service. It contains only
@@ -37,6 +44,15 @@ pub struct ControlServiceRuntime {
     daemon: DaemonControlRuntime,
     config: ControlServiceConfig,
     token: String,
+}
+
+/// Running service handle used by tests and future daemon hosts. Dropping it
+/// does not implicitly kill the thread; callers should request shutdown.
+pub struct ControlServiceHandle {
+    host: String,
+    port: u16,
+    shutdown_tx: mpsc::Sender<()>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for ControlServiceRuntime {
@@ -78,6 +94,72 @@ impl ControlServiceRuntime {
             created_at: now_epoch_seconds(),
         }
     }
+
+    /// Start the HTTP service on the configured loopback address and write the
+    /// discovery file once the OS has assigned the final port.
+    pub fn start(self) -> Result<ControlServiceHandle> {
+        let listener = TcpListener::bind((self.config.host.as_str(), self.config.port))?;
+        listener.set_nonblocking(true)?;
+        let port = listener.local_addr()?.port();
+        let discovery = self.discovery_for_port(port);
+        if let Some(parent) = self.config.discovery_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(
+            &self.config.discovery_path,
+            serde_json::to_string_pretty(&discovery)?,
+        )?;
+
+        let host = self.config.host.clone();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel();
+        let thread = thread::spawn(move || run_listener(listener, self, shutdown_rx));
+
+        Ok(ControlServiceHandle {
+            host,
+            port,
+            shutdown_tx,
+            thread: Some(thread),
+        })
+    }
+
+    /// Handle one raw HTTP request and return a complete HTTP response string.
+    pub fn handle_raw_http(&mut self, raw: &str) -> String {
+        let Some(request) = HttpRequest::parse(raw) else {
+            return json_response(400, json!({ "ok": false, "error": "bad request" }));
+        };
+        if request.method == "GET" && request.path == "/health" {
+            return json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "data": {
+                        "service": "media-manager-control",
+                        "status": "ok"
+                    }
+                }),
+            );
+        }
+        json_response(404, json!({ "ok": false, "error": "not found" }))
+    }
+}
+
+impl ControlServiceHandle {
+    /// Return the actual bound port. This matters when tests request port 0.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Ask the listener loop to stop and wait for the service thread.
+    pub fn shutdown(mut self) -> Result<()> {
+        let _ = self.shutdown_tx.send(());
+        let _ = TcpStream::connect((self.host.as_str(), self.port));
+        if let Some(thread) = self.thread.take() {
+            thread
+                .join()
+                .map_err(|_| anyhow!("control service thread panicked"))?;
+        }
+        Ok(())
+    }
 }
 
 /// Reject non-loopback hosts so the Stage 5A service cannot accidentally bind
@@ -97,6 +179,69 @@ pub fn generate_token() -> String {
     hasher.update(now_epoch_seconds().as_bytes());
     hasher.update(format!("{:?}", std::thread::current().id()).as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+fn run_listener(
+    listener: TcpListener,
+    mut runtime: ControlServiceRuntime,
+    shutdown_rx: mpsc::Receiver<()>,
+) {
+    loop {
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = handle_stream(stream, &mut runtime);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn handle_stream(mut stream: TcpStream, runtime: &mut ControlServiceRuntime) -> Result<()> {
+    let mut buffer = String::new();
+    stream.read_to_string(&mut buffer)?;
+    let response = runtime.handle_raw_http(&buffer);
+    stream.write_all(response.as_bytes())?;
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(())
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+}
+
+impl HttpRequest {
+    fn parse(raw: &str) -> Option<Self> {
+        let first = raw.lines().next()?;
+        let mut parts = first.split_whitespace();
+        Some(Self {
+            method: parts.next()?.to_string(),
+            path: parts.next()?.to_string(),
+        })
+    }
+}
+
+fn json_response(status: u16, body: serde_json::Value) -> String {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let body = body.to_string();
+    format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 fn now_epoch_seconds() -> String {
