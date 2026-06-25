@@ -1,5 +1,5 @@
 use media_manager::daemon::{CompletionPolicy, DaemonConfig, DaemonState, HeadlessDaemon};
-use media_manager::domain::ScrapedWorkMetadata;
+use media_manager::domain::{ExceptionKind, ScrapedWorkMetadata};
 use media_manager::pipeline::{ScrapeCoordinator, ScraperSource};
 use media_manager::storage::Repository;
 use std::time::Duration;
@@ -168,4 +168,85 @@ fn scan_skips_missing_source_roots_without_error() {
     assert_eq!(report.queued_files, 0);
     assert!(report.skipped_files >= 1);
     assert_eq!(daemon.status().state, DaemonState::Idle);
+}
+
+#[test]
+fn pause_blocks_scan_and_process_until_resume() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("ABP-300.mp4"), b"video-300").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    daemon.pause();
+    let paused_scan = daemon.scan_now().unwrap();
+    let paused_process = daemon.process_next().unwrap();
+
+    assert_eq!(paused_scan.queued_files, 0);
+    assert_eq!(paused_process.processed, 0);
+    assert_eq!(daemon.status().state, DaemonState::Paused);
+
+    daemon.resume();
+    let resumed_scan = daemon.scan_now().unwrap();
+
+    assert_eq!(resumed_scan.queued_files, 1);
+    assert_eq!(daemon.status().state, DaemonState::Idle);
+}
+
+#[test]
+fn process_next_archives_one_queued_file_through_auto_pipeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, archive, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("ABP-300.mp4"), b"video-300").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+    daemon.scan_now().unwrap();
+
+    let report = daemon.process_next().unwrap();
+
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.archived, 1);
+    assert_eq!(report.holding, 0);
+    assert_eq!(report.exceptions, 0);
+    assert_eq!(report.failed, 0);
+    assert_eq!(daemon.status().queued, 0);
+    assert_eq!(daemon.status().processed, 1);
+    assert!(archive.join("ABP-300/ABP-300.mp4").exists());
+    assert_eq!(repo.list_works().unwrap().len(), 1);
+}
+
+#[test]
+fn process_next_routes_missing_code_to_holding() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("random.mp4"), b"random-video").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+    daemon.scan_now().unwrap();
+
+    let report = daemon.process_next().unwrap();
+
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.holding, 1);
+    assert_eq!(repo.list_holding().unwrap().len(), 1);
+    assert!(repo.list_exceptions().unwrap().is_empty());
+}
+
+#[test]
+fn process_next_routes_scrape_failure_to_exception_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("ABP-301.mp4"), b"video-301").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+    daemon.scan_now().unwrap();
+
+    let report = daemon.process_next().unwrap();
+
+    assert_eq!(report.processed, 1);
+    assert_eq!(report.exceptions, 1);
+    assert_eq!(
+        repo.list_exceptions().unwrap()[0].kind,
+        ExceptionKind::ScrapeFailed
+    );
 }

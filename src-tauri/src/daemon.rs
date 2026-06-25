@@ -1,6 +1,8 @@
 use crate::domain::CompletedFile;
-use crate::pipeline::{is_heuristically_complete, CompletionSnapshot};
-use crate::pipeline::ScrapeCoordinator;
+use crate::domain::PipelineOutcome;
+use crate::pipeline::{
+    is_heuristically_complete, AutoPipeline, CompletionSnapshot, ScrapeCoordinator,
+};
 use crate::scanner::is_video_file;
 use crate::storage::Repository;
 use anyhow::{anyhow, Result};
@@ -232,6 +234,89 @@ impl<'a> HeadlessDaemon<'a> {
             file_hash: file.file_hash,
         });
         true
+    }
+
+    /// Pause future scans and processing without clearing queued files.
+    pub fn pause(&mut self) {
+        self.state = DaemonState::Paused;
+    }
+
+    /// Resume a paused daemon and keep any files that were already queued.
+    pub fn resume(&mut self) {
+        if self.state == DaemonState::Paused {
+            self.state = DaemonState::Idle;
+        }
+    }
+
+    /// Process one queued file through the Stage 2 AutoPipeline.
+    pub fn process_next(&mut self) -> Result<ProcessReport> {
+        if self.state == DaemonState::Paused {
+            return Ok(ProcessReport::default());
+        }
+
+        let Some(queued) = self.queue.pop_front() else {
+            return Ok(ProcessReport::default());
+        };
+        self.queued_keys.remove(&queue_key(&queued.path));
+
+        self.state = DaemonState::Processing;
+        let completed = queued.into_completed_file();
+        let result = {
+            let pipeline = AutoPipeline {
+                repo: self.repo,
+                archive_root: self.config.archive_root.clone(),
+                asset_roots: self.config.asset_roots.clone(),
+                scrapers: ScrapeCoordinator {
+                    sources: self.scrapers.sources.iter().copied().collect(),
+                },
+            };
+            pipeline.process_completed_file(completed)
+        };
+
+        let mut report = ProcessReport {
+            processed: 1,
+            ..ProcessReport::default()
+        };
+
+        match result {
+            Ok(outcome) => self.apply_outcome(&outcome, &mut report),
+            Err(error) => {
+                report.failed = 1;
+                self.last_error = Some(error.to_string());
+                self.state = DaemonState::Error;
+                self.processed += 1;
+                return Ok(report);
+            }
+        }
+
+        self.processed += 1;
+        self.state = DaemonState::Idle;
+        Ok(report)
+    }
+
+    fn apply_outcome(&mut self, outcome: &PipelineOutcome, report: &mut ProcessReport) {
+        match outcome.status.as_str() {
+            "archived" => report.archived = 1,
+            "holding" => report.holding = 1,
+            "exception" => report.exceptions = 1,
+            "failed" => report.failed = 1,
+            other => {
+                report.failed = 1;
+                self.last_error = Some(format!("unknown pipeline outcome: {other}"));
+            }
+        }
+    }
+}
+
+impl QueuedFile {
+    /// Convert a queued file back into the Stage 2 CompletedFile DTO.
+    pub fn into_completed_file(self) -> CompletedFile {
+        CompletedFile {
+            path: self.path,
+            file_name: self.file_name,
+            size_bytes: self.size_bytes,
+            file_hash: self.file_hash,
+        }
     }
 }
 
