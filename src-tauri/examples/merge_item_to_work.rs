@@ -24,6 +24,8 @@ fn main() -> anyhow::Result<()> {
         poster_path: None,
         thumb_path: None,
         fanart_path: None,
+        screenshot_path: None,
+        gif_path: None,
         tags: vec![],
         sets: vec![],
         lists: vec![],

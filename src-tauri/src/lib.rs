@@ -5,13 +5,16 @@ pub mod domain;
 pub mod identifier;
 pub mod ingest;
 pub mod matcher;
+pub mod migration;
 pub mod provider;
+pub mod resource_pool;
 pub mod scanner;
 pub mod storage;
 pub mod thumbnail;
 pub mod nfo;
 
 pub mod library_rebuild;
+pub mod poster_index;
 
 pub fn run() {
     commands::build_app()

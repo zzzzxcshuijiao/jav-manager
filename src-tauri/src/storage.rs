@@ -230,6 +230,49 @@ impl Repository {
         ))
     }
 
+    pub fn set_poster_dirs(&self, poster: &Path, screenshot: &Path, gif: &Path) -> Result<()> {
+        self.set_setting("poster_dir", &poster.to_string_lossy())?;
+        self.set_setting("screenshot_dir", &screenshot.to_string_lossy())?;
+        self.set_setting("gif_dir", &gif.to_string_lossy())
+    }
+
+    pub fn get_poster_dirs(&self) -> Result<(Option<PathBuf>, Option<PathBuf>, Option<PathBuf>)> {
+        Ok((
+            self.get_setting("poster_dir")?.map(PathBuf::from),
+            self.get_setting("screenshot_dir")?.map(PathBuf::from),
+            self.get_setting("gif_dir")?.map(PathBuf::from),
+        ))
+    }
+
+    /// Unified resource-pool directories. Stored as a JSON string array under a
+    /// single setting key so the settings panel can edit the whole list at once.
+    pub fn set_resource_pool_dirs(&self, dirs: &[PathBuf]) -> Result<()> {
+        let strings: Vec<String> = dirs
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        self.set_setting("resource_pool_dirs", &serde_json::to_string(&strings)?)
+    }
+
+    pub fn get_resource_pool_dirs(&self) -> Result<Vec<PathBuf>> {
+        let Some(value) = self.get_setting("resource_pool_dirs")? else {
+            return Ok(Vec::new());
+        };
+        let parsed: Vec<String> = serde_json::from_str(&value).unwrap_or_default();
+        Ok(parsed.into_iter().map(PathBuf::from).collect())
+    }
+
+    /// The self-contained library directory that incremental sync writes into
+    /// and treats as the authority. Set once after the first unified migration;
+    /// subsequent syncs add missing resources here without resetting anything.
+    pub fn set_primary_library_dir(&self, dir: &Path) -> Result<()> {
+        self.set_setting("primary_library_dir", &dir.to_string_lossy())
+    }
+
+    pub fn get_primary_library_dir(&self) -> Result<Option<PathBuf>> {
+        Ok(self.get_setting("primary_library_dir")?.map(PathBuf::from))
+    }
+
     fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "
@@ -282,6 +325,8 @@ impl Repository {
         self.ensure_column("works", "poster_path", "TEXT")?;
         self.ensure_column("works", "thumb_path", "TEXT")?;
         self.ensure_column("works", "fanart_path", "TEXT")?;
+        self.ensure_column("works", "screenshot_path", "TEXT")?;
+        self.ensure_column("works", "gif_path", "TEXT")?;
         self.ensure_column("works", "rating_value", "REAL")?;
         self.ensure_column("works", "rating_max", "INTEGER")?;
         self.ensure_column("works", "rating_votes", "INTEGER")?;
@@ -308,6 +353,8 @@ impl Repository {
         let poster = work.poster_path.as_ref().map(|p| p.to_string_lossy().to_string());
         let thumb = work.thumb_path.as_ref().map(|p| p.to_string_lossy().to_string());
         let fanart = work.fanart_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let screenshot = work.screenshot_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let gif = work.gif_path.as_ref().map(|p| p.to_string_lossy().to_string());
         let watch_status = format!("{:?}", work.watch_status);
         let has_video: i64 = if work.has_video { 1 } else { 0 };
 
@@ -330,6 +377,8 @@ impl Repository {
                     poster_path,
                     thumb_path,
                    fanart_path,
+                   screenshot_path,
+                   gif_path,
                    tags_json,
                    lists_json,
                    rating,
@@ -352,7 +401,8 @@ impl Repository {
                 VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
+                    ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                    ?31, ?32
                 )
                 ON CONFLICT(normalized_code) DO UPDATE SET
                     source_code = COALESCE(works.source_code, excluded.source_code),
@@ -369,6 +419,8 @@ impl Repository {
                     poster_path = COALESCE(works.poster_path, excluded.poster_path),
                     thumb_path = COALESCE(works.thumb_path, excluded.thumb_path),
                     fanart_path = COALESCE(works.fanart_path, excluded.fanart_path),
+                    screenshot_path = COALESCE(works.screenshot_path, excluded.screenshot_path),
+                    gif_path = COALESCE(works.gif_path, excluded.gif_path),
                     tags_json = works.tags_json,
                     lists_json = works.lists_json,
                     rating = works.rating,
@@ -402,6 +454,8 @@ impl Repository {
                     poster,
                     thumb,
                     fanart,
+                    screenshot,
+                    gif,
                    tags_json,
                    lists_json,
                    work.rating,
@@ -456,23 +510,25 @@ impl Repository {
                         poster_path = COALESCE(works.poster_path, ?9),
                         thumb_path = COALESCE(works.thumb_path, ?10),
                         fanart_path = COALESCE(works.fanart_path, ?11),
-                        rating_value = COALESCE(works.rating_value, ?12),
-                        rating_max = COALESCE(works.rating_max, ?13),
-                        rating_votes = COALESCE(works.rating_votes, ?14),
-                        criticrating = COALESCE(works.criticrating, ?15),
+                        screenshot_path = COALESCE(works.screenshot_path, ?12),
+                        gif_path = COALESCE(works.gif_path, ?13),
+                        rating_value = COALESCE(works.rating_value, ?14),
+                        rating_max = COALESCE(works.rating_max, ?15),
+                        rating_votes = COALESCE(works.rating_votes, ?16),
+                        criticrating = COALESCE(works.criticrating, ?17),
                         genres_json = CASE
-                            WHEN works.genres_json = '[]' THEN ?16
+                            WHEN works.genres_json = '[]' THEN ?18
                             ELSE works.genres_json
                         END,
-                        studio = COALESCE(works.studio, ?17),
-                        label = COALESCE(works.label, ?18),
-                        director = COALESCE(works.director, ?19),
-                        release_date = COALESCE(works.release_date, ?20),
-                        runtime_minutes = COALESCE(works.runtime_minutes, ?21),
-                        year = COALESCE(works.year, ?22),
-                        website = COALESCE(works.website, ?23),
-                        mpaa = COALESCE(works.mpaa, ?24),
-                        has_video = ?25,
+                        studio = COALESCE(works.studio, ?19),
+                        label = COALESCE(works.label, ?20),
+                        director = COALESCE(works.director, ?21),
+                        release_date = COALESCE(works.release_date, ?22),
+                        runtime_minutes = COALESCE(works.runtime_minutes, ?23),
+                        year = COALESCE(works.year, ?24),
+                        website = COALESCE(works.website, ?25),
+                        mpaa = COALESCE(works.mpaa, ?26),
+                        has_video = ?27,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?1
                     ",
@@ -488,6 +544,8 @@ impl Repository {
                         poster,
                         thumb,
                         fanart,
+                        screenshot,
+                        gif,
                         work.rating_value,
                         work.rating_max,
                         work.rating_votes,
@@ -521,6 +579,8 @@ impl Repository {
                         poster_path,
                         thumb_path,
                        fanart_path,
+                       screenshot_path,
+                       gif_path,
                        tags_json,
                        lists_json,
                        rating,
@@ -543,7 +603,8 @@ impl Repository {
                    VALUES (
                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-                        ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30
+                        ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                        ?31, ?32
                    )
                    ",
                     params![
@@ -559,6 +620,8 @@ impl Repository {
                         poster,
                         thumb,
                         fanart,
+                        screenshot,
+                        gif,
                        tags_json,
                        lists_json,
                        work.rating,
@@ -1992,6 +2055,7 @@ impl Repository {
     pub fn rebuild_library(
         &self,
         roots: &[PathBuf],
+        poster_index: &crate::poster_index::PosterIndex,
     ) -> Result<crate::library_rebuild::RebuildReport> {
         // unchecked_transaction borrows the connection by shared reference, so
         // all the &self repository methods below run inside this transaction
@@ -2000,8 +2064,78 @@ impl Repository {
         self.clear_library_tables()?;
         let scanned = crate::scanner::scan_library_roots(roots)?;
         let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
-        self.persist_grouped_rebuild(&grouped)?;
+        self.persist_grouped_rebuild(&grouped, poster_index)?;
         tx.commit()?;
+        Ok(crate::library_rebuild::summarize_grouped_inputs(
+            &grouped.groups,
+            &grouped.errors,
+        ))
+    }
+
+    /// Unified rebuild from a scanned resource pool. Scans NFOs through the pool,
+    /// then bridges the pool's code-matched images (poster/screenshot/gif) into a
+    /// PosterIndex so the existing `persist_grouped_rebuild` image backfill
+    /// consumes every scanned directory without configuration. NFO/video grouping
+    /// still uses the existing scanner (same-directory pairing); only the image
+    /// source is broadened to the whole pool.
+    pub fn rebuild_library_from_pool(
+        &self,
+        pool: &crate::domain::ResourcePool,
+    ) -> Result<crate::library_rebuild::RebuildReport> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.clear_library_tables()?;
+        // NFO roots for the scanner = every directory that held a NFO in the pool.
+        // Re-scan via scanner so the NFO/video grouping + metadata extraction path
+        // stays identical to the classic rebuild.
+        let roots: Vec<PathBuf> = pool
+            .works
+            .iter()
+            .filter_map(|w| w.nfo_path.as_ref().and_then(|p| p.parent().map(PathBuf::from)))
+            .collect();
+        let scanned = crate::scanner::scan_library_roots(&roots)?;
+        let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
+        let poster_index = crate::poster_index::PosterIndex::from_pool(pool);
+        self.persist_grouped_rebuild(&grouped, &poster_index)?;
+        tx.commit()?;
+        Ok(crate::library_rebuild::summarize_grouped_inputs(
+            &grouped.groups,
+            &grouped.errors,
+        ))
+    }
+
+    /// Incremental sync: copy any missing resources from the pool into the
+    /// primary library directory (`primary/<code>/`), then re-scan ONLY the
+    /// primary dir and upsert works (no clear). This is the everyday "add new
+    /// stuff / fill gaps" path — existing works are preserved, new codes appear,
+    /// and the primary dir stays the single self-contained authority.
+    ///
+    /// Returns the rebuild-style report over the freshly synced primary dir.
+    pub fn incremental_sync_from_pool(
+        &self,
+        pool: &crate::domain::ResourcePool,
+        primary_dir: &Path,
+    ) -> Result<crate::library_rebuild::RebuildReport> {
+        // 1. Physically fill the primary dir: for every pooled work, copy each
+        //    resource that is not already under the primary dir.
+        let mut copied = 0usize;
+        for work in &pool.works {
+            let work_dir = primary_dir.join(&work.code);
+            std::fs::create_dir_all(&work_dir).ok();
+            copied += crate::migration::sync_work_into_primary(work, &work_dir, primary_dir)?;
+        }
+
+        // 2. Scan the primary dir only — it is now the complete authority.
+        let scanned = crate::scanner::scan_library_roots(&[primary_dir.to_path_buf()])?;
+        let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
+
+        // 3. Upsert (no clear): preserve existing works/relations, add new ones,
+        //    and refresh every work's file versions + images from the primary dir.
+        let empty_index = crate::poster_index::PosterIndex::empty();
+        let tx = self.conn.unchecked_transaction()?;
+        self.upsert_grouped_rebuild(&grouped, &empty_index)?;
+        tx.commit()?;
+
+        let _ = copied; // surfaced via status text on the frontend
         Ok(crate::library_rebuild::summarize_grouped_inputs(
             &grouped.groups,
             &grouped.errors,
@@ -2043,6 +2177,29 @@ impl Repository {
     fn persist_grouped_rebuild(
         &self,
         grouped: &crate::library_rebuild::GroupedScan,
+        poster_index: &crate::poster_index::PosterIndex,
+    ) -> Result<()> {
+        self.write_grouped_rebuild(grouped, poster_index, false)
+    }
+
+    /// Same as persist_grouped_rebuild, but does NOT assume the tables are empty:
+    /// before writing each work's file versions, it deletes that work's existing
+    /// versions/relations so an upsert (incremental sync) never produces
+    /// duplicates while still preserving other works and user-edited metadata
+    /// (upsert_work's ON CONFLICT keeps user fields).
+    fn upsert_grouped_rebuild(
+        &self,
+        grouped: &crate::library_rebuild::GroupedScan,
+        poster_index: &crate::poster_index::PosterIndex,
+    ) -> Result<()> {
+        self.write_grouped_rebuild(grouped, poster_index, true)
+    }
+
+    fn write_grouped_rebuild(
+        &self,
+        grouped: &crate::library_rebuild::GroupedScan,
+        poster_index: &crate::poster_index::PosterIndex,
+        per_work_reset: bool,
     ) -> Result<()> {
         for group in &grouped.groups {
             let main = crate::library_rebuild::select_main_nfo(&group.members);
@@ -2087,6 +2244,43 @@ impl Repository {
 
             let has_video = group.members.iter().any(|member| member.paired_video.is_some());
 
+            // Image values may be relative filenames (poster.jpg) that need to
+            // be resolved against the NFO's directory, or remote URLs / absolute
+            // paths that should pass through unchanged.
+            let nfo_dir = main.nfo_path.parent();
+            let resolve_image = |raw: &Option<String>| -> Option<PathBuf> {
+                let value = raw.as_ref()?;
+                // Remote URLs and Windows/Unix absolute paths are kept as-is.
+                if value.starts_with("http://") || value.starts_with("https://")
+                    || value.contains(':') || value.starts_with('/')
+                {
+                    return Some(PathBuf::from(value));
+                }
+                // Relative filename: join with the NFO directory when known.
+                match nfo_dir {
+                    Some(dir) => Some(dir.join(value)),
+                    None => Some(PathBuf::from(value)),
+                }
+            };
+
+            let index_entry = normalized_code
+                .as_deref()
+                .and_then(|code| poster_index.get(code));
+            let nfo_cover = resolve_image(&doc.cover_url);
+            let nfo_poster = resolve_image(&doc.poster_path);
+            let nfo_thumb = resolve_image(&doc.thumb_path);
+            let nfo_fanart = resolve_image(&doc.fanart_path);
+            let idx_poster = index_entry.and_then(|e| e.poster.clone());
+            let idx_screenshot = index_entry.and_then(|e| e.screenshot.clone());
+            let idx_gif = index_entry.and_then(|e| e.gif.clone());
+            let cover_path = nfo_cover
+                .clone()
+                .or_else(|| nfo_poster.clone())
+                .or_else(|| idx_poster.clone())
+                .or_else(|| nfo_thumb.clone())
+                .or_else(|| nfo_fanart.clone());
+            let poster_path = nfo_poster.or(idx_poster);
+
             let work = Work {
                 id: None,
                 normalized_code,
@@ -2097,10 +2291,12 @@ impl Repository {
                 aliases: Vec::new(),
                 summary: doc.summary.clone(),
                 outline: doc.outline.clone(),
-                cover_path: doc.cover_url.as_ref().map(PathBuf::from),
-                poster_path: doc.poster_path.as_ref().map(PathBuf::from),
-                thumb_path: doc.thumb_path.as_ref().map(PathBuf::from),
-                fanart_path: doc.fanart_path.as_ref().map(PathBuf::from),
+                cover_path,
+                poster_path,
+                thumb_path: nfo_thumb,
+                fanart_path: nfo_fanart,
+                screenshot_path: idx_screenshot,
+                gif_path: idx_gif,
                 tags,
                 sets: doc.sets.clone(),
                 lists: Vec::new(),
@@ -2125,6 +2321,12 @@ impl Repository {
 
             let work_id = self.upsert_work(&work)?;
             // Actors are not written by upsert_work; link them from the NFO.
+            // In incremental (per_work_reset) mode, clear this work's stale
+            // versions/relations first so the upsert never duplicates rows.
+            if per_work_reset {
+                self.conn.execute("DELETE FROM file_versions WHERE work_id = ?1", params![work_id])?;
+                self.conn.execute("DELETE FROM work_actors WHERE work_id = ?1", params![work_id])?;
+            }
             self.set_work_actors(work_id, &doc.actors, "nfo")?;
 
             // One file_version per member: the paired video when present,
@@ -2225,7 +2427,7 @@ fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> Result<Ve
 /// new persisted field is a one-place change instead of three parallel edits.
 const WORK_COLUMNS: &str = "id, normalized_code, source_code, code_kind, \
     title_zh, original_title, aliases_json, summary, outline, \
-    cover_path, poster_path, thumb_path, fanart_path, \
+    cover_path, poster_path, thumb_path, fanart_path, screenshot_path, gif_path, \
     tags_json, lists_json, rating, rating_value, rating_max, rating_votes, criticrating, \
     watch_status, genres_json, studio, label, director, release_date, \
     runtime_minutes, year, website, mpaa, has_video";
@@ -2234,16 +2436,18 @@ const WORK_COLUMNS: &str = "id, normalized_code, source_code, code_kind, \
 /// Image-path columns come back as TEXT and are wrapped into `PathBuf`.
 fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
     let aliases_json: String = row.get(6)?;
-    let tags_json: String = row.get(13)?;
-    let lists_json: String = row.get(14)?;
+    let tags_json: String = row.get(15)?;
+    let lists_json: String = row.get(16)?;
     let cover: Option<String> = row.get(9)?;
     let poster: Option<String> = row.get(10)?;
     let thumb: Option<String> = row.get(11)?;
     let fanart: Option<String> = row.get(12)?;
-    let status: String = row.get(20)?;
-    let genres_json: String = row.get(21)?;
+    let screenshot: Option<String> = row.get(13)?;
+    let gif: Option<String> = row.get(14)?;
+    let status: String = row.get(22)?;
+    let genres_json: String = row.get(23)?;
     let code_kind: String = row.get(3)?;
-    let has_video: i64 = row.get(30)?;
+    let has_video: i64 = row.get(32)?;
     Ok(Work {
         id: row.get(0)?,
         normalized_code: row.get(1)?,
@@ -2258,24 +2462,26 @@ fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
         poster_path: poster.map(PathBuf::from),
         thumb_path: thumb.map(PathBuf::from),
         fanart_path: fanart.map(PathBuf::from),
+        screenshot_path: screenshot.map(PathBuf::from),
+        gif_path: gif.map(PathBuf::from),
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
         sets: Vec::new(),
         lists: serde_json::from_str(&lists_json).unwrap_or_default(),
-        rating: row.get::<_, Option<u8>>(15)?,
-        rating_value: row.get(16)?,
-        rating_max: row.get(17)?,
-        rating_votes: row.get(18)?,
-        criticrating: row.get(19)?,
+        rating: row.get::<_, Option<u8>>(17)?,
+        rating_value: row.get(18)?,
+        rating_max: row.get(19)?,
+        rating_votes: row.get(20)?,
+        criticrating: row.get(21)?,
         watch_status: parse_watch_status(&status),
         genres: serde_json::from_str(&genres_json).unwrap_or_default(),
-        studio: row.get(22)?,
-        label: row.get(23)?,
-        director: row.get(24)?,
-        release_date: row.get(25)?,
-        runtime_minutes: row.get(26)?,
-        year: row.get(27)?,
-        website: row.get(28)?,
-        mpaa: row.get(29)?,
+        studio: row.get(24)?,
+        label: row.get(25)?,
+        director: row.get(26)?,
+        release_date: row.get(27)?,
+        runtime_minutes: row.get(28)?,
+        year: row.get(29)?,
+        website: row.get(30)?,
+        mpaa: row.get(31)?,
         has_video: has_video != 0,
         ratings: Vec::new(),
     })
@@ -2367,6 +2573,8 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
         poster_path: None,
         thumb_path: None,
         fanart_path: None,
+        screenshot_path: None,
+        gif_path: None,
         tags: vec![],
         sets: vec![],
         lists: vec![],

@@ -64,19 +64,131 @@ export interface IngestJobSummary {
 
 export interface Work {
   id?: number | null;
-  normalized_code: string;
+  normalized_code?: string | null;
+  source_code?: string | null;
+  code_kind: CodeKind;
   title_zh?: string | null;
   original_title?: string | null;
   aliases: string[];
   summary?: string | null;
+  outline?: string | null;
   cover_path?: string | null;
+  poster_path?: string | null;
+  thumb_path?: string | null;
+  fanart_path?: string | null;
+  screenshot_path?: string | null;
+  gif_path?: string | null;
   tags: string[];
+  genres: string[];
+  sets: string[];
   lists: string[];
   rating?: number | null;
+  rating_value?: number | null;
+  rating_max?: number | null;
+  rating_votes?: number | null;
+  criticrating?: number | null;
   watch_status: "Unwatched" | "Watched" | "Favorite";
+  studio?: string | null;
+  label?: string | null;
+  director?: string | null;
+  release_date?: string | null;
+  runtime_minutes?: number | null;
+  year?: number | null;
+  website?: string | null;
+  mpaa?: string | null;
+  has_video: boolean;
 }
 
 export type WatchStatus = Work["watch_status"];
+
+export type CodeKind = "standard" | "non_standard";
+
+export interface WorkDetail {
+  work: Work;
+  actors: Actor[];
+  tags: Tag[];
+  sets: WorkSet[];
+  file_versions: FileVersion[];
+  ratings: WorkRating[];
+}
+
+export interface Tag {
+  id: number;
+  name: string;
+}
+
+export interface WorkSet {
+  id: number;
+  name: string;
+}
+
+export interface WorkRating {
+  id?: number | null;
+  work_id?: number | null;
+  name: string;
+  max: number;
+  value: number;
+  votes?: number | null;
+}
+
+export interface DimensionCount {
+  id: number;
+  name: string;
+  work_count: number;
+}
+
+export interface MigrationWorkPlan {
+  code: string;
+  nfo_path: string;
+  video_paths: string[];
+  target_dir: string;
+}
+
+export interface MigrationPlan {
+  works: MigrationWorkPlan[];
+  total_nfos: number;
+  matched_videos: number;
+  unmatched_nfos: number;
+}
+
+export interface PooledWork {
+  code: string;
+  nfo_path: string | null;
+  videos: string[];
+  poster: string | null;
+  fanart: string | null;
+  thumb: string | null;
+  screenshots: string[];
+  gifs: string[];
+}
+
+export interface ResourcePool {
+  works: PooledWork[];
+  total_nfos: number;
+  total_videos: number;
+  total_images: number;
+  orphan_videos: number;
+  orphan_images: number;
+}
+
+export interface UnifiedMigrationWorkPlan {
+  code: string;
+  nfo_path: string | null;
+  videos: string[];
+  poster: string | null;
+  fanart: string | null;
+  thumb: string | null;
+  screenshots: string[];
+  gifs: string[];
+  target_dir: string;
+}
+
+export interface UnifiedMigrationPlan {
+  works: UnifiedMigrationWorkPlan[];
+  total_works: number;
+  total_videos: number;
+  total_images: number;
+}
 
 export interface FileVersion {
   id?: number | null;
@@ -253,5 +365,59 @@ export const api = {
   },
   rebuildLibraryFromNfo(sourceRoots: string[]) {
     return command<RebuildReport>("rebuild_library_from_nfo", { sourceRoots });
+  },
+  configurePosterDirs(posterDir: string, screenshotDir: string, gifDir: string) {
+    return command<boolean>("configure_poster_dirs", { posterDir, screenshotDir, gifDir });
+  },
+  getPosterDirs() {
+    return command<{ poster_dir: string | null; screenshot_dir: string | null; gif_dir: string | null }>("get_poster_dirs");
+  },
+  listWorkDetail(workId: number) {
+    return command<WorkDetail | null>("list_work_detail", { workId });
+  },
+  listTags() {
+    return command<DimensionCount[]>("list_tags");
+  },
+  listSets() {
+    return command<DimensionCount[]>("list_sets");
+  },
+  listStudios() {
+    return command<DimensionCount[]>("list_studios");
+  },
+  listLabels() {
+    return command<DimensionCount[]>("list_labels");
+  },
+  planCentralizedMigration(nfoDir: string, videoDir: string, targetDir: string) {
+    return command<MigrationPlan>("plan_centralized_migration", { nfoDir, videoDir, targetDir });
+  },
+  executeCentralizedMigration(plan: MigrationPlan) {
+    return command<number>("execute_centralized_migration", { plan });
+  },
+  configureResourcePoolDirs(dirs: string[]) {
+    return command<string[]>("configure_resource_pool_dirs", { dirs });
+  },
+  getResourcePoolDirs() {
+    return command<string[]>("get_resource_pool_dirs");
+  },
+  scanResourcePool(dirs: string[]) {
+    return command<ResourcePool>("scan_resource_pool", { dirs });
+  },
+  planUnifiedMigration(dirs: string[], targetDir: string) {
+    return command<UnifiedMigrationPlan>("plan_unified_migration", { dirs, targetDir });
+  },
+  executeUnifiedMigration(plan: UnifiedMigrationPlan) {
+    return command<number>("execute_unified_migration", { plan });
+  },
+  rebuildLibraryFromPool(dirs: string[]) {
+    return command<RebuildReport>("rebuild_library_from_pool", { dirs });
+  },
+  configurePrimaryLibraryDir(dir: string) {
+    return command<string>("configure_primary_library_dir", { dir });
+  },
+  getPrimaryLibraryDir() {
+    return command<string | null>("get_primary_library_dir");
+  },
+  incrementalSync(dirs: string[], primaryDir: string) {
+    return command<RebuildReport>("incremental_sync", { dirs, primaryDir });
   }
 };

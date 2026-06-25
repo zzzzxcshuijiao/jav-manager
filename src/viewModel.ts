@@ -410,3 +410,76 @@ export function formatRebuildReport(mode: RebuildMode, report: RebuildReport): s
   const errorPart = report.errors.length > 0 ? `，${report.errors.length} 个 NFO 解析失败` : "";
   return `${verb}：${report.nfos_scanned} 个 NFO，${report.works_created} 个作品，${report.works_merged} 个多文件合并组${errorPart}。`;
 }
+
+// --- Library browse layer helpers (Phase H follow-up) ---
+
+/**
+ * Splits the library works into a standard-code section and a non-standard
+ * section. Standard works carry a studio-pattern code (ABC-123) and anchor the
+ * primary catalog; non-standard works have no parseable code and merge on
+ * source_code/title, so they live in a separately-collapsible region.
+ */
+export function partitionWorksByKind(works: Work[]): { standard: Work[]; nonStandard: Work[] } {
+  const standard: Work[] = [];
+  const nonStandard: Work[] = [];
+  for (const work of works) {
+    if (work.code_kind === "non_standard") {
+      nonStandard.push(work);
+    } else {
+      standard.push(work);
+    }
+  }
+  return { standard, nonStandard };
+}
+
+/**
+ * Primary label for a library card: the normalized code when present, otherwise
+ * the Chinese title, otherwise the original title, finally a fallback so the
+ * card is never blank.
+ */
+export function libraryCardTitle(work: Work): string {
+  return (
+    work.normalized_code ||
+    work.title_zh ||
+    work.original_title ||
+    work.source_code ||
+    "未命名作品"
+  );
+}
+
+/**
+ * Secondary line under the card title: the preferred title when a code leads,
+ * or the original title; omitted entirely when it would just repeat the title.
+ */
+export function libraryCardSubtitle(work: Work): string {
+  const title = libraryCardTitle(work);
+  const candidate = work.title_zh || work.original_title || "";
+  return candidate && candidate !== title ? candidate : "";
+}
+
+/**
+ * Picks the best available artwork path for a card thumbnail: prefer the
+ * dedicated poster, then the cover, then thumb, then fanart. Returns null when
+ * none exist so the caller can render a placeholder.
+ */
+export function libraryCardArtwork(work: Work): string | null {
+  return work.poster_path || work.cover_path || work.thumb_path || work.fanart_path || null;
+}
+
+/**
+ * Formats runtime minutes into a compact h/m string for card/detail display.
+ */
+export function formatRuntime(minutes: number | null | undefined): string {
+  if (minutes == null || minutes <= 0) {
+    return "";
+  }
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h > 0 && m > 0) {
+    return `${h}时${m}分`;
+  }
+  if (h > 0) {
+    return `${h}小时`;
+  }
+  return `${m}分钟`;
+}

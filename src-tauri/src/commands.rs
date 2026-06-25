@@ -1,4 +1,4 @@
-use crate::archive::ArchivePlanner;
+﻿use crate::archive::ArchivePlanner;
 use crate::domain::{
     Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, FileVersion,
     IngestDecision, IngestItem, IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus,
@@ -913,10 +913,68 @@ pub fn rebuild_library_from_nfo(
         return Err("repository is not available".to_string());
     };
     let roots: Vec<PathBuf> = source_roots.into_iter().map(PathBuf::from).collect();
+    // Build the external image index from configured poster/screenshot/gif dirs
+    // so rebuild backfills covers and previews for works without NFO artwork.
+    let (poster_dir, screenshot_dir, gif_dir) = repo
+        .get_poster_dirs()
+        .map_err(|error| error.to_string())?;
+    let empty = std::path::PathBuf::new();
+    let poster_index = crate::poster_index::PosterIndex::scan(
+        poster_dir.as_deref().unwrap_or(&empty),
+        screenshot_dir.as_deref().unwrap_or(&empty),
+        gif_dir.as_deref().unwrap_or(&empty),
+    );
     Ok(CommandResult {
         data: repo
-            .rebuild_library(&roots)
+            .rebuild_library(&roots, &poster_index)
             .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn configure_poster_dirs(
+    poster_dir: String,
+    screenshot_dir: String,
+    gif_dir: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<bool>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    repo.set_poster_dirs(
+        std::path::Path::new(&poster_dir),
+        std::path::Path::new(&screenshot_dir),
+        std::path::Path::new(&gif_dir),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: true })
+}
+
+#[derive(serde::Serialize)]
+pub struct PosterDirs {
+    pub poster_dir: Option<String>,
+    pub screenshot_dir: Option<String>,
+    pub gif_dir: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_poster_dirs(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<PosterDirs>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let (poster, screenshot, gif) = repo
+        .get_poster_dirs()
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult {
+        data: PosterDirs {
+            poster_dir: poster.map(|p| p.to_string_lossy().to_string()),
+            screenshot_dir: screenshot.map(|p| p.to_string_lossy().to_string()),
+            gif_dir: gif.map(|p| p.to_string_lossy().to_string()),
+        },
     })
 }
 
@@ -1002,8 +1060,204 @@ pub fn clear_thumbnail_cache(
     Ok(CommandResult { data: summary })
 }
 
+#[tauri::command]
+pub fn plan_centralized_migration(
+    nfo_dir: String,
+    video_dir: String,
+    target_dir: String,
+) -> Result<CommandResult<crate::domain::MigrationPlan>, String> {
+    let plan = crate::migration::plan_migration(
+        Path::new(&nfo_dir),
+        Path::new(&video_dir),
+        Path::new(&target_dir),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: plan })
+}
+
+#[tauri::command]
+pub fn execute_centralized_migration(
+    plan: crate::domain::MigrationPlan,
+) -> Result<CommandResult<usize>, String> {
+    let migrated = crate::migration::execute_migration(&plan)
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: migrated })
+}
+
+#[tauri::command]
+pub fn configure_resource_pool_dirs(
+    dirs: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<String>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let paths: Vec<PathBuf> = dirs.iter().map(PathBuf::from).collect();
+    repo.set_resource_pool_dirs(&paths)
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: dirs })
+}
+
+#[tauri::command]
+pub fn get_resource_pool_dirs(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<String>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let dirs = repo
+        .get_resource_pool_dirs()
+        .map_err(|error| error.to_string())?;
+    let strings: Vec<String> = dirs.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
+    Ok(CommandResult { data: strings })
+}
+
+#[tauri::command]
+pub async fn scan_resource_pool(
+    dirs: Vec<String>,
+) -> Result<CommandResult<crate::domain::ResourcePool>, String> {
+    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    // Run the recursive walk + NFO parsing off the main thread so the WebView
+    // stays responsive while scanning hundreds of NFOs.
+    let pool = tauri::async_runtime::spawn_blocking(move || {
+        crate::resource_pool::scan_resource_pool(&roots)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: pool })
+}
+
+#[tauri::command]
+pub async fn plan_unified_migration(
+    dirs: Vec<String>,
+    target_dir: String,
+) -> Result<CommandResult<crate::domain::UnifiedMigrationPlan>, String> {
+    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    let plan = tauri::async_runtime::spawn_blocking(move || {
+        let pool = crate::resource_pool::scan_resource_pool(&roots)?;
+        Ok::<_, anyhow::Error>(crate::migration::plan_unified_migration(
+            &pool,
+            Path::new(&target_dir),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: plan })
+}
+
+#[tauri::command]
+pub async fn execute_unified_migration(
+    plan: crate::domain::UnifiedMigrationPlan,
+) -> Result<CommandResult<usize>, String> {
+    let migrated = tauri::async_runtime::spawn_blocking(move || {
+        crate::migration::execute_unified_migration(&plan)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: migrated })
+}
+
+#[tauri::command]
+pub async fn rebuild_library_from_pool(
+    dirs: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<crate::library_rebuild::RebuildReport>, String> {
+    // 1. Scan the pool off the main thread (slow: walks dirs + parses NFOs).
+    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    let pool = tauri::async_runtime::spawn_blocking(move || {
+        crate::resource_pool::scan_resource_pool(&roots)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|error| error.to_string())?;
+
+    // 2. DB writes stay on the main thread (fast: batched inside one transaction).
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: repo
+            .rebuild_library_from_pool(&pool)
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+#[tauri::command]
+pub fn configure_primary_library_dir(
+    dir: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<String>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    repo.set_primary_library_dir(Path::new(&dir))
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: dir })
+}
+
+#[tauri::command]
+pub fn get_primary_library_dir(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Option<String>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let dir = repo
+        .get_primary_library_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult {
+        data: dir.map(|p| p.to_string_lossy().to_string()),
+    })
+}
+
+/// Incremental sync: copy missing resources from the pool into the primary
+/// library dir, then upsert works (no clear). The everyday "add new / fill
+/// gaps" path that keeps the primary dir as the single authority.
+#[tauri::command]
+pub async fn incremental_sync(
+    dirs: Vec<String>,
+    primary_dir: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<crate::library_rebuild::RebuildReport>, String> {
+    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
+    let primary = PathBuf::from(&primary_dir);
+    // 1. Scan pool + copy resources into primary (off main thread).
+    let pool = tauri::async_runtime::spawn_blocking(move || -> Result<_, anyhow::Error> {
+        let pool = crate::resource_pool::scan_resource_pool(&roots)?;
+        // Physical fill happens here so the (locked) DB step below only upserts.
+        for work in &pool.works {
+            let work_dir = primary.join(&work.code);
+            let _ = crate::migration::sync_work_into_primary(work, &work_dir, &primary);
+        }
+        Ok(pool)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|error| error.to_string())?;
+
+    // 2. Upsert (no clear) on the main thread.
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: repo
+            .incremental_sync_from_pool(&pool, Path::new(&primary_dir))
+            .map_err(|error| error.to_string())?,
+    })
+}
+
 pub fn build_app() -> Builder<tauri::Wry> {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             configure_source_roots,
@@ -1026,6 +1280,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             list_work_detail,
             preview_rebuild,
             rebuild_library_from_nfo,
+            configure_poster_dirs,
+            get_poster_dirs,
             list_file_versions_for_work,
             list_work_actors,
             preview_archive_plan,
@@ -1042,7 +1298,18 @@ pub fn build_app() -> Builder<tauri::Wry> {
             open_path_in_file_manager,
             get_or_create_thumbnail,
             get_thumbnail_cache_summary,
-            clear_thumbnail_cache
+            clear_thumbnail_cache,
+            plan_centralized_migration,
+            execute_centralized_migration,
+            configure_resource_pool_dirs,
+            get_resource_pool_dirs,
+            scan_resource_pool,
+            plan_unified_migration,
+            execute_unified_migration,
+            rebuild_library_from_pool,
+            configure_primary_library_dir,
+            get_primary_library_dir,
+            incremental_sync
         ])
         .setup(|app| {
             let app_data = app

@@ -15,6 +15,8 @@
 //! Public API is fixed: Tasks 2-5 build on these exact signatures.
 
 use anyhow::Result;
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -88,9 +90,10 @@ fn decode_xml_entities(value: &str) -> String {
 
 /// Normalize an extracted tag value: CDATA-strip first, then entity-decode.
 /// Applied uniformly to every text field so CDATA / entity handling cannot
-/// drift between call sites.
+/// drift between call sites. XML tag stripping is no longer needed because
+/// quick-xml event parsing guarantees clean text content.
 fn normalize_text(value: &str) -> String {
-    decode_xml_entities(&strip_cdata(value))
+    decode_xml_entities(&strip_cdata(value)).trim().to_string()
 }
 
 /// Parse a `<runtime>` value into whole minutes.
@@ -141,36 +144,127 @@ pub fn parse_runtime_minutes(value: &str) -> Option<i64> {
     None
 }
 
-/// Extract the inner text of the first `<tag ...>...</tag>` occurrence (the
-/// opening tag may carry attributes). Returns the normalized value, or None
-/// when the tag is absent or empty after normalization.
+/// Extract the inner text of the first `<tag ...>...</tag>` occurrence.
+/// Uses quick-xml for robust parsing that tolerates malformed/unclosed tags.
+/// Returns the normalized value, or None when the tag is absent or empty.
 fn extract_tag(text: &str, tag: &str) -> Option<String> {
-    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>");
-    let caps = Regex::new(&pattern).ok()?.captures(text)?;
-    let value = normalize_text(caps.get(1)?.as_str());
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let target = tag.as_bytes();
+    let mut depth: u32 = 0;
+    let mut content = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.name().as_ref() == target => {
+                depth += 1;
+                if depth == 1 {
+                    content.clear(); // Start collecting content for first match
+                }
+            }
+            Ok(Event::Text(e)) if depth == 1 => {
+                if let Ok(txt) = e.unescape() {
+                    content.push_str(&txt);
+                }
+            }
+            Ok(Event::CData(e)) if depth == 1 => {
+                // CDATA sections: extract the raw bytes directly (no unescaping needed)
+                if let Ok(txt) = std::str::from_utf8(e.as_ref()) {
+                    content.push_str(txt);
+                }
+            }
+            Ok(Event::End(e)) if e.name().as_ref() == target => {
+                depth -= 1;
+                if depth == 0 {
+                    // Found complete first tag, normalize and return
+                    let value = normalize_text(&content);
+                    return if value.is_empty() { None } else { Some(value) };
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
     }
+    None
 }
 
 /// Every non-empty text value of `<tag ...>...</tag>` in document order.
+/// Uses quick-xml to tolerate malformed NFOs and skip unclosed tags.
 fn extract_all_tags(text: &str, tag: &str) -> Vec<String> {
-    let pattern = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>");
-    let Ok(re) = Regex::new(&pattern) else {
-        return Vec::new();
-    };
-    re.captures_iter(text)
-        .filter_map(|c| {
-            let value = normalize_text(c.get(1)?.as_str());
-            if value.is_empty() {
-                None
-            } else {
-                Some(value)
+    let mut reader = Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let target = tag.as_bytes();
+    let mut depth: u32 = 0;
+    let mut content = String::new();
+    let mut results = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) if e.name().as_ref() == target => {
+                depth += 1;
+                if depth == 1 {
+                    content.clear();
+                }
             }
-        })
-        .collect()
+            Ok(Event::Text(e)) if depth >= 1 => {
+                if let Ok(txt) = e.unescape() {
+                    content.push_str(&txt);
+                }
+            }
+            Ok(Event::CData(e)) if depth >= 1 => {
+                if let Ok(txt) = std::str::from_utf8(e.as_ref()) {
+                    content.push_str(txt);
+                }
+            }
+            Ok(Event::End(e)) if e.name().as_ref() == target => {
+                if depth == 1 {
+                    let value = normalize_text(&content);
+                    if !value.is_empty() {
+                        results.push(value);
+                    }
+                    content.clear();
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    results
+}
+
+/// Extract a clean image URL/path from a tag that may contain either plain
+/// text (`<thumb>thumb.jpg</thumb>`) or Kodi-style nested child thumbs
+/// (`<fanart><thumb preview="url">url</thumb></fanart>`). For the nested case,
+/// returns the first inner `<thumb>` text content (a clean URL), never the raw
+/// markup. Returns None when the tag is absent or holds no usable value.
+fn extract_image_field(text: &str, tag: &str) -> Option<String> {
+    let raw = extract_tag(text, tag)?;
+    // If the captured content itself contains '<', it might be nested markup.
+    // Try to extract the first <thumb> child.
+    if raw.contains('<') {
+        if let Some(thumb) = extract_tag(&raw, "thumb") {
+            return Some(thumb);
+        }
+        // No inner thumb matched; the raw value is unusable.
+        return None;
+    }
+    Some(raw)
+}
+
+/// Pick the first usable image across cover/poster/thumb/fanart so that a work
+/// always gets a cover even when the NFO has no explicit `<cover>` tag. This
+/// mirrors the per-tag fallback used by the rebuild-to-work mapper.
+fn first_image_url(doc: &ParsedNfoDocument) -> Option<String> {
+    doc.cover_url
+        .clone()
+        .or_else(|| doc.poster_path.clone())
+        .or_else(|| doc.thumb_path.clone())
+        .or_else(|| doc.fanart_path.clone())
 }
 
 /// Pull a `name="value"` attribute out of an opening tag's source slice.
@@ -334,14 +428,19 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
    doc.release_date = extract_tag(xml, "premiered")
         .or_else(|| extract_tag(xml, "releasedate"))
         .or_else(|| extract_tag(xml, "release"));
-    doc.cover_url = extract_tag(xml, "cover");
-    doc.poster_path = extract_tag(xml, "poster");
-    doc.thumb_path = extract_tag(xml, "thumb");
-    doc.fanart_path = extract_tag(xml, "fanart");
+    doc.cover_url = extract_image_field(xml, "cover");
+    doc.poster_path = extract_image_field(xml, "poster");
+    doc.thumb_path = extract_image_field(xml, "thumb");
+    doc.fanart_path = extract_image_field(xml, "fanart");
+    // When the NFO has no explicit <cover> tag, fall back to the first
+    // available image so downstream cover_path is populated.
+    if doc.cover_url.is_none() {
+        doc.cover_url = first_image_url(&doc);
+    }
     doc.website = extract_tag(xml, "website");
-   doc.mpaa = extract_tag(xml, "mpaa");
+    doc.mpaa = extract_tag(xml, "mpaa");
     doc.criticrating = extract_tag(xml, "criticrating").and_then(|v| v.trim().parse::<f32>().ok());
-   doc.rating_sources = parse_rating_sources(xml);
+    doc.rating_sources = parse_rating_sources(xml);
 
     Ok(doc)
 }
@@ -349,6 +448,40 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_nfo_document_handles_kodi_nested_fanart_thumbs() {
+        let xml = r#"<movie>
+  <num>ABP-601</num>
+  <thumb preview="https://c0.jdbstatic.com/samples/aq/Aq5nO_l_0.jpg">https://c0.jdbstatic.com/samples/aq/Aq5nO_l_0.jpg</thumb>
+  <fanart>
+    <thumb preview="https://c0.jdbstatic.com/samples/aq/Aq5nO_l_0.jpg">https://c0.jdbstatic.com/samples/aq/Aq5nO_l_0.jpg</thumb>
+    <thumb preview="https://c0.jdbstatic.com/samples/aq/Aq5nO_l_1.jpg">https://c0.jdbstatic.com/samples/aq/Aq5nO_l_1.jpg</thumb>
+  </fanart>
+</movie>"#;
+        let parsed = parse_nfo_document(xml).expect("parse should succeed");
+        // Top-level <thumb> with preview attr should yield the inner URL cleanly.
+        assert_eq!(
+            parsed.thumb_path.as_deref(),
+            Some("https://c0.jdbstatic.com/samples/aq/Aq5nO_l_0.jpg")
+        );
+        // Nested <fanart><thumb> should NOT leak raw tag markup; it should be a clean URL.
+        let fanart = parsed.fanart_path.as_deref().unwrap_or("");
+        assert!(
+            !fanart.contains("<thumb"),
+            "fanart_path must not contain raw <thumb> markup, got: {fanart}"
+        );
+        assert!(
+            fanart.starts_with("https://"),
+            "fanart_path should be the first nested thumb URL, got: {fanart}"
+        );
+        // Cover should fall back to the first available image (thumb here).
+        assert!(
+            parsed.cover_url.is_some(),
+            "cover_url should fall back to thumb/poster/fanart when no <cover> tag exists"
+        );
+    }
+
 
     #[test]
     fn strip_cdata_returns_inner_text_without_markers() {

@@ -34,8 +34,54 @@ import {
   selectedItemIds,
   viewItemsForMode,
   workbenchViewTitle,
-  formatRebuildReport
+  formatRebuildReport,
+  libraryCardArtwork,
+  libraryCardSubtitle,
+  libraryCardTitle,
+  formatRuntime,
+  partitionWorksByKind
 } from "./viewModel";
+
+import type { Work } from "./api";
+
+/** Builds a Work fixture with sensible defaults so each test only spells out
+ *  the fields it cares about. Keeps inline objects in sync as Work grows. */
+function makeWork(overrides: Partial<Work> = {}): Work {
+  return {
+    code_kind: "standard",
+    normalized_code: "ABP-525",
+    title_zh: null,
+    original_title: null,
+    source_code: null,
+    aliases: [],
+    summary: null,
+    outline: null,
+    cover_path: null,
+    poster_path: null,
+    thumb_path: null,
+    fanart_path: null,
+    tags: [],
+    genres: [],
+    sets: [],
+    lists: [],
+    rating: null,
+    rating_value: null,
+    rating_max: null,
+    rating_votes: null,
+    criticrating: null,
+    watch_status: "Unwatched",
+    studio: null,
+    label: null,
+    director: null,
+    release_date: null,
+    runtime_minutes: null,
+    year: null,
+    website: null,
+    mpaa: null,
+    has_video: true,
+    ...overrides,
+  };
+}
 
 describe("buildDashboardStats", () => {
   it("counts ingest decisions and duplicate codes", () => {
@@ -145,19 +191,13 @@ describe("coverPreviewPathForItem", () => {
         cover_url: "H:/Inbox/ABP-001-poster.jpg"
       }
     };
-    const work = {
+    const work = makeWork({
       id: 7,
       normalized_code: "ABP-001",
       title_zh: "已有作品",
-      original_title: null,
-      aliases: [],
-      summary: null,
       cover_path: "H:/Archive/ABP-001/poster.jpg",
-      tags: [],
-      lists: [],
-      rating: null,
-      watch_status: "Unwatched" as const
-    };
+      watch_status: "Unwatched"
+    });
 
     expect(coverPreviewPathForItem(item, work)).toBe("H:/Archive/ABP-001/poster.jpg");
     expect(coverPreviewPathForItem(item, null)).toBe("H:/Inbox/ABP-001-poster.jpg");
@@ -287,51 +327,15 @@ describe("archiveExecutionSummary", () => {
 
 describe("formatWorkOption", () => {
   it("shows work id, code, and preferred title for merge selection", () => {
-    expect(formatWorkOption({
-      id: 7,
-      normalized_code: "ABP-525",
-      title_zh: "已有作品",
-      original_title: "Original",
-      aliases: [],
-      summary: null,
-      cover_path: null,
-      tags: [],
-      lists: [],
-      rating: null,
-      watch_status: "Unwatched"
-    })).toBe("#7 · ABP-525 · 已有作品");
+    expect(formatWorkOption(makeWork({ id: 7, normalized_code: "ABP-525", title_zh: "已有作品", original_title: "Original", watch_status: "Unwatched" as const }))).toBe("#7 · ABP-525 · 已有作品");
   });
 });
 
 describe("mergeableWorksForItem", () => {
   it("keeps existing works available while excluding the item current candidate work", () => {
     const works = [
-      {
-        id: 7,
-        normalized_code: "ABP-525",
-        title_zh: "Existing A",
-        original_title: null,
-        aliases: [],
-        summary: null,
-        cover_path: null,
-        tags: [],
-        lists: [],
-        rating: null,
-        watch_status: "Unwatched" as const
-      },
-      {
-        id: 8,
-        normalized_code: "ABS-204",
-        title_zh: "Merge Target",
-        original_title: null,
-        aliases: [],
-        summary: null,
-        cover_path: null,
-        tags: [],
-        lists: [],
-        rating: null,
-        watch_status: "Favorite" as const
-      }
+      makeWork({ id: 7, normalized_code: "ABP-525", title_zh: "Existing A", watch_status: "Unwatched" as const }),
+      makeWork({ id: 8, normalized_code: "ABS-204", title_zh: "Merge Target", watch_status: "Favorite" as const })
     ];
     const item = { ...demoItems[3], candidate_work_id: 7 };
 
@@ -342,32 +346,8 @@ describe("mergeableWorksForItem", () => {
 describe("mergeVersionTargetWorks", () => {
   it("excludes the currently selected work from version merge targets", () => {
     const works = [
-      {
-        id: 7,
-        normalized_code: "ABP-525",
-        title_zh: "Current",
-        original_title: null,
-        aliases: [],
-        summary: null,
-        cover_path: null,
-        tags: [],
-        lists: [],
-        rating: null,
-        watch_status: "Unwatched" as const
-      },
-      {
-        id: 8,
-        normalized_code: "ABS-204",
-        title_zh: "Target",
-        original_title: null,
-        aliases: [],
-        summary: null,
-        cover_path: null,
-        tags: [],
-        lists: [],
-        rating: null,
-        watch_status: "Favorite" as const
-      }
+      makeWork({ id: 7, normalized_code: "ABP-525", title_zh: "Current", watch_status: "Unwatched" as const }),
+      makeWork({ id: 8, normalized_code: "ABS-204", title_zh: "Target", watch_status: "Favorite" as const })
     ];
 
     expect(mergeVersionTargetWorks(works, works[0]).map((work) => work.id)).toEqual([8]);
@@ -377,32 +357,8 @@ describe("mergeVersionTargetWorks", () => {
 
 describe("library work helpers", () => {
   const works = [
-    {
-      id: 7,
-      normalized_code: "ABP-525",
-      title_zh: "本地标题",
-      original_title: "Original A",
-      aliases: ["ABP525"],
-      summary: null,
-      cover_path: null,
-      tags: ["收藏", "高清"],
-      lists: ["待看"],
-      rating: 9,
-      watch_status: "Favorite" as const
-    },
-    {
-      id: 8,
-      normalized_code: "ABS-204",
-      title_zh: "另一个标题",
-      original_title: null,
-      aliases: [],
-      summary: null,
-      cover_path: null,
-      tags: ["高清"],
-      lists: ["已整理"],
-      rating: null,
-      watch_status: "Watched" as const
-    }
+    makeWork({ id: 7, normalized_code: "ABP-525", title_zh: "本地标题", original_title: "Original A", aliases: ["ABP525"], tags: ["收藏", "高清"], lists: ["待看"], rating: 9, watch_status: "Favorite" as const }),
+    makeWork({ id: 8, normalized_code: "ABS-204", title_zh: "另一个标题", tags: ["高清"], lists: ["已整理"], watch_status: "Watched" as const })
   ];
 
   it("filters works by query text and watch status", () => {
@@ -501,5 +457,105 @@ describe("formatRebuildReport", () => {
     const message = formatRebuildReport("rebuild", report);
     expect(message).toContain("重建完成");
     expect(message).toContain("1 个 NFO 解析失败");
+  });
+});
+
+describe("library browse layer helpers", () => {
+  const standardWork = {
+    id: 1,
+    code_kind: "standard" as const,
+    normalized_code: "ABP-525",
+    title_zh: "中文标题",
+    original_title: "Original Title",
+    source_code: null,
+    aliases: [],
+    summary: null,
+    outline: null,
+    cover_path: null,
+    poster_path: "H:/posters/abp525.jpg",
+    thumb_path: null,
+    fanart_path: null,
+    tags: ["高清"],
+    genres: [],
+    sets: [],
+    lists: [],
+    rating: null,
+    rating_value: 8.5,
+    rating_max: 10,
+    rating_votes: 120,
+    criticrating: null,
+    watch_status: "Unwatched" as const,
+    studio: "S1",
+    label: null,
+    director: null,
+    release_date: "2017-01-01",
+    runtime_minutes: 150,
+    year: 2017,
+    website: null,
+    mpaa: null,
+    has_video: true
+  };
+  const nonStandardWork = {
+    id: 2,
+    code_kind: "non_standard" as const,
+    normalized_code: null,
+    title_zh: "非番号作品",
+    original_title: null,
+    source_code: "SOME-TITLE-001",
+    aliases: [],
+    summary: null,
+    outline: null,
+    cover_path: "H:/covers/some.jpg",
+    poster_path: null,
+    thumb_path: null,
+    fanart_path: null,
+    tags: [],
+    genres: [],
+    sets: [],
+    lists: [],
+    rating: null,
+    rating_value: null,
+    rating_max: null,
+    rating_votes: null,
+    criticrating: null,
+    watch_status: "Unwatched" as const,
+    studio: null,
+    label: null,
+    director: null,
+    release_date: null,
+    runtime_minutes: null,
+    year: null,
+    website: null,
+    mpaa: null,
+    has_video: true
+  };
+
+  it("partitions works into standard and non-standard sections", () => {
+    const result = partitionWorksByKind([standardWork, nonStandardWork]);
+    expect(result.standard.map((w) => w.id)).toEqual([1]);
+    expect(result.nonStandard.map((w) => w.id)).toEqual([2]);
+  });
+
+  it("uses the normalized code as the card title when present, otherwise the title", () => {
+    expect(libraryCardTitle(standardWork)).toBe("ABP-525");
+    expect(libraryCardTitle(nonStandardWork)).toBe("非番号作品");
+  });
+
+  it("shows the title as subtitle only when it differs from the main label", () => {
+    expect(libraryCardSubtitle(standardWork)).toBe("中文标题");
+    expect(libraryCardSubtitle(nonStandardWork)).toBe("");
+  });
+
+  it("prefers poster, then cover, then thumb, then fanart for the card artwork", () => {
+    expect(libraryCardArtwork(standardWork)).toBe("H:/posters/abp525.jpg");
+    expect(libraryCardArtwork(nonStandardWork)).toBe("H:/covers/some.jpg");
+  });
+
+  it("formats runtime minutes into hour and minute strings", () => {
+    expect(formatRuntime(150)).toBe("2时30分");
+    expect(formatRuntime(60)).toBe("1小时");
+    expect(formatRuntime(45)).toBe("45分钟");
+    expect(formatRuntime(null)).toBe("");
+    expect(formatRuntime(0)).toBe("");
   });
 });

@@ -46,6 +46,8 @@ pub struct Work {
     pub poster_path: Option<PathBuf>,
     pub thumb_path: Option<PathBuf>,
     pub fanart_path: Option<PathBuf>,
+    pub screenshot_path: Option<PathBuf>,
+    pub gif_path: Option<PathBuf>,
     pub tags: Vec<String>,
     pub sets: Vec<String>,
     pub lists: Vec<String>,
@@ -289,4 +291,87 @@ pub struct DimensionCount {
     pub id: i64,
     pub name: String,
     pub work_count: i64,
+}
+
+/// Centralized archive migration: one work to be migrated from scattered
+/// NFO + video into a single work directory (code/code-v2.mp4 + code.nfo + artwork).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationWorkPlan {
+    pub code: String,
+    pub nfo_path: PathBuf,
+    pub video_paths: Vec<PathBuf>,
+    pub target_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationPlan {
+    pub works: Vec<MigrationWorkPlan>,
+    pub total_nfos: usize,
+    pub matched_videos: usize,
+    pub unmatched_nfos: usize,
+}
+
+/// One work's aggregated resources discovered in the unified resource pool:
+/// a NFO (the authority that defines the work), plus every video/image matched
+/// to the same normalized code across all scanned directories.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PooledWork {
+    pub code: String,
+    pub nfo_path: Option<PathBuf>,
+    pub videos: Vec<PathBuf>,
+    pub poster: Option<PathBuf>,
+    pub fanart: Option<PathBuf>,
+    pub thumb: Option<PathBuf>,
+    pub screenshots: Vec<PathBuf>,
+    pub gifs: Vec<PathBuf>,
+}
+
+impl PooledWork {
+    pub fn new(code: String) -> Self {
+        Self {
+            code,
+            nfo_path: None,
+            videos: Vec::new(),
+            poster: None,
+            fanart: None,
+            thumb: None,
+            screenshots: Vec::new(),
+            gifs: Vec::new(),
+        }
+    }
+}
+
+/// Result of scanning the unified resource pool: works keyed by code (driven by
+/// NFOs), plus aggregate counts and resources that could not be tied to a code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ResourcePool {
+    pub works: Vec<PooledWork>,
+    pub total_nfos: usize,
+    pub total_videos: usize,
+    pub total_images: usize,
+    pub orphan_videos: usize,
+    pub orphan_images: usize,
+}
+
+/// One work's unified migration into a self-contained directory. Every path is
+/// the source location; `target_dir` is where they will be consolidated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnifiedMigrationWorkPlan {
+    pub code: String,
+    pub nfo_path: Option<PathBuf>,
+    pub videos: Vec<PathBuf>,
+    pub poster: Option<PathBuf>,
+    pub fanart: Option<PathBuf>,
+    pub thumb: Option<PathBuf>,
+    pub screenshots: Vec<PathBuf>,
+    pub gifs: Vec<PathBuf>,
+    pub target_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UnifiedMigrationPlan {
+    pub works: Vec<UnifiedMigrationWorkPlan>,
+    pub total_works: usize,
+    pub total_videos: usize,
+    pub total_images: usize,
 }

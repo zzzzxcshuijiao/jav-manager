@@ -18,12 +18,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+quick-xml = "0.36"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2.7.1"
 thiserror = "1"
 walkdir = "2"
 

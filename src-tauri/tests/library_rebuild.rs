@@ -58,6 +58,8 @@ fn upsert_work_persists_rich_metadata_and_relations() {
         poster_path: Some("poster.jpg".to_string().into()),
         thumb_path: Some("thumb.jpg".to_string().into()),
         fanart_path: Some("fanart.jpg".to_string().into()),
+        screenshot_path: None,
+        gif_path: None,
         tags: vec!["中文字幕".to_string(), "微變態".to_string()],
         sets: vec!["The Life Erotic".to_string()],
         lists: vec![],
@@ -199,6 +201,8 @@ fn sample_work(code: &str) -> Work {
         poster_path: None,
         thumb_path: None,
         fanart_path: None,
+        screenshot_path: None,
+        gif_path: None,
         tags: vec![],
         sets: vec![],
         lists: vec![],
@@ -232,7 +236,7 @@ fn rebuild_merges_multi_cd_nfos_into_one_work_and_multiple_versions() {
 
     let repo = sandbox.open_repo();
     repo.migrate().unwrap();
-    let report = repo.rebuild_library(&[sandbox.root().to_path_buf()]).unwrap();
+    let report = repo.rebuild_library(&[sandbox.root().to_path_buf()], &media_manager::poster_index::PosterIndex::empty()).unwrap();
 
     assert_eq!(report.works_created, 1);
     assert_eq!(report.works_merged, 1);
@@ -250,7 +254,7 @@ fn rebuild_marks_nonstandard_num_as_nonstandard_and_keeps_source_code() {
 
     let repo = sandbox.open_repo();
     repo.migrate().unwrap();
-    repo.rebuild_library(&[sandbox.root().to_path_buf()]).unwrap();
+    repo.rebuild_library(&[sandbox.root().to_path_buf()], &media_manager::poster_index::PosterIndex::empty()).unwrap();
 
     let works = repo.list_works().unwrap();
     assert_eq!(works.len(), 1);
@@ -274,7 +278,7 @@ fn rebuild_rolls_back_when_relation_write_fails() {
     repo.debug_drop_table("tags").unwrap();
 
     let before = repo.list_works().unwrap();
-    let result = repo.rebuild_library(&[sandbox.root().to_path_buf()]);
+    let result = repo.rebuild_library(&[sandbox.root().to_path_buf()], &media_manager::poster_index::PosterIndex::empty());
     assert!(result.is_err());
     let after = repo.list_works().unwrap();
     assert_eq!(before, after);
@@ -324,7 +328,7 @@ fn query_apis_return_dimension_counts_and_and_filtered_works() {
 
     let repo = sandbox.open_repo();
     repo.migrate().unwrap();
-    repo.rebuild_library(&[sandbox.root().to_path_buf()]).unwrap();
+    repo.rebuild_library(&[sandbox.root().to_path_buf()], &media_manager::poster_index::PosterIndex::empty()).unwrap();
 
     let tags = repo.list_tags().unwrap();
     let giant = tags
