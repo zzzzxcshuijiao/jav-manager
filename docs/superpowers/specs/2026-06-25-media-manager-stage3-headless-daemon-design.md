@@ -145,6 +145,11 @@ pub struct ProcessReport {
     pub failed: usize,
 }
 
+pub struct RunOnceReport {
+    pub scan: ScanReport,
+    pub process: ProcessReport,
+}
+
 pub struct HeadlessDaemon<'a> {
     pub repo: &'a Repository,
     pub config: DaemonConfig,
@@ -195,7 +200,7 @@ pub struct HeadlessDaemon<'a> {
 
 - 先调用 `scan_now`。
 - 然后持续处理队列，直到队列为空或 daemon 被暂停。
-- 返回 `ProcessReport`。
+- 返回 `RunOnceReport`，同时包含本轮扫描排队数和处理计数，方便 CLI smoke 与后续控制接口展示单轮运行摘要。
 
 ## 完成采样策略
 
@@ -313,6 +318,6 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 自审
 
-- 占位扫描：没有 TODO/TBD 或未定义任务。
+- 占位扫描：没有未完成标记或未定义任务。
 - 范围检查：只覆盖 headless daemon core；HTTP/WebSocket、托盘、自启、真实 scraper 都明确延后。
 - 一致性检查：数据流复用阶段 2 `AutoPipeline`、`CompletionSnapshot` 和 Repository settings，没有引入第二套管线模型。
