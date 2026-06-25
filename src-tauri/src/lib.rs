@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod archive;
 pub mod commands;
+pub mod daemon_control;
 pub mod daemon;
 pub mod domain;
 pub mod identifier;
