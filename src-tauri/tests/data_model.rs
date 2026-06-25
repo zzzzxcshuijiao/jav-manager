@@ -1,4 +1,6 @@
-use media_manager::domain::{CodeKind, ScrapeJob, ScrapeStatus, WatchStatus, Work};
+use media_manager::domain::{
+    CodeKind, Exception, ExceptionKind, ExceptionStatus, ScrapeJob, ScrapeStatus, WatchStatus, Work,
+};
 use media_manager::storage::Repository;
 
 /// Minimal valid `Work` for tests. Updated in later tasks as Work gains fields.
@@ -112,4 +114,32 @@ fn scrape_jobs_roundtrip() {
     assert_eq!(jobs[0].source, "FANZA");
     assert_eq!(jobs[0].status, ScrapeStatus::Failed);
     assert_eq!(jobs[0].attempts, 2);
+}
+
+#[test]
+fn exceptions_record_list_and_resolve() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    let id = repo
+        .record_exception(&Exception {
+            id: None,
+            object_path: "H:/dl/x.mp4".to_string(),
+            kind: ExceptionKind::ScrapeFailed,
+            evidence_json: r#"{"sources":["FANZA","JavBus"]}"#.to_string(),
+            status: ExceptionStatus::Open,
+            created_at: None,
+            resolved_at: None,
+        })
+        .unwrap();
+
+    let open = repo.list_exceptions().unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].kind, ExceptionKind::ScrapeFailed);
+
+    repo.resolve_exception(id, ExceptionStatus::Resolved).unwrap();
+    let after = repo.list_exceptions().unwrap();
+    assert_eq!(after[0].status, ExceptionStatus::Resolved);
+    assert!(after[0].resolved_at.is_some());
 }

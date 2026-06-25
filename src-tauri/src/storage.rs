@@ -1,7 +1,8 @@
 use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, ScrapeJob, ScrapeStatus,
-    WatchStatus, Work, CodeKind, DimensionCount, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
+    WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind, ExceptionStatus, Tag,
+    WorkDetail, WorkFilters, WorkRating, WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -207,6 +208,21 @@ impl Repository {
                 last_attempted_at TEXT,
                 error TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+        // Exceptions review queue (Task 4). One row per issue the user must
+        // triage: code conflicts, duplicate candidates, scrape failures.
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS exceptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                object_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'Open',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
             );
             ",
         )?;
@@ -2455,6 +2471,60 @@ impl Repository {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
+    // --- exceptions review queue (Task 4) ---
+
+    /// Record an issue into the exceptions review queue. `id`, `created_at`,
+    /// and `resolved_at` on the input are ignored; the database owns them.
+    /// Returns the new row id.
+    pub fn record_exception(&self, ex: &Exception) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO exceptions (object_path, kind, evidence_json, status)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                ex.object_path,
+                exception_kind_str(&ex.kind),
+                ex.evidence_json,
+                exception_status_str(&ex.status),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List every exception row, newest first. All rows are returned regardless
+    /// of status; callers that only want the active queue filter on `Open`.
+    pub fn list_exceptions(&self) -> Result<Vec<Exception>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, object_path, kind, evidence_json, status, created_at, resolved_at
+             FROM exceptions ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let kind: String = row.get(2)?;
+            let status: String = row.get(4)?;
+            Ok(Exception {
+                id: row.get(0)?,
+                object_path: row.get(1)?,
+                kind: parse_exception_kind(&kind),
+                evidence_json: row.get(3)?,
+                status: parse_exception_status(&status),
+                created_at: row.get(5)?,
+                resolved_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Move an exception to a terminal status (`Ignored` or `Resolved`) and
+    /// stamp `resolved_at`. A no-op-but-still-updates if the id is unknown:
+    /// callers that need to detect a missing row check `conn.changes()` via a
+    /// dedicated method if needed.
+    pub fn resolve_exception(&self, id: i64, status: ExceptionStatus) -> Result<()> {
+        self.conn.execute(
+            "UPDATE exceptions SET status = ?1, resolved_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![exception_status_str(&status), id],
+        )?;
+        Ok(())
+    }
+
 }
 
 fn parse_watch_status(value: &str) -> WatchStatus {
@@ -2465,6 +2535,36 @@ fn parse_watch_status(value: &str) -> WatchStatus {
         "Watching" => WatchStatus::Watching,
         "OnHold" => WatchStatus::OnHold,
         _ => WatchStatus::Unwatched,
+    }
+}
+
+// --- exceptions review queue (Task 4) ---
+fn exception_kind_str(k: &ExceptionKind) -> &'static str {
+    match k {
+        ExceptionKind::CodeConflict => "CodeConflict",
+        ExceptionKind::DuplicateCandidate => "DuplicateCandidate",
+        ExceptionKind::ScrapeFailed => "ScrapeFailed",
+    }
+}
+fn parse_exception_kind(v: &str) -> ExceptionKind {
+    match v {
+        "DuplicateCandidate" => ExceptionKind::DuplicateCandidate,
+        "ScrapeFailed" => ExceptionKind::ScrapeFailed,
+        _ => ExceptionKind::CodeConflict,
+    }
+}
+fn exception_status_str(s: &ExceptionStatus) -> &'static str {
+    match s {
+        ExceptionStatus::Open => "Open",
+        ExceptionStatus::Ignored => "Ignored",
+        ExceptionStatus::Resolved => "Resolved",
+    }
+}
+fn parse_exception_status(v: &str) -> ExceptionStatus {
+    match v {
+        "Ignored" => ExceptionStatus::Ignored,
+        "Resolved" => ExceptionStatus::Resolved,
+        _ => ExceptionStatus::Open,
     }
 }
 

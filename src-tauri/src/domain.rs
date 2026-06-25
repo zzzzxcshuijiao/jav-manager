@@ -398,3 +398,36 @@ pub struct ScrapeJob {
     pub last_attempted_at: Option<String>,
     pub error: Option<String>,
 }
+
+/// The kind of issue an exception row represents. Drives the review-queue UI:
+/// code conflicts need a manual code choice, duplicate candidates need a
+/// keep/ignore decision, scrape failures need a retry or manual override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExceptionKind {
+    CodeConflict,
+    DuplicateCandidate,
+    ScrapeFailed,
+}
+
+/// Lifecycle of an exception. `Open` is the default for newly recorded rows;
+/// the user moves rows to `Ignored` (dismissed) or `Resolved` (acted on).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExceptionStatus {
+    Open,
+    Ignored,
+    Resolved,
+}
+
+/// One row in the `exceptions` review queue. `evidence_json` is a free-form
+/// JSON blob whose shape depends on `kind` (conflicting codes, duplicate paths,
+/// scrape errors), keeping the schema stable as the queue evolves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exception {
+    pub id: Option<i64>,
+    pub object_path: String,
+    pub kind: ExceptionKind,
+    pub evidence_json: String,
+    pub status: ExceptionStatus,
+    pub created_at: Option<String>,
+    pub resolved_at: Option<String>,
+}
