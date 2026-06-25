@@ -1,4 +1,4 @@
-use media_manager::domain::{CodeKind, WatchStatus, Work};
+use media_manager::domain::{CodeKind, ScrapeJob, ScrapeStatus, WatchStatus, Work};
 use media_manager::storage::Repository;
 
 /// Minimal valid `Work` for tests. Updated in later tasks as Work gains fields.
@@ -83,4 +83,33 @@ fn watch_progress_is_persisted_and_read_back() {
     let cleared = repo.set_watch_progress(id, None, None).unwrap();
     assert_eq!(cleared.watch_progress_seconds, None);
     assert_eq!(cleared.last_played_at, None);
+}
+
+#[test]
+fn scrape_jobs_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+    let mut work = sample_work();
+    work.normalized_code = Some("ABP-003".to_string());
+    let work_id = repo.upsert_work(&work).unwrap();
+
+    let id = repo
+        .record_scrape_job(&ScrapeJob {
+            id: None,
+            work_id,
+            source: "FANZA".to_string(),
+            status: ScrapeStatus::Failed,
+            attempts: 2,
+            last_attempted_at: Some("2026-06-25T20:00:00Z".to_string()),
+            error: Some("not found".to_string()),
+        })
+        .unwrap();
+
+    let jobs = repo.list_scrape_jobs().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].id, Some(id));
+    assert_eq!(jobs[0].source, "FANZA");
+    assert_eq!(jobs[0].status, ScrapeStatus::Failed);
+    assert_eq!(jobs[0].attempts, 2);
 }

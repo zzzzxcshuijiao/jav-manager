@@ -380,3 +380,21 @@ pub struct UnifiedMigrationPlan {
     pub total_videos: usize,
     pub total_images: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScrapeStatus {
+    Pending,
+    Success,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrapeJob {
+    pub id: Option<i64>,
+    pub work_id: i64,
+    pub source: String,
+    pub status: ScrapeStatus,
+    pub attempts: i64,
+    pub last_attempted_at: Option<String>,
+    pub error: Option<String>,
+}

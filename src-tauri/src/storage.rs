@@ -1,7 +1,7 @@
 use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
-    IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, WatchStatus, Work,
-    CodeKind, DimensionCount, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
+    IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, ScrapeJob, ScrapeStatus,
+    WatchStatus, Work, CodeKind, DimensionCount, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -193,6 +193,20 @@ impl Repository {
                 max INTEGER NOT NULL,
                 votes INTEGER,
                 PRIMARY KEY (work_id, source)
+            );
+            ",
+        )?;
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS scrape_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempted_at TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             ",
         )?;
@@ -2394,6 +2408,51 @@ impl Repository {
     pub fn debug_drop_table(&self, table: &str) -> Result<()> {
         self.conn.execute(&format!("DROP TABLE {table}"), [])?;
         Ok(())
+    }
+
+    pub fn record_scrape_job(&self, job: &ScrapeJob) -> Result<i64> {
+        let status = match job.status {
+            ScrapeStatus::Pending => "Pending",
+            ScrapeStatus::Success => "Success",
+            ScrapeStatus::Failed => "Failed",
+        };
+        self.conn.execute(
+            "INSERT INTO scrape_jobs (work_id, source, status, attempts, last_attempted_at, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                job.work_id,
+                job.source,
+                status,
+                job.attempts,
+                job.last_attempted_at,
+                job.error,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_scrape_jobs(&self) -> Result<Vec<ScrapeJob>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, work_id, source, status, attempts, last_attempted_at, error
+             FROM scrape_jobs ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let status: String = row.get(3)?;
+            Ok(ScrapeJob {
+                id: row.get(0)?,
+                work_id: row.get(1)?,
+                source: row.get(2)?,
+                status: match status.as_str() {
+                    "Success" => ScrapeStatus::Success,
+                    "Failed" => ScrapeStatus::Failed,
+                    _ => ScrapeStatus::Pending,
+                },
+                attempts: row.get(4)?,
+                last_attempted_at: row.get(5)?,
+                error: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 
 }
