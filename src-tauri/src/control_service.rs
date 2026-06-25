@@ -1,4 +1,8 @@
-use crate::daemon_control::{build_daemon_status, DaemonControlRuntime, DaemonControlStatus};
+use crate::daemon_control::{
+    build_daemon_status, list_exception_entries, list_holding_entries, list_recent_pipeline_runs,
+    resolve_exception_entry, run_daemon_once, DaemonControlRuntime, DaemonControlStatus,
+};
+use crate::domain::ExceptionStatus;
 use crate::storage::Repository;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -164,22 +168,49 @@ impl ControlServiceRuntime {
     }
 
     fn route_v1(&mut self, request: &HttpRequest) -> String {
-        let result: Result<serde_json::Value> =
-            match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/v1/status") => self.status_json(),
-                ("POST", "/v1/pause") => {
-                    self.daemon.paused = true;
-                    self.status_json()
-                }
-                ("POST", "/v1/resume") => {
-                    self.daemon.paused = false;
-                    self.status_json()
-                }
-                _ => return json_response(404, json!({ "ok": false, "error": "not found" })),
-            };
-        match result {
+        match self.route_v1_result(request) {
             Ok(data) => ok_json(data),
+            Err(error) if error.to_string() == "not found" => {
+                json_response(404, json!({ "ok": false, "error": "not found" }))
+            }
             Err(error) => json_response(500, json!({ "ok": false, "error": error.to_string() })),
+        }
+    }
+
+    fn route_v1_result(&mut self, request: &HttpRequest) -> Result<serde_json::Value> {
+        match (request.method.as_str(), request.path.as_str()) {
+            ("GET", "/v1/status") => self.status_json(),
+            ("POST", "/v1/pause") => {
+                self.daemon.paused = true;
+                self.status_json()
+            }
+            ("POST", "/v1/resume") => {
+                self.daemon.paused = false;
+                self.status_json()
+            }
+            ("POST", "/v1/run-once") => {
+                let report = run_daemon_once(
+                    &self.repo,
+                    &mut self.daemon,
+                    self.config.metadata_provider_enabled,
+                )?;
+                Ok(serde_json::to_value(report)?)
+            }
+            ("GET", "/v1/holding") => Ok(serde_json::to_value(list_holding_entries(&self.repo)?)?),
+            ("GET", "/v1/exceptions") => {
+                Ok(serde_json::to_value(list_exception_entries(&self.repo)?)?)
+            }
+            ("GET", "/v1/runs") => {
+                Ok(serde_json::to_value(list_recent_pipeline_runs(&self.repo)?)?)
+            }
+            ("POST", path)
+                if path.starts_with("/v1/exceptions/") && path.ends_with("/resolve") =>
+            {
+                let id = parse_exception_resolve_path(path)?;
+                let exception = resolve_exception_entry(&self.repo, id, ExceptionStatus::Resolved)?;
+                Ok(serde_json::to_value(exception)?)
+            }
+            _ => Err(anyhow!("not found")),
         }
     }
 
@@ -307,6 +338,15 @@ fn origin_allowed(origin: Option<&str>) -> bool {
 
 fn ok_json(data: serde_json::Value) -> String {
     json_response(200, json!({ "ok": true, "data": data }))
+}
+
+fn parse_exception_resolve_path(path: &str) -> Result<i64> {
+    let id = path
+        .strip_prefix("/v1/exceptions/")
+        .and_then(|tail| tail.strip_suffix("/resolve"))
+        .ok_or_else(|| anyhow!("invalid exception resolve path"))?;
+    id.parse::<i64>()
+        .map_err(|_| anyhow!("invalid exception id"))
 }
 
 fn json_response(status: u16, body: serde_json::Value) -> String {

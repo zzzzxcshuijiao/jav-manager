@@ -1,4 +1,7 @@
 use media_manager::control_service::{ControlServiceConfig, ControlServiceRuntime};
+use media_manager::domain::{
+    Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
+};
 use media_manager::storage::Repository;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -159,6 +162,73 @@ fn v1_routes_require_token_and_allow_pause_resume_status() {
     assert!(status.contains("\"state\":\"Idle\""));
     assert!(paused.contains("\"state\":\"Paused\""));
     assert!(resumed.contains("\"state\":\"Idle\""));
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
+fn run_once_and_queue_routes_use_existing_daemon_control_helpers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    let inbox = tmp.path().join("inbox");
+    std::fs::write(inbox.join("ABP-501.mp4"), b"stable video bytes").unwrap();
+    let exception_id = repo
+        .record_exception(&Exception {
+            id: None,
+            object_path: "H:/Inbox/ABP-500.mp4".to_string(),
+            kind: ExceptionKind::ScrapeFailed,
+            evidence_json: "{\"source\":\"example\"}".to_string(),
+            status: ExceptionStatus::Open,
+            created_at: None,
+            resolved_at: None,
+        })
+        .unwrap();
+    repo.add_holding(&HoldingEntry {
+        id: None,
+        path: "H:/Inbox/manual.mp4".to_string(),
+        file_name: "manual.mp4".to_string(),
+        size_bytes: 42,
+        reason: HoldingReason::Unrecognizable,
+        created_at: None,
+    })
+    .unwrap();
+    repo.record_pipeline_run(&PipelineRun {
+        id: None,
+        file_path: "H:/Inbox/ABP-500.mp4".to_string(),
+        started_at: None,
+        finished_at: None,
+        steps_json: "[]".to_string(),
+        status: "exception".to_string(),
+        error: Some("not found".to_string()),
+    })
+    .unwrap();
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: true,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let run = authorized_post(handle.port(), "/v1/run-once");
+    let holding = authorized_get(handle.port(), "/v1/holding");
+    let exceptions = authorized_get(handle.port(), "/v1/exceptions");
+    let resolved = authorized_post(
+        handle.port(),
+        &format!("/v1/exceptions/{exception_id}/resolve"),
+    );
+    let runs = authorized_get(handle.port(), "/v1/runs");
+
+    assert!(run.contains("\"queued_files\":1"));
+    assert!(run.contains("\"archived\":1"));
+    assert!(holding.contains("manual.mp4"));
+    assert!(exceptions.contains("ABP-500.mp4"));
+    assert!(resolved.contains("\"status\":\"Resolved\""));
+    assert!(runs.contains("\"status\":\"archived\""));
 
     handle.shutdown().unwrap();
 }

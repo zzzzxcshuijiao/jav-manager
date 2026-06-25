@@ -4,7 +4,7 @@ use crate::domain::{
 };
 use crate::pipeline::{ScrapeCoordinator, ScraperSource};
 use crate::storage::Repository;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -176,8 +176,12 @@ pub fn resolve_exception_entry(
     repo: &Repository,
     id: i64,
     status: ExceptionStatus,
-) -> Result<()> {
-    repo.resolve_exception(id, status)
+) -> Result<Exception> {
+    repo.resolve_exception(id, status)?;
+    repo.list_exceptions()?
+        .into_iter()
+        .find(|exception| exception.id == Some(id))
+        .ok_or_else(|| anyhow!("exception not found"))
 }
 
 /// Return recent pipeline run rows for the status panel. The repository already
