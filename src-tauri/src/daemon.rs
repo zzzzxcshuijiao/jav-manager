@@ -113,7 +113,7 @@ pub struct HeadlessDaemon<'a> {
     pub completion_policy: CompletionPolicy,
     state: DaemonState,
     queue: VecDeque<QueuedFile>,
-    queued_keys: HashSet<PathBuf>,
+    known_keys: HashSet<PathBuf>,
     processed: usize,
     last_error: Option<String>,
 }
@@ -142,7 +142,7 @@ impl<'a> HeadlessDaemon<'a> {
             completion_policy,
             state: DaemonState::Idle,
             queue: VecDeque::new(),
-            queued_keys: HashSet::new(),
+            known_keys: HashSet::new(),
             processed: 0,
             last_error: None,
         }
@@ -187,7 +187,10 @@ impl<'a> HeadlessDaemon<'a> {
                 report.skipped_files += 1;
                 continue;
             }
-            for entry in WalkDir::new(root).into_iter().filter_map(|entry| entry.ok()) {
+            for entry in WalkDir::new(root)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+            {
                 if entry.file_type().is_file() {
                     candidates.push(entry.into_path());
                 }
@@ -224,7 +227,7 @@ impl<'a> HeadlessDaemon<'a> {
 
     fn queue_completed_file(&mut self, file: CompletedFile) -> bool {
         let key = queue_key(&file.path);
-        if !self.queued_keys.insert(key) {
+        if !self.known_keys.insert(key) {
             return false;
         }
         self.queue.push_back(QueuedFile {
@@ -257,7 +260,7 @@ impl<'a> HeadlessDaemon<'a> {
         let Some(queued) = self.queue.pop_front() else {
             return Ok(ProcessReport::default());
         };
-        self.queued_keys.remove(&queue_key(&queued.path));
+        let key = queue_key(&queued.path);
 
         self.state = DaemonState::Processing;
         let completed = queued.into_completed_file();
@@ -285,10 +288,14 @@ impl<'a> HeadlessDaemon<'a> {
                 self.last_error = Some(error.to_string());
                 self.state = DaemonState::Error;
                 self.processed += 1;
+                self.known_keys.remove(&key);
                 return Ok(report);
             }
         }
 
+        if report.failed > 0 {
+            self.known_keys.remove(&key);
+        }
         self.processed += 1;
         self.state = DaemonState::Idle;
         Ok(report)

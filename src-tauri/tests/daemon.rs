@@ -274,6 +274,23 @@ fn run_once_scans_and_processes_mixed_inbox_with_deterministic_counts() {
 }
 
 #[test]
+fn repeated_scan_does_not_duplicate_already_held_file_in_same_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    std::fs::write(inbox.join("random.mp4"), b"random-video").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let first = daemon.run_once().unwrap();
+    let second = daemon.run_once().unwrap();
+
+    assert_eq!(first.process.holding, 1);
+    assert_eq!(second.scan.queued_files, 0);
+    assert_eq!(second.process.processed, 0);
+    assert_eq!(repo.list_holding().unwrap().len(), 1);
+}
+
+#[test]
 fn operational_archive_failure_counts_failed_without_content_exception() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = open_repo(&tmp.path().join("library.sqlite"));

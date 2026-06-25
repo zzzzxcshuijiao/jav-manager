@@ -13,12 +13,17 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 2（自动管线 Rust 核心）已实现并验证。** 当前工作分支：`codex/stage2-auto-pipeline`。
 阶段 2 提供纯 Rust、无 WebView2 的核心：完成文件判定 → 番号识别 → 多源刮削记录 → 自包含归档布局/执行/回滚 → SQLite 入库，以及 holding / exception / pipeline_runs 路由。
 
+**阶段 3（无头守护核心）已实现并验证。**
+阶段 3 提供纯 Rust、无 WebView2 的 daemon core：从 SQLite settings 读取 `source_roots` / `archive_root` / `resource_pool_dirs`，扫描完成视频，维护内存队列，支持 `status` / `pause` / `resume` / `scan_now` / `process_next` / `run_once`，并调用阶段 2 `AutoPipeline` 完成归档、搁置、异常路由和失败计数。
+
 后端验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline`
+- `cargo test --manifest-path src-tauri/Cargo.toml --test daemon -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
+- `cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1`
 
 说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 2 新增失败。
 
@@ -33,13 +38,14 @@ git checkout codex/stage2-auto-pipeline
 # 2.（可选）解压 VibeCoding 状态：踩坑记录 lessons.md / 进度 tasks.md
 tar -xzf media-manager-ai-state.tar.gz   # 在仓库根解出 .ai_state/
 
-# 3. 验证阶段 2（轻量，不需要任何真实媒体资源）
+# 3. 验证阶段 3（轻量，不需要任何真实媒体资源）
 cargo test --manifest-path src-tauri/Cargo.toml -j 1
 cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1
+cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1
 npm install             # 前端依赖（按需）
 ```
 
-**关键：验证环境是自包含的。** `cargo test`、`stage1_smoke`、`stage2_smoke` 都用临时目录(`tempdir`)造假文件，**不依赖 H:/ 真实视频或 G:/ 图片库**。开发与测试全程不需要真实媒体资源——它们只在用户实际运行 daemon 处理真实库时才需要。
+**关键：验证环境是自包含的。** `cargo test`、`stage1_smoke`、`stage2_smoke`、`stage3_daemon_smoke` 都用临时目录(`tempdir`)造假文件，**不依赖 H:/ 真实视频或 G:/ 图片库**。开发与测试全程不需要真实媒体资源——它们只在用户实际运行 daemon 处理真实库时才需要。
 
 ## 必读文档（按顺序）
 
@@ -49,6 +55,8 @@ npm install             # 前端依赖（按需）
 2. **`docs/superpowers/specs/2026-06-25-media-manager-refactor-design.md`** — 全局设计：架构(后台 daemon + 前端 + SQLite)、自动管线、数据模型、深色沉浸 UI 六页、异常处理、刮削器、服务部署、测试策略、复用 vs 砍掉代码清单、5 阶段划分、后续(aria2 下载集成 / NAS 移动端浏览)。
 3. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage1-data-model.md`** — 阶段 1 的 plan（已完成，可作 TDD 风格参考）。
 4. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage2-auto-pipeline.md`** — 阶段 2 的 plan（已完成，含 TDD 步骤与验收）。
+5. **`docs/superpowers/specs/2026-06-25-media-manager-stage3-headless-daemon-design.md`** — 阶段 3 无头守护核心设计（已完成）。
+6. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage3-headless-daemon.md`** — 阶段 3 plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -68,6 +76,18 @@ npm install             # 前端依赖（按需）
 - 补上阶段 1 defer：`remove_work_from_collection` + `work_collections ON DELETE CASCADE` 回归测试。
 - 新增 `src-tauri/tests/auto_pipeline.rs` 与 `src-tauri/examples/stage2_smoke.rs`，全部使用 `tempdir` 假文件。
 
+## 阶段 3 交付物
+
+- 新增 `src-tauri/src/daemon.rs`：`DaemonConfig` / `CompletionPolicy` / `DaemonStatus` / `HeadlessDaemon` / `ScanReport` / `ProcessReport` / `RunOnceReport`。
+- `DaemonConfig::load` 从 SQLite settings 读取 `source_roots`、`archive_root`、`resource_pool_dirs`；缺 `archive_root` 时返回明确错误。
+- `scan_now` 递归扫描 source roots，跳过不存在 root、非视频文件、`.aria2` 未完成文件，只把完成且稳定的视频加入内存队列。
+- 队列按确定性顺序处理，使用 canonical path 去重；重复扫描不会重复排队同一文件。
+- `pause` / `resume` / `status` 维护纯内存状态，不启动后台线程、不写 SQLite。
+- `process_next` 从队列弹出一个文件，调用阶段 2 `AutoPipeline`，统计 archived / holding / exceptions / failed。
+- 操作性失败（例如归档根不可写 / 不是目录）计入 failed，阶段 2 写 `pipeline_runs.status = failed`，不进入内容异常队列。
+- `run_once` 执行一次“扫描 → drain 队列”，返回扫描报告 + 处理报告。
+- 新增 `src-tauri/tests/daemon.rs` 与 `src-tauri/examples/stage3_daemon_smoke.rs`，全部使用 `tempdir` 假文件和 fake scraper。
+
 ## 留给后续阶段的项（review 时判定 DEFER，不是缺陷）
 
 - `src-tauri/src/commands.rs:1422` 有第二个 `parse_watch_status`（前端命令路径）缺新变体 → **阶段 4 前端连线时修**（否则 UI 发新状态会降级为 Unwatched）
@@ -75,7 +95,7 @@ npm install             # 前端依赖（按需）
 
 ## 下一步
 
-写**阶段 3 plan（后台 daemon / 控制接口）**：把阶段 2 的 `AutoPipeline` 接入长期运行 worker，但仍保持不启动 Tauri GUI；设计 watcher/轮询、任务队列、暂停/恢复、状态查询、日志读取、重试入口，以及 Stage 4 前端需要消费的命令/API 边界。继续沿用 `tempdir` + CLI/单元测试，不依赖真实资源。
+进入**阶段 4（前端 / 控制接口连线）**：把阶段 3 的无头 daemon core 暴露给前端可消费的命令或本地控制接口，补 `commands.rs:1422` 的 `parse_watch_status` 新状态解析，落地设置页 / 状态反馈 / 异常队列 / 搁置区等 UI 连线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；前端验证用 `npx tsc --noEmit`、`npm test`、`npm run build` 与 HTTP 探测。
 
 ## 阶段 1 commit 清单
 
