@@ -87,7 +87,7 @@ export interface Work {
   rating_max?: number | null;
   rating_votes?: number | null;
   criticrating?: number | null;
-  watch_status: "Unwatched" | "Watched" | "Favorite";
+  watch_status: "Unwatched" | "WantToWatch" | "Watching" | "Watched" | "OnHold" | "Favorite";
   studio?: string | null;
   label?: string | null;
   director?: string | null;
@@ -102,6 +102,77 @@ export interface Work {
 export type WatchStatus = Work["watch_status"];
 
 export type CodeKind = "standard" | "non_standard";
+
+export type DaemonState = "Idle" | "Scanning" | "Processing" | "Paused" | "Error";
+export type MetadataSource = "example" | "disabled";
+
+export interface DaemonControlStatus {
+  state: DaemonState;
+  configured: boolean;
+  source_roots: string[];
+  archive_root?: string | null;
+  asset_roots: string[];
+  queued: number;
+  processed: number;
+  last_error?: string | null;
+  open_exceptions: number;
+  holding_items: number;
+  recent_runs: number;
+  metadata_source: MetadataSource;
+}
+
+export interface DaemonScanReport {
+  scanned_files: number;
+  queued_files: number;
+  skipped_files: number;
+}
+
+export interface DaemonProcessReport {
+  processed: number;
+  archived: number;
+  holding: number;
+  exceptions: number;
+  failed: number;
+}
+
+export interface DaemonRunOnceReport {
+  scan: DaemonScanReport;
+  process: DaemonProcessReport;
+}
+
+export type HoldingReason = "NoCode" | "ShortVideo" | "NonJapanese" | "Unrecognizable";
+
+export interface HoldingEntry {
+  id?: number | null;
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  reason: HoldingReason;
+  created_at?: string | null;
+}
+
+export type ExceptionKind = "CodeConflict" | "DuplicateCandidate" | "ScrapeFailed";
+export type ExceptionStatus = "Open" | "Ignored" | "Resolved";
+
+export interface ExceptionEntry {
+  id?: number | null;
+  object_path: string;
+  kind: ExceptionKind;
+  evidence_json: string;
+  status: ExceptionStatus;
+  created_at?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface PipelineRun {
+  id?: number | null;
+  file_path: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  steps_json: string;
+  status: string;
+  error?: string | null;
+}
 
 export interface WorkDetail {
   work: Work;
@@ -293,6 +364,30 @@ export const api = {
   },
   getMetadataProviderEnabled() {
     return command<boolean>("get_metadata_provider_enabled");
+  },
+  getDaemonStatus() {
+    return command<DaemonControlStatus>("get_daemon_status");
+  },
+  pauseDaemon() {
+    return command<DaemonControlStatus>("pause_daemon");
+  },
+  resumeDaemon() {
+    return command<DaemonControlStatus>("resume_daemon");
+  },
+  runDaemonOnce() {
+    return command<DaemonRunOnceReport>("run_daemon_once_command");
+  },
+  listHoldingEntries() {
+    return command<HoldingEntry[]>("list_holding_entries");
+  },
+  listExceptionEntries() {
+    return command<ExceptionEntry[]>("list_exception_entries");
+  },
+  resolveExceptionEntry(id: number, status: Exclude<ExceptionStatus, "Open">) {
+    return command<boolean>("resolve_exception_entry_command", { id, status });
+  },
+  listPipelineRuns() {
+    return command<PipelineRun[]>("list_pipeline_runs");
   },
   startScan(sourceRootIds: string[]) {
     return command<IngestJobSummary>("start_scan", { sourceRootIds });

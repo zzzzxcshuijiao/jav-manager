@@ -16,11 +16,16 @@ import {
   filterItems,
   filterWorksForLibrary,
   findIngestItemForWork,
+  formatDaemonState,
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
+  formatExceptionKind,
+  formatExceptionStatus,
   formatFileVersionSummary,
+  formatHoldingReason,
   formatMediaInfo,
+  formatPipelineStatus,
   formatWorkOption,
   mergeVersionTargetWorks,
   normalizeManualCodeInput,
@@ -35,6 +40,8 @@ import {
   viewItemsForMode,
   workbenchViewTitle,
   formatRebuildReport,
+  shortEvidence,
+  summarizeRunOnceReport,
   libraryCardArtwork,
   libraryCardSubtitle,
   libraryCardTitle,
@@ -457,6 +464,29 @@ describe("formatRebuildReport", () => {
     const message = formatRebuildReport("rebuild", report);
     expect(message).toContain("重建完成");
     expect(message).toContain("1 个 NFO 解析失败");
+  });
+});
+
+describe("daemon view helpers", () => {
+  it("labels daemon states, holding reasons, exception kinds and run statuses", () => {
+    expect(formatDaemonState("Idle")).toBe("空闲");
+    expect(formatDaemonState("Paused")).toBe("已暂停");
+    expect(formatHoldingReason("NoCode")).toBe("缺少番号");
+    expect(formatHoldingReason("Unrecognizable")).toBe("无法识别");
+    expect(formatExceptionKind("ScrapeFailed")).toBe("刮削失败");
+    expect(formatExceptionStatus("Resolved")).toBe("已解决");
+    expect(formatPipelineStatus("archived")).toBe("已归档");
+    expect(formatPipelineStatus("failed")).toBe("失败");
+  });
+
+  it("summarizes daemon run reports and trims JSON evidence", () => {
+    expect(summarizeRunOnceReport({
+      scan: { scanned_files: 3, queued_files: 2, skipped_files: 1 },
+      process: { processed: 2, archived: 1, holding: 1, exceptions: 0, failed: 0 }
+    })).toBe("扫描 3 个文件，入队 2 个，跳过 1 个；处理 2 个：归档 1，搁置 1，异常 0，失败 0。");
+
+    expect(shortEvidence("{\"source\":\"example\",\"message\":\"not found\"}", 24)).toBe("{\"source\":\"example\",\"...");
+    expect(shortEvidence("", 24)).toBe("无证据");
   });
 });
 

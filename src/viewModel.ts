@@ -2,7 +2,12 @@ import type {
   ArchiveActionLog,
   ArchivePlan,
   CodeConflictEvidence,
+  DaemonRunOnceReport,
+  DaemonState,
+  ExceptionKind,
+  ExceptionStatus,
   FileVersion,
+  HoldingReason,
   IngestDecision,
   IngestItem,
   IngestItemFilters,
@@ -409,6 +414,74 @@ export function formatRebuildReport(mode: RebuildMode, report: RebuildReport): s
   const verb = mode === "preview" ? "预览完成" : "重建完成";
   const errorPart = report.errors.length > 0 ? `，${report.errors.length} 个 NFO 解析失败` : "";
   return `${verb}：${report.nfos_scanned} 个 NFO，${report.works_created} 个作品，${report.works_merged} 个多文件合并组${errorPart}。`;
+}
+
+export function formatDaemonState(state: DaemonState): string {
+  const labels: Record<DaemonState, string> = {
+    Idle: "空闲",
+    Scanning: "扫描中",
+    Processing: "处理中",
+    Paused: "已暂停",
+    Error: "错误"
+  };
+  return labels[state];
+}
+
+export function formatHoldingReason(reason: HoldingReason): string {
+  const labels: Record<HoldingReason, string> = {
+    NoCode: "缺少番号",
+    ShortVideo: "短视频",
+    NonJapanese: "非日系内容",
+    Unrecognizable: "无法识别"
+  };
+  return labels[reason];
+}
+
+export function formatExceptionKind(kind: ExceptionKind): string {
+  const labels: Record<ExceptionKind, string> = {
+    CodeConflict: "番号冲突",
+    DuplicateCandidate: "重复候选",
+    ScrapeFailed: "刮削失败"
+  };
+  return labels[kind];
+}
+
+export function formatExceptionStatus(status: ExceptionStatus): string {
+  const labels: Record<ExceptionStatus, string> = {
+    Open: "待处理",
+    Ignored: "已忽略",
+    Resolved: "已解决"
+  };
+  return labels[status];
+}
+
+export function formatPipelineStatus(status: string): string {
+  const labels: Record<string, string> = {
+    running: "运行中",
+    archived: "已归档",
+    holding: "已搁置",
+    exception: "异常",
+    failed: "失败"
+  };
+  return labels[status] ?? status;
+}
+
+export function summarizeRunOnceReport(report: DaemonRunOnceReport): string {
+  return [
+    `扫描 ${report.scan.scanned_files} 个文件，入队 ${report.scan.queued_files} 个，跳过 ${report.scan.skipped_files} 个`,
+    `处理 ${report.process.processed} 个：归档 ${report.process.archived}，搁置 ${report.process.holding}，异常 ${report.process.exceptions}，失败 ${report.process.failed}。`
+  ].join("；");
+}
+
+export function shortEvidence(value: string | null | undefined, maxLength = 120): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "无证据";
+  }
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 // --- Library browse layer helpers (Phase H follow-up) ---

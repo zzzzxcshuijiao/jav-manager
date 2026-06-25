@@ -112,7 +112,10 @@ const availableActions = ["扫描真实目录", "筛选扫描结果", "查看条
 
 const watchStatusLabels: Record<WatchStatus, string> = {
   Unwatched: "未观看",
+  WantToWatch: "想看",
+  Watching: "观看中",
   Watched: "已观看",
+  OnHold: "搁置",
   Favorite: "收藏"
 };
 
