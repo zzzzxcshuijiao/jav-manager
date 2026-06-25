@@ -1,6 +1,6 @@
 use media_manager::domain::{
-    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, ScrapeJob,
-    ScrapeStatus, WatchStatus, Work,
+    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
+    PipelineRun, ScrapeJob, ScrapeStatus, WatchStatus, Work,
 };
 use media_manager::storage::Repository;
 
@@ -166,4 +166,27 @@ fn holding_entries_roundtrip() {
     assert_eq!(entries[0].file_name, "trailer.mp4");
     assert_eq!(entries[0].reason, HoldingReason::ShortVideo);
     assert_eq!(entries[0].size_bytes, 120_000_000);
+}
+
+#[test]
+fn pipeline_runs_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    repo.record_pipeline_run(&PipelineRun {
+        id: None,
+        file_path: "H:/dl/ABP-004.mp4".to_string(),
+        started_at: Some("2026-06-25T19:00:00Z".to_string()),
+        finished_at: Some("2026-06-25T19:00:05Z".to_string()),
+        steps_json: r#"[{"step":"scrape","ok":true}]"#.to_string(),
+        status: "done".to_string(),
+        error: None,
+    })
+    .unwrap();
+
+    let runs = repo.list_pipeline_runs().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].file_path, "H:/dl/ABP-004.mp4");
+    assert_eq!(runs[0].status, "done");
 }

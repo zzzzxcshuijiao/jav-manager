@@ -453,3 +453,17 @@ pub struct HoldingEntry {
     pub reason: HoldingReason,
     pub created_at: Option<String>,
 }
+
+/// One executed pipeline run for a single file: the per-step outcome as a JSON
+/// blob, overall status, timing, and an optional error. The status bar and
+/// debug views read this to show what happened to a file end-to-end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineRun {
+    pub id: Option<i64>,
+    pub file_path: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub steps_json: String,
+    pub status: String,
+    pub error: Option<String>,
+}

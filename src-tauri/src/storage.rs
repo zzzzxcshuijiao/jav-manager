@@ -1,8 +1,9 @@
 use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
-    IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, ScrapeJob, ScrapeStatus,
-    WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind, ExceptionStatus,
-    HoldingEntry, HoldingReason, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
+    IngestItemFilters, IngestJobSummary, PipelineRun, ProviderMetadata, ReviewReason, ScrapeJob,
+    ScrapeStatus, WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind,
+    ExceptionStatus, HoldingEntry, HoldingReason, Tag, WorkDetail, WorkFilters, WorkRating,
+    WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -237,6 +238,24 @@ impl Repository {
                 file_name TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
                 reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+        // Per-file pipeline execution log (Task 6): one row per file processed
+        // by the pipeline, with the per-step outcome JSON, overall status, and
+        // timing. Powers the status bar and debug views; not queried by the
+        // core ingest path.
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS pipeline_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_path TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                steps_json TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL,
+                error TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             ",
@@ -2568,6 +2587,47 @@ impl Repository {
                 size_bytes: row.get(3)?,
                 reason: parse_holding_reason(&reason),
                 created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    // --- pipeline run log (Task 6) ---
+
+    /// Append a pipeline run row for a single file. `id` on the input is
+    /// ignored; the database owns it. Returns the new row id.
+    pub fn record_pipeline_run(&self, run: &PipelineRun) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO pipeline_runs (file_path, started_at, finished_at, steps_json, status, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                run.file_path,
+                run.started_at,
+                run.finished_at,
+                run.steps_json,
+                run.status,
+                run.error,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List every pipeline run, newest first. The status bar shows the head;
+    /// debug views page through the tail.
+    pub fn list_pipeline_runs(&self) -> Result<Vec<PipelineRun>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, file_path, started_at, finished_at, steps_json, status, error
+             FROM pipeline_runs ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(PipelineRun {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                started_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                steps_json: row.get(4)?,
+                status: row.get(5)?,
+                error: row.get(6)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
