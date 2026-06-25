@@ -1,8 +1,10 @@
 # Stage 2 — Automated Pipeline Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build the Rust core for the zero-intervention pipeline: completed file detection -> code identification -> multi-source scraping -> self-contained archive layout -> SQLite ingest, with holding and exception routing for the three human-action cases.
+
+**Execution note:** Implemented in one final Stage 2 commit per user instruction, rather than the per-task commits shown in the original checklist. On this Windows Codex host, full `cargo test --manifest-path src-tauri/Cargo.toml` needed `-j 1` because parallel rustc hit page-file/mmap error `os error 1455`; focused tests and the CLI-only smoke are otherwise unchanged.
 
 **Architecture:** Add a new pure Rust `pipeline` module that does not depend on Tauri/WebView2 and can be tested with `tempfile`. Keep the old ingest/review path intact, but do not extend it as the new product core. Stage 2 owns pipeline orchestration, recoverable move semantics, and storage helpers; Stage 3 will wrap it in the daemon/control interface, and Stage 4 will wire the frontend.
 
@@ -119,7 +121,7 @@ pub struct AutoPipeline<'a> {
 - `Repository::remove_work_from_collection(work_id: i64, collection_id: i64) -> Result<()>`
 - Cascade regression: deleting a work removes `work_collections` rows.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/data_model.rs`:
 
@@ -159,7 +161,7 @@ fn deleting_work_cascades_collection_links() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -169,7 +171,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test data_model
 
 Expected: compile error for `remove_work_from_collection` and `debug_delete_work`.
 
-- [ ] **Step 3: Implement minimal storage helpers**
+- [x] **Step 3: Implement minimal storage helpers**
 
 Add to `impl Repository` near the existing collection methods:
 
@@ -191,7 +193,7 @@ Add to `impl Repository` near the existing collection methods:
     }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -201,7 +203,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test data_model
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/storage.rs src-tauri/tests/data_model.rs
@@ -225,7 +227,7 @@ git commit -m "补充收藏夹移除与级联测试"
 - `CompletionSnapshot::capture(path: &Path) -> Result<CompletionSnapshot>`
 - `is_heuristically_complete(first: &CompletionSnapshot, second: &CompletionSnapshot) -> bool`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `src-tauri/tests/auto_pipeline.rs`:
 
@@ -297,7 +299,7 @@ fn heuristic_completion_rejects_files_that_change_between_samples() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -307,7 +309,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: compile error because `pipeline` module, `CompletedFile`, snapshots, and readiness functions do not exist.
 
-- [ ] **Step 3: Add DTOs and readiness implementation**
+- [x] **Step 3: Add DTOs and readiness implementation**
 
 In `src-tauri/src/lib.rs`, add:
 
@@ -425,7 +427,7 @@ pub fn is_heuristically_complete(first: &CompletionSnapshot, second: &Completion
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -435,7 +437,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/domain.rs src-tauri/src/lib.rs src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -455,7 +457,7 @@ git commit -m "新增自动管线完成判定基础"
 - `identify_completed_file(file: &CompletedFile) -> PipelineIdentification`
 - Missing/unsupported files become `HoldingEntry` with `HoldingReason::NoCode` or `HoldingReason::Unrecognizable`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -498,7 +500,7 @@ fn missing_code_is_sent_to_holding_not_exception_queue() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -508,7 +510,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: compile error for `PipelineIdentification` and `identify_completed_file`.
 
-- [ ] **Step 3: Implement identification**
+- [x] **Step 3: Implement identification**
 
 In `src-tauri/src/pipeline.rs`, add:
 
@@ -536,7 +538,7 @@ pub fn identify_completed_file(file: &CompletedFile) -> PipelineIdentification {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -546,7 +548,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -571,7 +573,7 @@ git commit -m "实现自动管线番号识别与搁置路由"
 - Success records a `ScrapeJob::Success`; each failed source records `ScrapeJob::Failed`.
 - `scrape_jobs.work_id` is nullable and `normalized_code` / `object_path` are persisted so failed scrapes do not need pre-scrape works.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -676,7 +678,7 @@ fn scraper_coordinator_returns_all_failed_error() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -686,7 +688,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline scraper_coo
 
 Expected: compile error for nullable scrape-job fields, `ScrapedWorkMetadata`, `ScrapeContext`, `ScraperSource`, `ScrapeCoordinator`, and `PipelineScrapeError`.
 
-- [ ] **Step 3: Extend `ScrapeJob` and migrate `scrape_jobs`**
+- [x] **Step 3: Extend `ScrapeJob` and migrate `scrape_jobs`**
 
 In `src-tauri/src/domain.rs`, change `ScrapeJob` to:
 
@@ -790,7 +792,7 @@ Update `record_scrape_job` and `list_scrape_jobs` to read/write the new fields. 
             pipeline_run_id: None,
 ```
 
-- [ ] **Step 4: Implement scraper DTO and coordinator**
+- [x] **Step 4: Implement scraper DTO and coordinator**
 
 Append `ScrapedWorkMetadata` to `src-tauri/src/domain.rs`:
 
@@ -908,7 +910,7 @@ impl<'a> ScrapeCoordinator<'a> {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run:
 
@@ -918,7 +920,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline scraper_coo
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/domain.rs src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -937,7 +939,7 @@ git commit -m "实现多源刮削协调与记录"
 - `render_scraped_nfo(metadata: &ScrapedWorkMetadata) -> String`
 - Output contains `<movie>`, `<title>`, `<originaltitle>`, `<num>`, `<plot>`, actors, genres, studio, director, and release date when present.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -960,7 +962,7 @@ fn nfo_writer_renders_scraped_metadata_as_kodi_movie_xml() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -970,7 +972,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline nfo_writer
 
 Expected: compile error for `render_scraped_nfo`.
 
-- [ ] **Step 3: Implement NFO rendering**
+- [x] **Step 3: Implement NFO rendering**
 
 Append to `src-tauri/src/nfo.rs`:
 
@@ -1041,7 +1043,7 @@ fn escape_xml(value: &str) -> String {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run:
 
@@ -1051,7 +1053,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline nfo_writer
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/nfo.rs src-tauri/tests/auto_pipeline.rs
@@ -1077,7 +1079,7 @@ git commit -m "新增刮削元数据 NFO 写出"
   - `screenshot/<original image name>` for `-shot` / `-screenshot`
   - `<code>.gif` when present
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -1128,7 +1130,7 @@ fn archive_layout_discovers_code_named_assets_from_asset_roots() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -1138,7 +1140,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline archive_lay
 
 Expected: compile error for `plan_archive_layout` and archive layout structs.
 
-- [ ] **Step 3: Implement archive layout plan**
+- [x] **Step 3: Implement archive layout plan**
 
 Append to `src-tauri/src/domain.rs`:
 
@@ -1246,7 +1248,7 @@ fn discover_assets(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -1256,7 +1258,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline archive_lay
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/domain.rs src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -1277,7 +1279,7 @@ git commit -m "实现自动归档布局规划"
 - Video transfer uses `<target>.moving` + size verification + final rename, so cross-volume moves do not depend on `fs::rename`.
 - If a later copy/write fails, the final target is moved back to the original source path when possible; otherwise the source copy is left untouched until cleanup.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -1330,7 +1332,7 @@ fn archive_executor_rolls_video_back_when_asset_copy_fails() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -1340,7 +1342,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline archive_exe
 
 Expected: compile error for `execute_archive_layout` and `ExecutedArchive`.
 
-- [ ] **Step 3: Implement executor**
+- [x] **Step 3: Implement executor**
 
 Append to `src-tauri/src/pipeline.rs`:
 
@@ -1426,7 +1428,7 @@ fn restore_video(target: &Path, original: &Path) -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run:
 
@@ -1436,7 +1438,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline archive_exe
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -1457,7 +1459,7 @@ git commit -m "实现自动归档执行与回滚"
 - `Repository::upsert_file_version_for_work(work_id, source_root, original_path, archived_path, original_file_name, normalized_file_name, size_bytes, file_hash) -> Result<i64>`
 - `persist_pipeline_success(repo, completed, metadata, executed) -> Result<i64>` returns `work_id`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -1570,7 +1572,7 @@ fn repository_can_find_existing_versions_by_file_hash() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -1580,7 +1582,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: compile errors for storage helpers and `persist_pipeline_success`.
 
-- [ ] **Step 3: Implement storage helpers**
+- [x] **Step 3: Implement storage helpers**
 
 Add to `impl Repository` near file-version methods:
 
@@ -1675,7 +1677,7 @@ fn file_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileVersio
 }
 ```
 
-- [ ] **Step 4: Implement pipeline persistence**
+- [x] **Step 4: Implement pipeline persistence**
 
 Append to `src-tauri/src/pipeline.rs`:
 
@@ -1757,7 +1759,7 @@ pub fn persist_pipeline_success(
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run:
 
@@ -1767,7 +1769,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/storage.rs src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -1796,7 +1798,7 @@ git commit -m "实现自动管线入库写入"
   - Success -> archive + work + file_version + `pipeline_runs`
   - Operational move/write failures -> `pipeline_runs.status = "failed"`, not `exceptions`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `src-tauri/tests/auto_pipeline.rs`:
 
@@ -1940,7 +1942,7 @@ fn auto_pipeline_routes_duplicate_fingerprint_to_exception_queue() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run:
 
@@ -1950,7 +1952,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline auto_pipeli
 
 Expected: compile errors for `PipelineOutcome`, `AutoPipeline`, and `process_completed_file`.
 
-- [ ] **Step 3: Add outcome DTOs**
+- [x] **Step 3: Add outcome DTOs**
 
 Append to `src-tauri/src/domain.rs`:
 
@@ -1977,7 +1979,7 @@ pub struct PipelineOutcome {
 }
 ```
 
-- [ ] **Step 4: Add pipeline-run storage helpers and implement orchestration**
+- [x] **Step 4: Add pipeline-run storage helpers and implement orchestration**
 
 Add to `impl Repository` in `src-tauri/src/storage.rs`:
 
@@ -2183,7 +2185,7 @@ fn step(step: &str, status: &str, message: Option<&str>) -> PipelineStepRecord {
 
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run:
 
@@ -2193,7 +2195,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline auto_pipeli
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src-tauri/src/domain.rs src-tauri/src/pipeline.rs src-tauri/tests/auto_pipeline.rs
@@ -2217,7 +2219,7 @@ git commit -m "串联自动管线端到端处理"
   - `exceptions=1`
   - `no_real_resources_required=true`
 
-- [ ] **Step 1: Write the smoke example**
+- [x] **Step 1: Write the smoke example**
 
 Create `src-tauri/examples/stage2_smoke.rs`:
 
@@ -2300,7 +2302,7 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 2: Run Stage 2 focused tests**
+- [x] **Step 2: Run Stage 2 focused tests**
 
 Run:
 
@@ -2311,7 +2313,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline
 
 Expected: both PASS.
 
-- [ ] **Step 3: Run full backend suite**
+- [x] **Step 3: Run full backend suite**
 
 Run:
 
@@ -2321,7 +2323,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Expected: PASS. The exact test count may increase from Stage 1's 87 because Stage 2 adds integration tests.
 
-- [ ] **Step 4: Run self-contained smoke**
+- [x] **Step 4: Run self-contained smoke**
 
 Run:
 
@@ -2343,7 +2345,7 @@ no_real_resources_required=true
 
 This is a CLI-only example; it must not initialize Tauri.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src-tauri/examples/stage2_smoke.rs docs/superpowers/specs/2026-06-25-media-manager-refactor-design.md

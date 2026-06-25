@@ -8,8 +8,19 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 
 ## 当前进度
 
-**阶段 1（数据模型扩展）已完成并通过 review。** 9 个 commit 在 `codex/nfo-metadata-model` 分支：`9369fb7..495f99e`。
-87 个后端测试全绿，migration 幂等（现有库可无损升级）。
+**阶段 1（数据模型扩展）已完成并通过 review。**
+
+**阶段 2（自动管线 Rust 核心）已实现并验证。** 当前工作分支：`codex/stage2-auto-pipeline`。
+阶段 2 提供纯 Rust、无 WebView2 的核心：完成文件判定 → 番号识别 → 多源刮削记录 → 自包含归档布局/执行/回滚 → SQLite 入库，以及 holding / exception / pipeline_runs 路由。
+
+后端验证已通过：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
+- `cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline`
+- `cargo test --manifest-path src-tauri/Cargo.toml -j 1`
+- `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
+
+说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 2 新增失败。
 
 ## 接手步骤（新电脑）
 
@@ -17,27 +28,27 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 # 1. 从 bundle 还原仓库（含全部历史 + 分支）
 git clone media-manager.bundle media-manager
 cd media-manager
-git checkout codex/nfo-metadata-model
+git checkout codex/stage2-auto-pipeline
 
 # 2.（可选）解压 VibeCoding 状态：踩坑记录 lessons.md / 进度 tasks.md
 tar -xzf media-manager-ai-state.tar.gz   # 在仓库根解出 .ai_state/
 
-# 3. 验证阶段 1（轻量，不需要任何真实媒体资源）
-cd src-tauri
-cargo test                       # 期望 87 个测试全绿
-cargo run --example stage1_smoke # 打印 7 大数据层功能实测结果
-cd .. && npm install             # 前端依赖（按需）
+# 3. 验证阶段 2（轻量，不需要任何真实媒体资源）
+cargo test --manifest-path src-tauri/Cargo.toml -j 1
+cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1
+npm install             # 前端依赖（按需）
 ```
 
-**关键：验证环境是自包含的。** `cargo test` 和 `stage1_smoke` 都用临时目录(`tempdir`)造假文件，**不依赖 H:/ 真实视频或 G:/ 图片库**。开发与测试全程不需要真实媒体资源——它们只在用户实际运行 daemon 处理真实库时才需要。
+**关键：验证环境是自包含的。** `cargo test`、`stage1_smoke`、`stage2_smoke` 都用临时目录(`tempdir`)造假文件，**不依赖 H:/ 真实视频或 G:/ 图片库**。开发与测试全程不需要真实媒体资源——它们只在用户实际运行 daemon 处理真实库时才需要。
 
 ## 必读文档（按顺序）
 
 1. **`AGENTS.md`** — 硬约束，必须先读：
-   - 禁止在非交互 agent 会话里跑 `tauri dev` / `cargo run` / `media-manager.exe`（启动 WebView2 会崩 host）。验证只用 `cargo test` + `npm run build` + `tsc --noEmit`。
+   - 禁止在非交互 agent 会话里跑 `tauri dev` / 默认 `cargo run` / `media-manager.exe`（启动 WebView2 会崩 host）。验证只用 `cargo test` + `npm run build` + `tsc --noEmit`；阶段 smoke 这种 CLI-only example 可用 `cargo run --example ...`。
    - 编辑含中文的源文件用 `apply_patch` / node:fs，**不要** PowerShell `Set-Content`（GBK 控制台会损坏 UTF-8）。
 2. **`docs/superpowers/specs/2026-06-25-media-manager-refactor-design.md`** — 全局设计：架构(后台 daemon + 前端 + SQLite)、自动管线、数据模型、深色沉浸 UI 六页、异常处理、刮削器、服务部署、测试策略、复用 vs 砍掉代码清单、5 阶段划分、后续(aria2 下载集成 / NAS 移动端浏览)。
 3. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage1-data-model.md`** — 阶段 1 的 plan（已完成，可作 TDD 风格参考）。
+4. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage2-auto-pipeline.md`** — 阶段 2 的 plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -46,15 +57,25 @@ cd .. && npm install             # 前端依赖（按需）
 - 6 张新表 + CRUD：`scrape_jobs`、`exceptions`、`holding`、`pipeline_runs`、`collections`、`work_collections`
 - migration 幂等：`CREATE TABLE IF NOT EXISTS` + `ensure_column`，旧库升级不丢数据
 
+## 阶段 2 交付物
+
+- 新增 `src-tauri/src/pipeline.rs`：aria2 完成判定、两次文件快照稳定性判定、番号识别、scraper trait/coordinator、归档布局、staged copy/verify/finalize move、失败回滚、端到端 `AutoPipeline`。
+- 新增 pipeline DTO：`CompletedFile`、`ScrapedWorkMetadata`、`ArchiveAsset`、`PipelineStepRecord`、`PipelineOutcome`。
+- `scrape_jobs.work_id` 改为 nullable，并新增 `normalized_code` / `object_path` / `pipeline_run_id`，失败刮削不再需要预创建 `works`。
+- 新增 `render_scraped_nfo`，成功路径会生成 `<code>.nfo`。
+- 成功路径直接入库：`works`、actors、tags、`file_versions`、`scrape_jobs`、`pipeline_runs`。
+- 人工路由：无番号 → `holding`；重复 fingerprint / 刮削全失败 → `exceptions`；文件复制/写入/移动失败 → `pipeline_runs.status = failed`，不进内容异常队列。
+- 补上阶段 1 defer：`remove_work_from_collection` + `work_collections ON DELETE CASCADE` 回归测试。
+- 新增 `src-tauri/tests/auto_pipeline.rs` 与 `src-tauri/examples/stage2_smoke.rs`，全部使用 `tempdir` 假文件。
+
 ## 留给后续阶段的项（review 时判定 DEFER，不是缺陷）
 
 - `src-tauri/src/commands.rs:1422` 有第二个 `parse_watch_status`（前端命令路径）缺新变体 → **阶段 4 前端连线时修**（否则 UI 发新状态会降级为 Unwatched）
-- `remove_work_from_collection` API + `ON DELETE CASCADE` 测试 → **阶段 2 补**
-- 几处 `created_at` 只写未读 / `parse_*` 回退不可区分 / `impl Repository` 末尾多余空行 → **阶段 2 顺手清理**
+- 几处 `created_at` 只写未读 / `parse_*` 回退不可区分 → 非阻塞清理项，后续碰到相关命令/UI 时再处理。
 
 ## 下一步
 
-写**阶段 2 plan（自动管线）**：监控 → 识别 → 刮削(多源) → 整理(多版本/图片) → 移动(归档结构) → 入库，以及异常队列 / 搁置区的路由。用 `writing-plans` 技能基于设计文档 §5 拆，沿用阶段 1 的 TDD + `tempdir` 模式（测试造假文件，不依赖真实资源）。阶段 2–5 的划分见设计文档。
+写**阶段 3 plan（后台 daemon / 控制接口）**：把阶段 2 的 `AutoPipeline` 接入长期运行 worker，但仍保持不启动 Tauri GUI；设计 watcher/轮询、任务队列、暂停/恢复、状态查询、日志读取、重试入口，以及 Stage 4 前端需要消费的命令/API 边界。继续沿用 `tempdir` + CLI/单元测试，不依赖真实资源。
 
 ## 阶段 1 commit 清单
 

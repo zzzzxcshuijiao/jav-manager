@@ -72,7 +72,10 @@ fn main() -> Result<()> {
     // —— 6. 刮削记录（追溯）——
     repo.record_scrape_job(&ScrapeJob {
         id: None,
-        work_id: id,
+        work_id: Some(id),
+        normalized_code: Some("ABP-321".to_string()),
+        object_path: Some("/fake/source/ABP-321.mp4".to_string()),
+        pipeline_run_id: None,
         source: "FANZA".to_string(),
         status: ScrapeStatus::Failed,
         attempts: 2,
