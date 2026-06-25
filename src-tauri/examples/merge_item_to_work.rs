@@ -46,6 +46,8 @@ fn main() -> anyhow::Result<()> {
         mpaa: None,
         has_video: true,
         ratings: vec![],
+        watch_progress_seconds: None,
+        last_played_at: None,
     })?;
     let items = vec![
         ingest_item("ABP-525", "ABP-525.mp4"),

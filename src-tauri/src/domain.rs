@@ -68,6 +68,8 @@ pub struct Work {
     pub mpaa: Option<String>,
     pub has_video: bool,
     pub ratings: Vec<WorkRating>,
+    pub watch_progress_seconds: Option<i64>,
+    pub last_played_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

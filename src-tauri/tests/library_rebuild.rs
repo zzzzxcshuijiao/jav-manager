@@ -80,6 +80,8 @@ fn upsert_work_persists_rich_metadata_and_relations() {
         mpaa: Some("JP-18+".to_string()),
         has_video: false,
         ratings: vec![WorkRating { source: "javdb".to_string(), value: 4.0, max: 5, votes: Some(2) }],
+        watch_progress_seconds: None,
+        last_played_at: None,
     };
 
     let work_id = repo.upsert_work(&work).unwrap();
@@ -223,6 +225,8 @@ fn sample_work(code: &str) -> Work {
         mpaa: None,
         has_video: false,
         ratings: vec![],
+        watch_progress_seconds: None,
+        last_played_at: None,
     }
 }
 

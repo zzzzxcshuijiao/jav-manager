@@ -337,6 +337,8 @@ impl Repository {
         self.ensure_column("works", "website", "TEXT")?;
         self.ensure_column("works", "mpaa", "TEXT")?;
         self.ensure_column("works", "has_video", "INTEGER NOT NULL DEFAULT 1")?;
+        self.ensure_column("works", "watch_progress_seconds", "INTEGER")?;
+        self.ensure_column("works", "last_played_at", "TEXT")?;
         Ok(())
     }
 
@@ -728,6 +730,27 @@ impl Repository {
                 format!("{:?}", watch_status),
                 work_id,
             ],
+        )?;
+        if self.conn.changes() == 0 {
+            return Err(anyhow::anyhow!("work {work_id} was not found"));
+        }
+        self.get_work_by_id(work_id)?
+            .ok_or_else(|| anyhow::anyhow!("work {work_id} was not found"))
+    }
+
+    /// Set or clear the user's resume position for a work. Independent of
+    /// `upsert_work` (which owns pipeline metadata) so playback never fights
+    /// the ingest path. Returns the refreshed work.
+    pub fn set_watch_progress(
+        &self,
+        work_id: i64,
+        seconds: Option<i64>,
+        last_played_at: Option<String>,
+    ) -> Result<Work> {
+        self.conn.execute(
+            "UPDATE works SET watch_progress_seconds = ?1, last_played_at = ?2, \
+             updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+            params![seconds, last_played_at, work_id],
         )?;
         if self.conn.changes() == 0 {
             return Err(anyhow::anyhow!("work {work_id} was not found"));
@@ -2317,6 +2340,8 @@ impl Repository {
                 mpaa: doc.mpaa.clone(),
                 has_video,
                 ratings,
+                watch_progress_seconds: None,
+                last_played_at: None,
             };
 
             let work_id = self.upsert_work(&work)?;
@@ -2433,7 +2458,8 @@ const WORK_COLUMNS: &str = "id, normalized_code, source_code, code_kind, \
     cover_path, poster_path, thumb_path, fanart_path, screenshot_path, gif_path, \
     tags_json, lists_json, rating, rating_value, rating_max, rating_votes, criticrating, \
     watch_status, genres_json, studio, label, director, release_date, \
-    runtime_minutes, year, website, mpaa, has_video";
+    runtime_minutes, year, website, mpaa, has_video, \
+    watch_progress_seconds, last_played_at";
 
 /// Build a `Work` from a row whose selected columns match `WORK_COLUMNS`.
 /// Image-path columns come back as TEXT and are wrapped into `PathBuf`.
@@ -2451,6 +2477,8 @@ fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
     let genres_json: String = row.get(23)?;
     let code_kind: String = row.get(3)?;
     let has_video: i64 = row.get(32)?;
+    let watch_progress_seconds: Option<i64> = row.get(33)?;
+    let last_played_at: Option<String> = row.get(34)?;
     Ok(Work {
         id: row.get(0)?,
         normalized_code: row.get(1)?,
@@ -2487,6 +2515,8 @@ fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
         mpaa: row.get(31)?,
         has_video: has_video != 0,
         ratings: Vec::new(),
+        watch_progress_seconds,
+        last_played_at,
     })
 }
 
@@ -2608,6 +2638,8 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
         mpaa: None,
         has_video: true,
         ratings: vec![],
+        watch_progress_seconds: None,
+        last_played_at: None,
     }
 }
 

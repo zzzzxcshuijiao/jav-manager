@@ -39,6 +39,8 @@ fn sample_work() -> Work {
         mpaa: None,
         has_video: false,
         ratings: Vec::new(),
+        watch_progress_seconds: None,
+        last_played_at: None,
     }
 }
 
@@ -61,4 +63,24 @@ fn watch_status_roundtrips_new_variants() {
             repo.update_work_profile(id, Vec::new(), Vec::new(), None, status.clone()).unwrap();
         assert_eq!(updated.watch_status, status);
     }
+}
+
+#[test]
+fn watch_progress_is_persisted_and_read_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    let mut work = sample_work();
+    work.normalized_code = Some("ABP-002".to_string());
+    let id = repo.upsert_work(&work).unwrap();
+
+    let updated =
+        repo.set_watch_progress(id, Some(1865), Some("2026-06-25T21:00:00Z".to_string())).unwrap();
+    assert_eq!(updated.watch_progress_seconds, Some(1865));
+    assert_eq!(updated.last_played_at.as_deref(), Some("2026-06-25T21:00:00Z"));
+
+    let cleared = repo.set_watch_progress(id, None, None).unwrap();
+    assert_eq!(cleared.watch_progress_seconds, None);
+    assert_eq!(cleared.last_played_at, None);
 }
