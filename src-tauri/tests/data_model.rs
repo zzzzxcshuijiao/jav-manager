@@ -1,5 +1,5 @@
 use media_manager::domain::{
-    CodeKind, Collection, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
+    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
     PipelineRun, ScrapeJob, ScrapeStatus, WatchStatus, Work,
 };
 use media_manager::storage::Repository;
