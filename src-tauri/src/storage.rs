@@ -3,7 +3,7 @@ use crate::domain::{
     IngestItemFilters, IngestJobSummary, PipelineRun, ProviderMetadata, ReviewReason, ScrapeJob,
     ScrapeStatus, WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind,
     ExceptionStatus, HoldingEntry, HoldingReason, Tag, WorkDetail, WorkFilters, WorkRating,
-    WorkSet,
+    WorkSet, Collection,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -257,6 +257,25 @@ impl Repository {
                 status TEXT NOT NULL,
                 error TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            ",
+        )?;
+        // User-defined collections (Task 7). Many-to-many with works through
+        // work_collections; a work can belong to several collections.
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS collections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                color TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS work_collections (
+                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                PRIMARY KEY (work_id, collection_id)
             );
             ",
         )?;
@@ -2630,6 +2649,54 @@ impl Repository {
                 error: row.get(6)?,
             })
         })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Create a user-defined collection. Returns the new collection id. Fails
+    /// on a duplicate name (the `collections.name` column is UNIQUE).
+    pub fn create_collection(&self, name: &str, color: Option<&str>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO collections (name, color) VALUES (?1, ?2)",
+            params![name, color],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// List every collection ordered by manual `sort_order`, then id. The
+    /// sidebar renders this directly.
+    pub fn list_collections(&self) -> Result<Vec<Collection>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT id, name, color, sort_order, created_at FROM collections ORDER BY sort_order ASC, id ASC")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Collection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                color: row.get(2)?,
+                sort_order: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Link a work to a collection. Idempotent: re-adding the same pair is a
+    /// no-op (INSERT OR IGNORE on the composite PRIMARY KEY).
+    pub fn add_work_to_collection(&self, work_id: i64, collection_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO work_collections (work_id, collection_id) VALUES (?1, ?2)",
+            params![work_id, collection_id],
+        )?;
+        Ok(())
+    }
+
+    /// List the work ids attached to a collection, ascending. The UI loads the
+    /// full Work rows via the existing `get_work_detail` path.
+    pub fn list_works_in_collection(&self, collection_id: i64) -> Result<Vec<i64>> {
+        let mut statement = self.conn.prepare(
+            "SELECT work_id FROM work_collections WHERE collection_id = ?1 ORDER BY work_id ASC",
+        )?;
+        let rows = statement.query_map(params![collection_id], |row| row.get::<_, i64>(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
     }
 

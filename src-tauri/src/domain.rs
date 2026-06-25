@@ -467,3 +467,14 @@ pub struct PipelineRun {
     pub status: String,
     pub error: Option<String>,
 }
+
+/// A user-defined collection. Many-to-many with works through `work_collections`:
+/// a work can belong to several collections, and each collection groups many works.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: Option<i64>,
+    pub name: String,
+    pub color: Option<String>,
+    pub sort_order: i64,
+    pub created_at: Option<String>,
+}

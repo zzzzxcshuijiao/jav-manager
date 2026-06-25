@@ -1,5 +1,5 @@
 use media_manager::domain::{
-    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
+    CodeKind, Collection, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
     PipelineRun, ScrapeJob, ScrapeStatus, WatchStatus, Work,
 };
 use media_manager::storage::Repository;
@@ -189,4 +189,28 @@ fn pipeline_runs_roundtrip() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].file_path, "H:/dl/ABP-004.mp4");
     assert_eq!(runs[0].status, "done");
+}
+
+#[test]
+fn collections_hold_works_many_to_many() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    let mut w = sample_work();
+    w.normalized_code = Some("ABP-005".to_string());
+    let work_id = repo.upsert_work(&w).unwrap();
+
+    let col_id = repo.create_collection("精选最爱", Some("#00a4dc")).unwrap();
+    repo.add_work_to_collection(work_id, col_id).unwrap();
+    // idempotent: adding twice does not duplicate
+    repo.add_work_to_collection(work_id, col_id).unwrap();
+
+    let cols = repo.list_collections().unwrap();
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].name, "精选最爱");
+    assert_eq!(cols[0].color.as_deref(), Some("#00a4dc"));
+
+    let work_ids = repo.list_works_in_collection(col_id).unwrap();
+    assert_eq!(work_ids, vec![work_id]);
 }
