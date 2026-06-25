@@ -1,5 +1,6 @@
 use media_manager::domain::{
-    CodeKind, Exception, ExceptionKind, ExceptionStatus, ScrapeJob, ScrapeStatus, WatchStatus, Work,
+    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, ScrapeJob,
+    ScrapeStatus, WatchStatus, Work,
 };
 use media_manager::storage::Repository;
 
@@ -142,4 +143,27 @@ fn exceptions_record_list_and_resolve() {
     let after = repo.list_exceptions().unwrap();
     assert_eq!(after[0].status, ExceptionStatus::Resolved);
     assert!(after[0].resolved_at.is_some());
+}
+
+#[test]
+fn holding_entries_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    repo.add_holding(&HoldingEntry {
+        id: None,
+        path: "H:/dl/trailer.mp4".to_string(),
+        file_name: "trailer.mp4".to_string(),
+        size_bytes: 120_000_000,
+        reason: HoldingReason::ShortVideo,
+        created_at: None,
+    })
+    .unwrap();
+
+    let entries = repo.list_holding().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].file_name, "trailer.mp4");
+    assert_eq!(entries[0].reason, HoldingReason::ShortVideo);
+    assert_eq!(entries[0].size_bytes, 120_000_000);
 }

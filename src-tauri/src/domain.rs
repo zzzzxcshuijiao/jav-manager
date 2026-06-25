@@ -431,3 +431,25 @@ pub struct Exception {
     pub created_at: Option<String>,
     pub resolved_at: Option<String>,
 }
+
+/// Why a file was parked in the `holding` table instead of being
+/// auto-classified into a work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HoldingReason {
+    NoCode,
+    ShortVideo,
+    NonJapanese,
+    Unrecognizable,
+}
+
+/// A file that couldn't be auto-classified, held separately from the exception
+/// queue for later manual triage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldingEntry {
+    pub id: Option<i64>,
+    pub path: String,
+    pub file_name: String,
+    pub size_bytes: i64,
+    pub reason: HoldingReason,
+    pub created_at: Option<String>,
+}

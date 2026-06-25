@@ -1,8 +1,8 @@
 use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
     IngestItemFilters, IngestJobSummary, ProviderMetadata, ReviewReason, ScrapeJob, ScrapeStatus,
-    WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind, ExceptionStatus, Tag,
-    WorkDetail, WorkFilters, WorkRating, WorkSet,
+    WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind, ExceptionStatus,
+    HoldingEntry, HoldingReason, Tag, WorkDetail, WorkFilters, WorkRating, WorkSet,
 };
 use crate::archive::normalized_file_name;
 use crate::identifier::normalize_code;
@@ -223,6 +223,21 @@ impl Repository {
                 status TEXT NOT NULL DEFAULT 'Open',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 resolved_at TEXT
+            );
+            ",
+        )?;
+        // Holding pen (Task 5). Files that couldn't be auto-classified
+        // (no code / short video / non-Japanese / unrecognizable), parked
+        // separately from the exception queue for manual triage.
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS holding (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                file_name TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             ",
         )?;
@@ -2525,6 +2540,39 @@ impl Repository {
         Ok(())
     }
 
+    // --- holding pen (Task 5) ---
+    pub fn add_holding(&self, entry: &HoldingEntry) -> Result<i64> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO holding (path, file_name, size_bytes, reason)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                entry.path,
+                entry.file_name,
+                entry.size_bytes,
+                holding_reason_str(&entry.reason),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn list_holding(&self) -> Result<Vec<HoldingEntry>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, path, file_name, size_bytes, reason, created_at FROM holding ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let reason: String = row.get(4)?;
+            Ok(HoldingEntry {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                file_name: row.get(2)?,
+                size_bytes: row.get(3)?,
+                reason: parse_holding_reason(&reason),
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
 }
 
 fn parse_watch_status(value: &str) -> WatchStatus {
@@ -2535,6 +2583,24 @@ fn parse_watch_status(value: &str) -> WatchStatus {
         "Watching" => WatchStatus::Watching,
         "OnHold" => WatchStatus::OnHold,
         _ => WatchStatus::Unwatched,
+    }
+}
+
+// --- holding pen (Task 5) ---
+fn holding_reason_str(r: &HoldingReason) -> &'static str {
+    match r {
+        HoldingReason::NoCode => "NoCode",
+        HoldingReason::ShortVideo => "ShortVideo",
+        HoldingReason::NonJapanese => "NonJapanese",
+        HoldingReason::Unrecognizable => "Unrecognizable",
+    }
+}
+fn parse_holding_reason(v: &str) -> HoldingReason {
+    match v {
+        "ShortVideo" => HoldingReason::ShortVideo,
+        "NonJapanese" => HoldingReason::NonJapanese,
+        "Unrecognizable" => HoldingReason::Unrecognizable,
+        _ => HoldingReason::NoCode,
     }
 }
 
