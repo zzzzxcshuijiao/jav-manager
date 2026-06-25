@@ -27,11 +27,16 @@ import type {
   Actor,
   ArchiveActionLog,
   ArchivePlan,
+  DaemonControlStatus,
+  DaemonRunOnceReport,
+  ExceptionEntry,
   FileVersion,
+  HoldingEntry,
   IngestDecision,
   IngestItem,
   IngestJobSummary,
   MigrationPlan,
+  PipelineRun,
   PooledWork,
   ResourcePool,
   ReviewReason,
@@ -59,6 +64,7 @@ import {
   coverPreviewPathForItem,
   duplicateCandidatesForItem,
   findIngestItemForWork,
+  formatDaemonState,
   formatRuntime,
   libraryCardArtwork,
   libraryCardSubtitle,
@@ -70,8 +76,12 @@ import {
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
+  formatExceptionKind,
+  formatExceptionStatus,
   formatFileVersionSummary,
+  formatHoldingReason,
   formatMediaInfo,
+  formatPipelineStatus,
   formatRebuildReport,
   formatWorkOption,
   ignorableDuplicateItems,
@@ -85,6 +95,8 @@ import {
   resolvableSelectedItems,
   selectedItemIds,
   type ReviewReasonFilter,
+  shortEvidence,
+  summarizeRunOnceReport,
   viewItemsForMode,
   type WorkStatusFilter,
   type WorkbenchView,
@@ -156,7 +168,13 @@ export function App() {
   const [unifiedPlan, setUnifiedPlan] = useState<UnifiedMigrationPlan | null>(null);
   const [resourcePool, setResourcePool] = useState<ResourcePool | null>(null);
   const [primaryLibraryDir, setPrimaryLibraryDir] = useState("");
-  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache">("pool");
+  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache" | "daemon">("pool");
+  const [daemonStatus, setDaemonStatus] = useState<DaemonControlStatus | null>(null);
+  const [daemonReport, setDaemonReport] = useState<DaemonRunOnceReport | null>(null);
+  const [holdingEntries, setHoldingEntries] = useState<HoldingEntry[]>([]);
+  const [exceptionEntries, setExceptionEntries] = useState<ExceptionEntry[]>([]);
+  const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
+  const [daemonBusy, setDaemonBusy] = useState<"refresh" | "run" | "pause" | "resume" | "resolve" | null>(null);
   const [libraryWorkDetail, setLibraryWorkDetail] = useState<WorkDetail | null>(null);
   const [nonStandardCollapsed, setNonStandardCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -430,6 +448,17 @@ export function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (activeView !== "settings" || settingsTab !== "daemon") {
+      return;
+    }
+    if (!hasBackend) {
+      setStatus("自动管线需要 Tauri 后端；普通浏览器只能查看前端壳。");
+      return;
+    }
+    refreshDaemonPanel();
+  }, [activeView, settingsTab]);
+
+  useEffect(() => {
     if (activeView !== "library") {
       return;
     }
@@ -622,6 +651,102 @@ export function App() {
       setStatus(`作品库已刷新：${nextWorks.length} 个作品。`);
     } catch (error) {
       setStatus(`刷新作品库失败：${String(error)}`);
+    }
+  }
+
+  async function loadDaemonPanelData() {
+    const [nextStatus, nextHolding, nextExceptions, nextRuns] = await Promise.all([
+      api.getDaemonStatus(),
+      api.listHoldingEntries(),
+      api.listExceptionEntries(),
+      api.listPipelineRuns()
+    ]);
+    setDaemonStatus(nextStatus);
+    setHoldingEntries(nextHolding);
+    setExceptionEntries(nextExceptions);
+    setPipelineRuns(nextRuns);
+    return nextStatus;
+  }
+
+  async function refreshDaemonPanel() {
+    if (daemonBusy) return;
+    setDaemonBusy("refresh");
+    setStatus("正在刷新自动管线状态...");
+    try {
+      const nextStatus = await loadDaemonPanelData();
+      setStatus(`自动管线状态：${formatDaemonState(nextStatus.state)}，异常 ${nextStatus.open_exceptions}，搁置 ${nextStatus.holding_items}。`);
+    } catch (error) {
+      setStatus(`刷新自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function runDaemonOnce() {
+    if (daemonBusy) return;
+    setDaemonBusy("run");
+    setStatus("自动管线正在运行一轮...");
+    try {
+      const report = await api.runDaemonOnce();
+      setDaemonReport(report);
+      await loadDaemonPanelData();
+      setStatus(summarizeRunOnceReport(report));
+    } catch (error) {
+      setStatus(`自动管线运行失败：${String(error)}`);
+      try {
+        await loadDaemonPanelData();
+      } catch {
+        // Preserve the operation failure as the visible status.
+      }
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function pauseDaemon() {
+    if (daemonBusy) return;
+    setDaemonBusy("pause");
+    setStatus("正在暂停自动管线...");
+    try {
+      const nextStatus = await api.pauseDaemon();
+      await loadDaemonPanelData();
+      setDaemonStatus(nextStatus);
+      setStatus("自动管线已暂停。");
+    } catch (error) {
+      setStatus(`暂停自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function resumeDaemon() {
+    if (daemonBusy) return;
+    setDaemonBusy("resume");
+    setStatus("正在恢复自动管线...");
+    try {
+      const nextStatus = await api.resumeDaemon();
+      await loadDaemonPanelData();
+      setDaemonStatus(nextStatus);
+      setStatus("自动管线已恢复。");
+    } catch (error) {
+      setStatus(`恢复自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function resolveDaemonException(id: number | null | undefined, nextStatus: "Ignored" | "Resolved") {
+    if (daemonBusy || id == null) return;
+    setDaemonBusy("resolve");
+    setStatus(nextStatus === "Resolved" ? "正在标记异常为已解决..." : "正在忽略异常...");
+    try {
+      await api.resolveExceptionEntry(id, nextStatus);
+      await loadDaemonPanelData();
+      setStatus(nextStatus === "Resolved" ? "异常已标记为已解决。" : "异常已忽略。");
+    } catch (error) {
+      setStatus(`更新异常状态失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
     }
   }
 
@@ -1272,6 +1397,7 @@ export function App() {
               <button type="button" className={settingsTab === "pool" ? "active" : ""} onClick={() => setSettingsTab("pool")}>目录与资源池</button>
               <button type="button" className={settingsTab === "rebuild" ? "active" : ""} onClick={() => setSettingsTab("rebuild")}>作品库</button>
               <button type="button" className={settingsTab === "migrate" ? "active" : ""} onClick={() => setSettingsTab("migrate")}>迁移</button>
+              <button type="button" className={settingsTab === "daemon" ? "active" : ""} onClick={() => setSettingsTab("daemon")}>自动管线</button>
               <button type="button" className={settingsTab === "cache" ? "active" : ""} onClick={() => setSettingsTab("cache")}>缓存</button>
             </div>
 
@@ -1398,6 +1524,134 @@ export function App() {
                   </div>
                 ) : null}
               </>
+            ) : null}
+
+            {settingsTab === "daemon" ? (
+              <div className="daemon-panel">
+                <div className="rebuild-tools">
+                  <div>
+                    <strong>自动管线状态</strong>
+                    <span>
+                      {daemonStatus
+                        ? `${formatDaemonState(daemonStatus.state)} · ${daemonStatus.configured ? "配置完整" : "缺少归档根目录"} · 元数据源 ${daemonStatus.metadata_source === "example" ? "示例" : "未启用"}`
+                        : "尚未读取"}
+                    </span>
+                  </div>
+                  <button type="button" onClick={refreshDaemonPanel} disabled={daemonBusy !== null}>
+                    <RefreshCw size={16} /> {daemonBusy === "refresh" ? "刷新中" : "刷新状态"}
+                  </button>
+                  <button type="button" className="primary" onClick={runDaemonOnce} disabled={daemonBusy !== null || !daemonStatus?.configured}>
+                    <Play size={16} /> {daemonBusy === "run" ? "运行中" : "运行一轮"}
+                  </button>
+                </div>
+
+                <div className="daemon-actions">
+                  <button type="button" onClick={pauseDaemon} disabled={daemonBusy !== null || daemonStatus?.state === "Paused"}>
+                    <TriangleAlert size={16} /> {daemonBusy === "pause" ? "暂停中" : "暂停"}
+                  </button>
+                  <button type="button" onClick={resumeDaemon} disabled={daemonBusy !== null || daemonStatus?.state !== "Paused"}>
+                    <RefreshCw size={16} /> {daemonBusy === "resume" ? "恢复中" : "恢复"}
+                  </button>
+                </div>
+
+                {daemonStatus ? (
+                  <div className="daemon-grid">
+                    <div className="metric-card">
+                      <span>来源目录</span>
+                      <strong>{daemonStatus.source_roots.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>资源池目录</span>
+                      <strong>{daemonStatus.asset_roots.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>异常</span>
+                      <strong>{daemonStatus.open_exceptions}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>搁置</span>
+                      <strong>{daemonStatus.holding_items}</strong>
+                    </div>
+                  </div>
+                ) : null}
+
+                {daemonStatus?.archive_root ? (
+                  <div className="rebuild-report">
+                    <span>归档根目录：{daemonStatus.archive_root}</span>
+                    {daemonStatus.last_error ? <span>最近错误：{daemonStatus.last_error}</span> : null}
+                  </div>
+                ) : null}
+
+                {daemonReport ? (
+                  <div className="rebuild-report">
+                    <span>{summarizeRunOnceReport(daemonReport)}</span>
+                  </div>
+                ) : null}
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>搁置区</strong>
+                    <span>{holdingEntries.length} 项</span>
+                  </div>
+                  {holdingEntries.length === 0 ? (
+                    <span className="empty-text">暂无搁置文件</span>
+                  ) : (
+                    holdingEntries.slice(0, 10).map((entry) => (
+                      <div className="daemon-list-row" key={entry.id ?? entry.path}>
+                        <strong>{entry.file_name}</strong>
+                        <span>{formatHoldingReason(entry.reason)} · {formatBytes(entry.size_bytes)}</span>
+                        <small>{entry.path}</small>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>异常队列</strong>
+                    <span>{exceptionEntries.length} 项</span>
+                  </div>
+                  {exceptionEntries.length === 0 ? (
+                    <span className="empty-text">暂无异常</span>
+                  ) : (
+                    exceptionEntries.slice(0, 10).map((entry) => (
+                      <div className="daemon-list-row" key={entry.id ?? entry.object_path}>
+                        <strong>{formatExceptionKind(entry.kind)} · {formatExceptionStatus(entry.status)}</strong>
+                        <span>{entry.object_path}</span>
+                        <small>{shortEvidence(entry.evidence_json)}</small>
+                        {entry.status === "Open" ? (
+                          <div className="daemon-row-actions">
+                            <button type="button" onClick={() => resolveDaemonException(entry.id, "Resolved")} disabled={daemonBusy !== null}>
+                              <CheckCircle2 size={14} /> 已解决
+                            </button>
+                            <button type="button" onClick={() => resolveDaemonException(entry.id, "Ignored")} disabled={daemonBusy !== null}>
+                              <X size={14} /> 忽略
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>最近运行</strong>
+                    <span>{pipelineRuns.length} 条</span>
+                  </div>
+                  {pipelineRuns.length === 0 ? (
+                    <span className="empty-text">暂无运行记录</span>
+                  ) : (
+                    pipelineRuns.slice(0, 10).map((run) => (
+                      <div className="daemon-list-row" key={run.id ?? run.file_path}>
+                        <strong>{formatPipelineStatus(run.status)}</strong>
+                        <span>{run.file_path}</span>
+                        <small>{run.error || run.finished_at || run.started_at || "无错误"}</small>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             ) : null}
 
             {settingsTab === "cache" ? (
