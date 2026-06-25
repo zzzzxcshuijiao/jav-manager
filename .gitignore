@@ -11,3 +11,4 @@ src-tauri/gen/schemas/
 .superpowers/
 .tmp-*
 .spec-workflow/
+.worktrees/
