@@ -1,46 +1,55 @@
-# Stage 3 — Headless Daemon Core Design
+# 阶段 3：无头守护核心设计
 
-## Goal
+## 目标
 
-Stage 3 turns the tested Stage 2 `AutoPipeline` into a headless background core that can be driven without Tauri, WebView2, tray UI, HTTP, or real media resources. It provides the runtime boundary that Stage 4 can later expose to the UI/control surface.
+阶段 3 把阶段 2 已验证的 `AutoPipeline` 装进一个可测试的后台核心里。这个核心必须能在 Codex 环境中运行和验证，不启动 Tauri、不启动 WebView2、不创建托盘窗口、不绑定 HTTP/WebSocket，也不依赖真实媒体资源。
 
-## Scope
+它的定位是：先把“后台 worker 的业务内核”做稳，后续阶段再把它暴露给前端或本地控制接口。
 
-In scope:
+## 范围
 
-- Load daemon configuration from SQLite settings:
-  - `source_roots`: inbound/download directories to scan.
-  - `archive_root`: self-contained library target.
-  - `resource_pool_dirs`: local artwork/resource roots.
-- Scan configured source roots for video candidates.
-- Apply Stage 2 completion checks before processing:
-  - reject non-video files;
-  - reject files with sibling `.aria2` control files;
-  - accept stable files only when two snapshots match.
-- Queue completed candidates deterministically.
-- Process queued candidates through Stage 2 `AutoPipeline`.
-- Maintain in-memory daemon state: `idle`, `scanning`, `processing`, `paused`, `error`.
-- Provide a pure Rust control facade for:
-  - `status`;
-  - `pause`;
-  - `resume`;
-  - `scan_now`;
-  - `process_next`;
-  - `run_once`.
-- Provide self-contained tests and a CLI-only smoke example using `tempfile`.
+本阶段要做：
 
-Out of scope:
+- 从 SQLite settings 读取 daemon 配置：
+  - `source_roots`：下载完成后待扫描的入口目录；
+  - `archive_root`：自包含媒体库归档目录；
+  - `resource_pool_dirs`：本地图片、gif、截图等资源目录。
+- 扫描配置的 source roots，找出视频候选文件。
+- 在处理前复用阶段 2 的完成判定：
+  - 跳过非视频文件；
+  - 跳过同名 `.aria2` 控制文件仍存在的文件；
+  - 两次快照的大小和 mtime 稳定后才认为可处理。
+- 用确定性顺序把完成文件加入内存队列。
+- 从队列取文件，调用阶段 2 `AutoPipeline` 处理。
+- 维护内存中的 daemon 状态：
+  - `idle`
+  - `scanning`
+  - `processing`
+  - `paused`
+  - `error`
+- 提供纯 Rust 控制门面：
+  - `status`
+  - `pause`
+  - `resume`
+  - `scan_now`
+  - `process_next`
+  - `run_once`
+- 提供自包含测试和 CLI-only smoke，全部使用 `tempfile`。
 
-- Tauri GUI, tray icon, WebView2, or `media-manager.exe`.
-- Long-running process management or Windows startup registration.
-- HTTP/WebSocket server, token authentication, Origin checks.
-- Real FANZA/JavBus/JavDB scraper adapters or network access.
-- aria2 JSON-RPC integration. Stage 3 keeps the local `.aria2` heuristic and leaves RPC polling for a later phase.
-- Frontend command rewiring. `commands.rs` remains Stage 4 work except if a test directly requires a small shared helper.
+本阶段不做：
 
-## Architecture
+- 不做 Tauri GUI、托盘图标、WebView2、`media-manager.exe`。
+- 不做长期进程管理、Windows 开机自启、Windows Service。
+- 不做 HTTP/WebSocket、token、Origin 校验、端口发现。
+- 不做真实 FANZA/JavBus/JavDB scraper，不访问网络。
+- 不做 aria2 JSON-RPC。本阶段只保留本地 `.aria2` 文件启发式，RPC 轮询后续再接。
+- 不重接前端命令。`commands.rs` 仍是阶段 4 工作，除非阶段 3 测试明确需要抽一个共享 helper。
 
-Stage 3 adds a new pure Rust `daemon` module. It owns orchestration state and calls existing modules instead of duplicating their behavior:
+## 架构
+
+新增一个纯 Rust 模块 `src-tauri/src/daemon.rs`。它只负责编排，不重新实现阶段 2 已有能力。
+
+数据流：
 
 ```text
 Repository settings
@@ -52,10 +61,10 @@ DaemonConfig::load(repo)
 HeadlessDaemon::scan_now()
       |
       v
-CompletionSnapshot x2 -> CompletedFile
+CompletionSnapshot 两次采样 -> CompletedFile
       |
       v
-HeadlessDaemon queue
+HeadlessDaemon 内存队列
       |
       v
 AutoPipeline::process_completed_file()
@@ -64,24 +73,35 @@ AutoPipeline::process_completed_file()
 SQLite: works / file_versions / scrape_jobs / pipeline_runs / holding / exceptions
 ```
 
-The daemon is deliberately synchronous in Stage 3. Tests can call one method at a time and assert exact state. A later long-running wrapper can put this core behind a thread, timer, watcher, HTTP API, or tray process without changing pipeline semantics.
+阶段 3 的 daemon core 默认同步执行。测试可以一步一步调用方法并断言精确状态。后续要做常驻进程、定时器、文件监听、HTTP API、托盘，都可以包在这个 core 外面，不改变管线语义。
 
-## New Module
+## 新增模块
 
-Create `src-tauri/src/daemon.rs`.
+创建：
 
-Primary responsibilities:
+- `src-tauri/src/daemon.rs`
 
-- Configuration loading and validation.
-- Source-root scanning.
-- Completion sampling policy.
-- Queue management.
-- Pause/resume/status transitions.
-- Calling `AutoPipeline`.
+职责：
 
-The module must not import `tauri`, start a window, bind a socket, or spawn a permanent background thread.
+- 配置加载和校验；
+- source roots 扫描；
+- 完成文件的双快照采样策略；
+- 内存队列管理；
+- 暂停、恢复、状态转换；
+- 调用 `AutoPipeline`；
+- 聚合本轮扫描和处理报告。
 
-## Public Types
+禁止事项：
+
+- 不 import `tauri`；
+- 不创建窗口；
+- 不绑定 socket；
+- 不启动永久后台线程；
+- 不访问真实外部站点。
+
+## 公开类型
+
+计划新增这些类型。字段可在实现时按 Rust 可见性做微调，但职责不能变。
 
 ```rust
 pub struct DaemonConfig {
@@ -132,55 +152,56 @@ pub struct HeadlessDaemon<'a> {
 }
 ```
 
-Exact field visibility can be adjusted during implementation, but the responsibilities above must remain intact.
+## 控制语义
 
-## Control Semantics
+### `DaemonConfig::load(repo)`
 
-`DaemonConfig::load(repo)`:
+- 读取 `source_roots`、`archive_root`、`resource_pool_dirs`。
+- `archive_root` 未配置时返回明确错误。
+- 允许 `source_roots` 为空，这样状态接口可以表达“daemon 空闲但未配置”。
+- 不负责创建目录。扫描时遇到不存在的 root 只跳过。
 
-- Reads `source_roots`, `archive_root`, and `resource_pool_dirs`.
-- Fails when archive root is not configured.
-- Allows empty source roots so the status API can explain the daemon is idle but unconfigured.
-- Does not create directories. Missing roots are skipped by scanning.
+### `HeadlessDaemon::status()`
 
-`HeadlessDaemon::status()`:
+- 返回当前内存状态、队列长度、已处理数量、最后错误。
+- 不读写 SQLite。
 
-- Returns the in-memory state, queue length, processed count, and last error.
-- Does not read or write SQLite.
+### `pause()`
 
-`pause()`:
+- 状态切到 `Paused`。
+- 不清空队列。
+- 暂停时调用 `scan_now` 或 `process_next` 不做文件系统工作。
 
-- Transitions to `Paused`.
-- Does not clear the queue.
-- `scan_now` and `process_next` return a paused result without doing filesystem work.
+### `resume()`
 
-`resume()`:
+- 从 `Paused` 回到 `Idle`。
+- 保留已经排队的文件。
 
-- Transitions from `Paused` to `Idle`.
-- Leaves queued files intact.
+### `scan_now()`
 
-`scan_now()`:
+- 递归扫描 `source_roots`。
+- 只把稳定完成的视频加入队列。
+- 尽量用 canonical path 去重，无法 canonicalize 时退回原始 path。
+- 只排队，不处理。
+- 不写 `works`、`holding`、`exceptions`、`pipeline_runs`。
 
-- Recursively scans `source_roots`.
-- Queues only stable completed video files.
-- Avoids duplicate queue entries by canonical path when possible, falling back to raw path.
-- Does not process files.
-- Does not write `works`, `holding`, `exceptions`, or `pipeline_runs`.
+### `process_next()`
 
-`process_next()`:
+- 从队列弹出一个文件并调用阶段 2 `AutoPipeline`。
+- 根据 `PipelineOutcome` 更新计数。
+- 如果 `AutoPipeline` 返回 I/O 或写入类操作错误，增加 failed，记录 `last_error`。阶段 2 已负责把证据写进 `pipeline_runs.status = "failed"`。
 
-- Pops one queued file and calls Stage 2 `AutoPipeline`.
-- Updates status counts based on `PipelineOutcome`.
-- If `AutoPipeline` returns an operational error, increments `failed`, stores `last_error`, and leaves evidence in `pipeline_runs` through Stage 2.
+### `run_once()`
 
-`run_once()`:
+- 先调用 `scan_now`。
+- 然后持续处理队列，直到队列为空或 daemon 被暂停。
+- 返回 `ProcessReport`。
 
-- Calls `scan_now`, then processes all queued files until the queue is empty or paused.
-- Returns `ProcessReport`.
+## 完成采样策略
 
-## Completion Sampling
+阶段 2 已经实现 `CompletionSnapshot::capture` 和 `is_heuristically_complete`。阶段 3 只负责“两次采样之间等多久”。
 
-Stage 3 controls the delay between two `CompletionSnapshot` samples. To keep tests fast and deterministic, the implementation should use a policy object or constructor parameter:
+为了测试快且稳定，设计一个可配置策略：
 
 ```rust
 pub struct CompletionPolicy {
@@ -188,61 +209,77 @@ pub struct CompletionPolicy {
 }
 ```
 
-Production defaults can use a non-zero delay. Tests and smoke examples use `Duration::ZERO`.
+生产默认值可以是非零延迟。测试和 smoke 使用 `Duration::ZERO`。
 
-The implementation must use Stage 2 `CompletionSnapshot::capture` and `is_heuristically_complete`; it must not invent a second completion predicate.
+阶段 3 必须复用阶段 2 的完成判定，不再写第二套完成规则。
 
-## Scraper Boundary
+## Scraper 边界
 
-Stage 3 accepts a `ScrapeCoordinator<'a>` supplied by the caller. The daemon does not know about real providers yet. Tests and smoke examples use deterministic fake scrapers:
+阶段 3 由调用方传入 `ScrapeCoordinator<'a>`。
 
-- one success source for a known code;
-- one no-result source to exercise `ScrapeFailed`.
+daemon 不知道真实 scraper。测试和 smoke 用确定性的假 scraper：
 
-This keeps Stage 3 network-free and avoids requiring proxy or third-party site availability.
+- 对一个指定番号返回成功；
+- 对其他番号返回 `None`，用于触发 `ScrapeFailed`。
 
-## Storage Boundaries
+这样阶段 3 不需要网络、代理、第三方站点，也不会因为站点波动导致验证失败。
 
-Stage 3 does not add new tables unless implementation proves it is necessary. It uses:
+## 存储边界
 
-- `app_settings` for config;
-- `pipeline_runs` for operational outcomes;
-- Stage 2 tables for terminal routing.
+阶段 3 默认不新增表，除非实现时证明必须新增。
 
-In-memory queue state is intentionally non-persistent in Stage 3. Crash recovery and durable queue replay are a later enhancement once the control surface and process lifecycle are defined.
+使用现有存储：
 
-## Testing Strategy
+- `app_settings`：配置；
+- `pipeline_runs`：运行和失败证据；
+- 阶段 2 的 `works`、`file_versions`、`scrape_jobs`、`holding`、`exceptions`。
 
-All tests live under `src-tauri/tests/daemon.rs` and use `tempfile`.
+队列只放内存，不持久化。崩溃恢复、durable queue replay 等到控制接口和进程生命周期明确后再做。
 
-Required coverage:
+## 测试策略
 
-- config loads `source_roots`, `archive_root`, and `resource_pool_dirs`;
-- config fails with a clear error when `archive_root` is missing;
-- scan queues stable videos and skips `.aria2` partials;
-- scan skips non-video files and missing roots;
-- pause prevents scan/process work and resume restores operation;
-- `process_next` archives one queued file through `AutoPipeline`;
-- scrape failure routes to `exceptions`;
-- missing-code file routes to `holding`;
-- operational failure is reflected as failed status, not a content exception;
-- `run_once` processes a mixed temp inbox and produces deterministic counts.
+新增测试文件：
 
-Add `src-tauri/examples/stage3_daemon_smoke.rs`:
+- `src-tauri/tests/daemon.rs`
 
-- creates temp inbox/assets/archive/db;
-- configures repository settings;
-- runs `HeadlessDaemon::run_once`;
-- prints deterministic lines:
-  - `stage3_daemon_smoke=completed`
-  - `queued=3`
-  - `archived=1`
-  - `holding=1`
-  - `exceptions=1`
-  - `failed=0`
-  - `no_real_resources_required=true`
+全部测试使用 `tempfile`，不依赖 `H:/`、`G:/`、真实视频库或网络。
 
-Verification commands:
+必须覆盖：
+
+- 配置能读取 `source_roots`、`archive_root`、`resource_pool_dirs`；
+- 未配置 `archive_root` 时返回明确错误；
+- scan 会排队稳定视频，跳过 `.aria2` 未完成文件；
+- scan 会跳过非视频文件和不存在的 root；
+- pause 会阻止 scan/process，resume 后恢复；
+- `process_next` 能通过 `AutoPipeline` 归档一个排队文件；
+- 刮削失败进入 `exceptions`；
+- 无番号文件进入 `holding`；
+- 操作失败体现为 failed 状态，不进入内容异常；
+- `run_once` 处理混合临时 inbox，返回确定计数。
+
+新增 CLI-only smoke：
+
+- `src-tauri/examples/stage3_daemon_smoke.rs`
+
+smoke 行为：
+
+- 创建临时 inbox/assets/archive/db；
+- 写入 Repository settings；
+- 创建 `HeadlessDaemon`；
+- 执行 `run_once`；
+- 打印确定输出：
+
+```text
+stage3_daemon_smoke=completed
+queued=3
+archived=1
+holding=1
+exceptions=1
+failed=0
+no_real_resources_required=true
+```
+
+验证命令：
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml --test daemon -j 1
@@ -250,30 +287,32 @@ cargo test --manifest-path src-tauri/Cargo.toml -j 1
 cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1
 ```
 
-The `-j 1` flag is required on the current Windows Codex host because parallel rustc hit page-file/mmap error `os error 1455` during Stage 2 verification.
+当前 Windows Codex 环境中，完整 `cargo test` 并行编译曾触发页面文件 / mmap 错误 `os error 1455`，所以完整验证默认带 `-j 1`。
 
-## Failure Handling
+## 失败处理
 
-- Missing archive root: config error; no scan.
-- Missing source root: skipped and counted; no error.
-- Partial download marker: skipped; no SQLite write.
-- Pipeline content exception: Stage 2 writes `exceptions`; daemon increments exception count.
-- Pipeline holding route: Stage 2 writes `holding`; daemon increments holding count.
-- Pipeline operational error: Stage 2 finishes `pipeline_runs.status = "failed"`; daemon increments failed count and records `last_error`.
+- 缺 `archive_root`：配置错误，不扫描。
+- source root 不存在：跳过并计入 skipped，不报错。
+- 存在 `.aria2` 控制文件：跳过，不写 SQLite。
+- 内容异常：阶段 2 写 `exceptions`，daemon 增加 exception 计数。
+- 搁置：阶段 2 写 `holding`，daemon 增加 holding 计数。
+- 文件复制、移动、写 NFO、SQLite 写入等操作失败：阶段 2 完成 `pipeline_runs.status = "failed"`，daemon 增加 failed 计数并记录 `last_error`。
 
-## Security
+## 安全
 
-No local network server is introduced in Stage 3, so token / Origin / port selection are not implemented here. The design keeps the control facade method-based so Stage 4 can expose the same operations over Tauri commands or a loopback HTTP server with authentication.
+阶段 3 不引入本地网络服务，所以不实现 token、Origin、端口选择。
 
-## Risks And Mitigations
+但方法级控制门面要保持清晰，后续阶段可以把同一组操作暴露成 Tauri 命令或 loopback HTTP API，并补鉴权。
 
-- Queue duplicates: de-duplicate by canonicalized path when possible.
-- Source files changing after scan: Stage 2 `CompletedFile` snapshot plus staged move verification still catches size mismatches.
-- Huge source roots: Stage 3 uses recursive scanning for correctness; OS watcher optimization remains later work.
-- Long-running daemon lifecycle: deliberately outside this phase, because Codex cannot safely verify tray/UI/process integration.
+## 风险与应对
 
-## Self-Review
+- 队列重复：尽量 canonicalize path 去重，失败时用原始 path 去重。
+- 扫描后源文件继续变化：阶段 2 的 `CompletedFile` 快照和 staged move 校验仍会兜底。
+- source root 很大：本阶段优先正确性，递归扫描即可；文件系统 watcher 留到后续。
+- 长期进程生命周期复杂：本阶段明确不做，因为 Codex 环境不能安全验证托盘、GUI、自启。
 
-- Placeholder scan: no open TODO/TBD items remain.
-- Scope check: focused on headless daemon core only; HTTP/WebSocket/tray/autostart are explicitly deferred.
-- Consistency check: all data flow uses Stage 2 `AutoPipeline`, `CompletionSnapshot`, and repository settings; no second pipeline model is introduced.
+## 自审
+
+- 占位扫描：没有 TODO/TBD 或未定义任务。
+- 范围检查：只覆盖 headless daemon core；HTTP/WebSocket、托盘、自启、真实 scraper 都明确延后。
+- 一致性检查：数据流复用阶段 2 `AutoPipeline`、`CompletionSnapshot` 和 Repository settings，没有引入第二套管线模型。
