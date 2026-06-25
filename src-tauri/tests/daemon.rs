@@ -114,3 +114,58 @@ fn daemon_status_starts_idle_with_empty_queue() {
     assert_eq!(status.processed, 0);
     assert_eq!(status.last_error, None);
 }
+
+#[test]
+fn scan_queues_stable_videos_and_skips_incomplete_or_non_video_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let scraper = FakeScraper;
+    std::fs::write(inbox.join("ABP-300.mp4"), b"video-300").unwrap();
+    std::fs::write(inbox.join("ABP-301.mp4"), b"video-301").unwrap();
+    std::fs::write(inbox.join("ABP-301.mp4.aria2"), b"partial").unwrap();
+    std::fs::write(inbox.join("notes.txt"), b"not video").unwrap();
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.scan_now().unwrap();
+
+    assert_eq!(report.scanned_files, 4);
+    assert_eq!(report.queued_files, 1);
+    assert_eq!(report.skipped_files, 3);
+    assert_eq!(daemon.status().queued, 1);
+}
+
+#[test]
+fn scan_is_deterministic_and_does_not_queue_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let nested = inbox.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("ABP-300.mp4"), b"video-300").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let first = daemon.scan_now().unwrap();
+    let second = daemon.scan_now().unwrap();
+
+    assert_eq!(first.queued_files, 1);
+    assert_eq!(second.queued_files, 0);
+    assert_eq!(daemon.status().queued, 1);
+}
+
+#[test]
+fn scan_skips_missing_source_roots_without_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, archive, assets) = configured_repo(&tmp);
+    let missing = tmp.path().join("missing");
+    repo.set_source_roots(&[missing, inbox]).unwrap();
+    repo.set_archive_root(&archive).unwrap();
+    repo.set_resource_pool_dirs(&[assets]).unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.scan_now().unwrap();
+
+    assert_eq!(report.queued_files, 0);
+    assert!(report.skipped_files >= 1);
+    assert_eq!(daemon.status().state, DaemonState::Idle);
+}
