@@ -1,9 +1,10 @@
-use crate::daemon_control::DaemonControlRuntime;
+use crate::daemon_control::{build_daemon_status, DaemonControlRuntime, DaemonControlStatus};
 use crate::storage::Repository;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -128,18 +129,67 @@ impl ControlServiceRuntime {
             return json_response(400, json!({ "ok": false, "error": "bad request" }));
         };
         if request.method == "GET" && request.path == "/health" {
-            return json_response(
-                200,
-                json!({
-                    "ok": true,
-                    "data": {
-                        "service": "media-manager-control",
-                        "status": "ok"
-                    }
-                }),
-            );
+            return ok_json(json!({
+                "service": "media-manager-control",
+                "status": "ok"
+            }));
+        }
+        if request.path.starts_with("/v1/") {
+            if let Err(response) = self.authorize(&request) {
+                return response;
+            }
+            return self.route_v1(&request);
         }
         json_response(404, json!({ "ok": false, "error": "not found" }))
+    }
+
+    fn authorize(&self, request: &HttpRequest) -> std::result::Result<(), String> {
+        if !origin_allowed(request.header("origin")) {
+            return Err(json_response(
+                403,
+                json!({ "ok": false, "error": "origin forbidden" }),
+            ));
+        }
+        match request.header("authorization") {
+            None => Err(json_response(
+                401,
+                json!({ "ok": false, "error": "missing bearer token" }),
+            )),
+            Some(value) if value == format!("Bearer {}", self.token) => Ok(()),
+            Some(_) => Err(json_response(
+                403,
+                json!({ "ok": false, "error": "invalid bearer token" }),
+            )),
+        }
+    }
+
+    fn route_v1(&mut self, request: &HttpRequest) -> String {
+        let result: Result<serde_json::Value> =
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/v1/status") => self.status_json(),
+                ("POST", "/v1/pause") => {
+                    self.daemon.paused = true;
+                    self.status_json()
+                }
+                ("POST", "/v1/resume") => {
+                    self.daemon.paused = false;
+                    self.status_json()
+                }
+                _ => return json_response(404, json!({ "ok": false, "error": "not found" })),
+            };
+        match result {
+            Ok(data) => ok_json(data),
+            Err(error) => json_response(500, json!({ "ok": false, "error": error.to_string() })),
+        }
+    }
+
+    fn status_json(&self) -> Result<serde_json::Value> {
+        let status: DaemonControlStatus = build_daemon_status(
+            &self.repo,
+            &self.daemon,
+            self.config.metadata_provider_enabled,
+        )?;
+        Ok(serde_json::to_value(status)?)
     }
 }
 
@@ -214,17 +264,49 @@ fn handle_stream(mut stream: TcpStream, runtime: &mut ControlServiceRuntime) -> 
 struct HttpRequest {
     method: String,
     path: String,
+    headers: HashMap<String, String>,
 }
 
 impl HttpRequest {
     fn parse(raw: &str) -> Option<Self> {
-        let first = raw.lines().next()?;
+        let mut lines = raw.lines();
+        let first = lines.next()?;
         let mut parts = first.split_whitespace();
+        let mut headers = HashMap::new();
+        for line in lines {
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            }
+        }
         Some(Self {
             method: parts.next()?.to_string(),
             path: parts.next()?.to_string(),
+            headers,
         })
     }
+
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+}
+
+fn origin_allowed(origin: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some("tauri://localhost") => true,
+        Some(value) => {
+            value.starts_with("http://127.0.0.1:") || value.starts_with("http://localhost:")
+        }
+    }
+}
+
+fn ok_json(data: serde_json::Value) -> String {
+    json_response(200, json!({ "ok": true, "data": data }))
 }
 
 fn json_response(status: u16, body: serde_json::Value) -> String {

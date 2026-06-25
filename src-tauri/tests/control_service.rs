@@ -58,6 +58,38 @@ fn request(port: u16, raw: &str) -> String {
     response
 }
 
+fn configured_repo(tmp: &tempfile::TempDir) -> Repository {
+    let repo = open_repo(&tmp.path().join("library.sqlite"));
+    let inbox = tmp.path().join("inbox");
+    let archive = tmp.path().join("archive");
+    let assets = tmp.path().join("assets");
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::create_dir_all(&archive).unwrap();
+    std::fs::create_dir_all(&assets).unwrap();
+    repo.set_source_roots(&[inbox]).unwrap();
+    repo.set_archive_root(&archive).unwrap();
+    repo.set_resource_pool_dirs(&[assets]).unwrap();
+    repo
+}
+
+fn authorized_get(port: u16, path: &str) -> String {
+    request(
+        port,
+        &format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer stage5-token\r\nOrigin: http://127.0.0.1:1420\r\n\r\n"
+        ),
+    )
+}
+
+fn authorized_post(port: u16, path: &str) -> String {
+    request(
+        port,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer stage5-token\r\nOrigin: tauri://localhost\r\nContent-Length: 0\r\n\r\n"
+        ),
+    )
+}
+
 #[test]
 fn service_writes_discovery_file_and_serves_health_without_token() {
     let tmp = tempfile::tempdir().unwrap();
@@ -85,6 +117,48 @@ fn service_writes_discovery_file_and_serves_health_without_token() {
     assert_eq!(discovery.port, handle.port());
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(response.contains("\"service\":\"media-manager-control\""));
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
+fn v1_routes_require_token_and_allow_pause_resume_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config)
+        .unwrap()
+        .start()
+        .unwrap();
+
+    let missing = request(
+        handle.port(),
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+    );
+    let wrong = request(
+        handle.port(),
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer wrong\r\n\r\n",
+    );
+    let blocked_origin = request(
+        handle.port(),
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer stage5-token\r\nOrigin: https://evil.example\r\n\r\n",
+    );
+    let status = authorized_get(handle.port(), "/v1/status");
+    let paused = authorized_post(handle.port(), "/v1/pause");
+    let resumed = authorized_post(handle.port(), "/v1/resume");
+
+    assert!(missing.starts_with("HTTP/1.1 401 Unauthorized"));
+    assert!(wrong.starts_with("HTTP/1.1 403 Forbidden"));
+    assert!(blocked_origin.starts_with("HTTP/1.1 403 Forbidden"));
+    assert!(status.contains("\"state\":\"Idle\""));
+    assert!(paused.contains("\"state\":\"Paused\""));
+    assert!(resumed.contains("\"state\":\"Idle\""));
 
     handle.shutdown().unwrap();
 }
