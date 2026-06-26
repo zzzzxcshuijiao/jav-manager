@@ -21,6 +21,8 @@ import {
   formatDiagnosticExportSummary,
   formatDiagnosticLogLine,
   formatRemoteScraperSettingsSummary,
+  formatSelfCheckSeverity,
+  formatSelfCheckSummary,
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
@@ -553,6 +555,24 @@ describe("diagnostics formatting", () => {
         holding_items: 4
       })
     ).toContain("已导出诊断快照");
+  });
+});
+
+describe("self-check formatting", () => {
+  it("formats self-check severity and summary", () => {
+    const report = {
+      generated_at: "2026-06-27T10:00:00Z",
+      overall: "warn" as const,
+      sandbox: null,
+      checks: [
+        { id: "sandbox_archive", title: "沙盒归档", severity: "pass" as const, message: "归档成功", action: null },
+        { id: "aria2_settings", title: "aria2", severity: "warn" as const, message: "未配置 GID", action: "填写真实 GID" }
+      ]
+    };
+
+    expect(formatSelfCheckSeverity("pass")).toBe("通过");
+    expect(formatSelfCheckSeverity("warn")).toBe("警告");
+    expect(formatSelfCheckSummary(report)).toBe("自检有警告：通过 1 项，警告 1 项，失败 0 项。");
   });
 });
 

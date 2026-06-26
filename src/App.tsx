@@ -44,6 +44,7 @@ import type {
   ResourcePool,
   ReviewReason,
   RemoteScraperSettings,
+  SelfCheckReport,
   ThumbnailCacheSummary,
   RebuildReport,
   Tag,
@@ -90,6 +91,8 @@ import {
   formatMediaInfo,
   formatPipelineStatus,
   formatRemoteScraperSettingsSummary,
+  formatSelfCheckSeverity,
+  formatSelfCheckSummary,
   formatRebuildReport,
   formatWorkOption,
   ignorableDuplicateItems,
@@ -225,6 +228,8 @@ export function App() {
   const [daemonBusy, setDaemonBusy] = useState<"refresh" | "run" | "pause" | "resume" | "resolve" | null>(null);
   const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "export" | null>(null);
+  const [selfCheckReport, setSelfCheckReport] = useState<SelfCheckReport | null>(null);
+  const [selfCheckBusy, setSelfCheckBusy] = useState(false);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
   const [aria2Busy, setAria2Busy] = useState(false);
@@ -850,6 +855,22 @@ export function App() {
       setStatus(`导出诊断快照失败：${String(error)}`);
     } finally {
       setDiagnosticsBusy(null);
+    }
+  }
+
+  async function runPipelineSelfCheck() {
+    if (selfCheckBusy) return;
+    setSelfCheckBusy(true);
+    setStatus("正在执行自动管线自检...");
+    try {
+      const report = await api.runPipelineSelfCheck();
+      setSelfCheckReport(report);
+      setStatus(formatSelfCheckSummary(report));
+      await loadDaemonPanelData();
+    } catch (error) {
+      setStatus(`自动管线自检失败：${String(error)}`);
+    } finally {
+      setSelfCheckBusy(false);
     }
   }
 
@@ -1693,6 +1714,9 @@ export function App() {
                   <button type="button" className="primary" onClick={runDaemonOnce} disabled={daemonBusy !== null || !daemonStatus?.configured || daemonStatus?.state === "Paused"}>
                     <Play size={16} /> {daemonBusy === "run" ? "运行中" : "运行一轮"}
                   </button>
+                  <button type="button" onClick={runPipelineSelfCheck} disabled={selfCheckBusy || !hasBackend}>
+                    <ListChecks size={16} /> {selfCheckBusy ? "自检中" : "一键自检"}
+                  </button>
                 </div>
 
                 <div className="daemon-actions">
@@ -1966,6 +1990,30 @@ export function App() {
                     ))
                   )}
                 </div>
+
+                {selfCheckReport ? (
+                  <div className="self-check-panel">
+                    <div className="daemon-list-head">
+                      <strong>{formatSelfCheckSummary(selfCheckReport)}</strong>
+                      <span>{selfCheckReport.generated_at}</span>
+                    </div>
+                    <div className="self-check-list">
+                      {selfCheckReport.checks.map((item) => (
+                        <div className={`self-check-row ${item.severity}`} key={item.id}>
+                          <strong>{formatSelfCheckSeverity(item.severity)} · {item.title}</strong>
+                          <span>{item.message}</span>
+                          {item.action ? <small>{item.action}</small> : null}
+                        </div>
+                      ))}
+                    </div>
+                    {selfCheckReport.sandbox ? (
+                      <div className="rebuild-report">
+                        <span>沙盒目录：{selfCheckReport.sandbox.root}</span>
+                        {selfCheckReport.sandbox.archived_path ? <span>归档样本：{selfCheckReport.sandbox.archived_path}</span> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div className="diagnostics-panel">
                   <div className="daemon-list-head">

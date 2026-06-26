@@ -193,6 +193,33 @@ export interface DaemonRunOnceReport {
   process: DaemonProcessReport;
 }
 
+export type SelfCheckSeverity = "pass" | "warn" | "fail";
+export type SelfCheckOverall = SelfCheckSeverity;
+
+export interface SelfCheckItem {
+  id: string;
+  title: string;
+  severity: SelfCheckSeverity;
+  message: string;
+  action?: string | null;
+}
+
+export interface SelfCheckSandboxSummary {
+  root: string;
+  inbox: string;
+  archive: string;
+  video_path: string;
+  archived_path?: string | null;
+  pipeline_status?: string | null;
+}
+
+export interface SelfCheckReport {
+  generated_at: string;
+  overall: SelfCheckOverall;
+  checks: SelfCheckItem[];
+  sandbox?: SelfCheckSandboxSummary | null;
+}
+
 export type HoldingReason = "NoCode" | "ShortVideo" | "NonJapanese" | "Unrecognizable";
 
 export interface HoldingEntry {
@@ -471,6 +498,9 @@ export const api = {
   },
   exportDiagnosticsSnapshot() {
     return command<DiagnosticExportResult>("export_diagnostics_snapshot_command");
+  },
+  runPipelineSelfCheck() {
+    return command<SelfCheckReport>("run_pipeline_self_check_command");
   },
   pauseDaemon() {
     return daemonClient.pause();

@@ -641,6 +641,7 @@ h2 {
 
 .aria2-settings,
 .remote-scraper-settings,
+.self-check-panel,
 .diagnostics-panel {
   border: 1px solid #dfe7ec;
   border-radius: 6px;
@@ -834,6 +835,43 @@ h2 {
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 4px;
+}
+
+.self-check-list {
+  display: grid;
+  gap: 8px;
+}
+
+.self-check-row {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #d8e1e7;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 9px 10px;
+}
+
+.self-check-row strong {
+  color: #25313c;
+}
+
+.self-check-row span,
+.self-check-row small {
+  color: #61717d;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.self-check-row.pass {
+  border-color: rgba(57, 138, 86, 0.38);
+}
+
+.self-check-row.warn {
+  border-color: rgba(217, 119, 6, 0.45);
+}
+
+.self-check-row.fail {
+  border-color: rgba(190, 61, 47, 0.55);
 }
 
 .diagnostic-log-list {

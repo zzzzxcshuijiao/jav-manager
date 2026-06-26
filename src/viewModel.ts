@@ -17,6 +17,9 @@ import type {
   RebuildReport,
   RemoteScraperSettings,
   ReviewReason,
+  SelfCheckOverall,
+  SelfCheckReport,
+  SelfCheckSeverity,
   Work
 } from "./api";
 
@@ -471,6 +474,38 @@ export function formatDiagnosticLogLine(entry: DiagnosticLogEntry): string {
 /** Format the diagnostic export result for the global status line. */
 export function formatDiagnosticExportSummary(result: DiagnosticExportResult): string {
   return `已导出诊断快照：${result.path}（日志 ${result.logs} 条，管线 ${result.pipeline_runs} 条，刮削 ${result.scrape_jobs} 条，异常 ${result.open_exceptions} 条，搁置 ${result.holding_items} 条）`;
+}
+
+/** Format one self-check item severity for the automatic pipeline panel. */
+export function formatSelfCheckSeverity(severity: SelfCheckSeverity): string {
+  const labels: Record<SelfCheckSeverity, string> = {
+    pass: "通过",
+    warn: "警告",
+    fail: "失败"
+  };
+  return labels[severity] ?? severity;
+}
+
+/** Format the self-check overall status for compact feedback. */
+export function formatSelfCheckOverall(overall: SelfCheckOverall): string {
+  const labels: Record<SelfCheckOverall, string> = {
+    pass: "自检通过",
+    warn: "自检有警告",
+    fail: "自检失败"
+  };
+  return labels[overall] ?? overall;
+}
+
+/** Summarize a full self-check report for the global status line. */
+export function formatSelfCheckSummary(report: SelfCheckReport): string {
+  const counts = report.checks.reduce(
+    (next, item) => {
+      next[item.severity] += 1;
+      return next;
+    },
+    { pass: 0, warn: 0, fail: 0 } as Record<SelfCheckSeverity, number>
+  );
+  return `${formatSelfCheckOverall(report.overall)}：通过 ${counts.pass} 项，警告 ${counts.warn} 项，失败 ${counts.fail} 项。`;
 }
 
 export function formatHoldingReason(reason: HoldingReason): string {
