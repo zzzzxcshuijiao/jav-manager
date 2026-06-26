@@ -1,4 +1,6 @@
-use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport};
+use media_manager::aria2::{
+    Aria2Client, Aria2PollReport, Aria2RpcEndpoint, Aria2Settings, Aria2Transport,
+};
 use media_manager::daemon::{CompletionPolicy, DaemonConfig, DaemonState, HeadlessDaemon};
 use media_manager::domain::{ExceptionKind, ScrapedWorkMetadata};
 use media_manager::pipeline::{ScrapeCoordinator, ScraperSource};
@@ -14,6 +16,12 @@ struct StaticAria2Transport {
     requests: Arc<Mutex<Vec<String>>>,
 }
 
+#[derive(Clone)]
+struct RoutingAria2Transport {
+    video_path: std::path::PathBuf,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
 impl StaticAria2Transport {
     fn new(response: String) -> Self {
         Self {
@@ -23,10 +31,50 @@ impl StaticAria2Transport {
     }
 }
 
+impl RoutingAria2Transport {
+    fn new(video_path: std::path::PathBuf) -> Self {
+        Self {
+            video_path,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
 impl Aria2Transport for StaticAria2Transport {
     fn post_json(&self, _endpoint: &Aria2RpcEndpoint, body: &str) -> anyhow::Result<String> {
         self.requests.lock().unwrap().push(body.to_string());
         Ok(self.response.clone())
+    }
+}
+
+impl Aria2Transport for RoutingAria2Transport {
+    fn post_json(&self, _endpoint: &Aria2RpcEndpoint, body: &str) -> anyhow::Result<String> {
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        let gid = request["params"][0].as_str().unwrap().to_string();
+        self.calls.lock().unwrap().push(gid.clone());
+        if gid == "gid-error" {
+            anyhow::bail!("rpc failed for gid-error");
+        }
+        let complete = gid == "gid-complete";
+        let files = if complete {
+            serde_json::json!([
+                {"path": self.video_path.to_string_lossy().to_string(), "length": "9", "completedLength": "9", "selected": "true"}
+            ])
+        } else {
+            serde_json::json!([])
+        };
+        Ok(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "media-manager-tell-status",
+            "result": {
+                "gid": gid,
+                "status": if complete { "complete" } else { "active" },
+                "totalLength": "9",
+                "completedLength": if complete { "9" } else { "3" },
+                "files": files
+            }
+        })
+        .to_string())
     }
 }
 
@@ -48,6 +96,19 @@ impl ScraperSource for FakeScraper {
         } else {
             Ok(None)
         }
+    }
+}
+
+fn enabled_aria2_settings(gids: Vec<&str>) -> Aria2Settings {
+    Aria2Settings {
+        enabled: true,
+        host: "127.0.0.1".to_string(),
+        port: 6800,
+        path: "/jsonrpc".to_string(),
+        secret: None,
+        timeout_ms: 5000,
+        poll_interval_secs: 30,
+        tracked_gids: gids.into_iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -427,4 +488,52 @@ fn scan_aria2_gid_ignores_unfinished_task_without_error() {
     assert_eq!(report.queued_files, 0);
     assert_eq!(report.skipped_files, 0);
     assert_eq!(daemon.status().state, DaemonState::Idle);
+}
+
+#[test]
+fn poll_aria2_once_aggregates_completed_unfinished_and_failed_gids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let video = inbox.join("ABP-300.mp4");
+    std::fs::write(&video, b"video-300").unwrap();
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+    let transport = RoutingAria2Transport::new(video);
+
+    let report = daemon
+        .poll_aria2_once(
+            &enabled_aria2_settings(vec!["gid-complete", "gid-active", "gid-error"]),
+            transport,
+        )
+        .unwrap();
+
+    assert_eq!(report.enabled, true);
+    assert_eq!(report.attempted_gids, 3);
+    assert_eq!(report.completed_gids, 1);
+    assert_eq!(report.queued_files, 1);
+    assert_eq!(report.failed_gids, 1);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(daemon.status().queued, 1);
+    assert_eq!(daemon.status().state, DaemonState::Error);
+}
+
+#[test]
+fn poll_aria2_once_skips_transport_when_disabled_or_paused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+    let transport = RoutingAria2Transport::new(inbox.join("ABP-300.mp4"));
+
+    let disabled = daemon
+        .poll_aria2_once(&Aria2Settings::default(), transport.clone())
+        .unwrap();
+    daemon.pause();
+    let paused = daemon
+        .poll_aria2_once(&enabled_aria2_settings(vec!["gid-complete"]), transport.clone())
+        .unwrap();
+
+    assert_eq!(disabled, Aria2PollReport::default());
+    assert_eq!(paused.attempted_gids, 0);
+    assert!(transport.calls.lock().unwrap().is_empty());
 }

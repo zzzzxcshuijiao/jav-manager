@@ -281,6 +281,18 @@ pub struct Aria2CompletedSelection {
     pub files: Vec<CompletedFile>,
 }
 
+/// Summary of one configured aria2 polling pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Aria2PollReport {
+    pub enabled: bool,
+    pub attempted_gids: usize,
+    pub completed_gids: usize,
+    pub queued_files: usize,
+    pub skipped_files: usize,
+    pub failed_gids: usize,
+    pub errors: Vec<String>,
+}
+
 /// One file entry returned by aria2 for single-file or BT downloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aria2File {

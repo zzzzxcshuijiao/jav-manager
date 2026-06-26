@@ -1,4 +1,6 @@
-use crate::aria2::{Aria2Client, Aria2Transport};
+use crate::aria2::{
+    Aria2Client, Aria2PollReport, Aria2Settings, Aria2Status, Aria2Transport,
+};
 use crate::domain::CompletedFile;
 use crate::domain::PipelineOutcome;
 use crate::pipeline::{
@@ -103,6 +105,7 @@ pub struct ProcessReport {
 pub struct RunOnceReport {
     pub scan: ScanReport,
     pub process: ProcessReport,
+    pub aria2: Aria2PollReport,
 }
 
 /// Pure Rust daemon core. It owns only in-memory queue/state and delegates all
@@ -208,6 +211,10 @@ impl<'a> HeadlessDaemon<'a> {
         gid: &str,
     ) -> Result<ScanReport> {
         let status = client.tell_status(gid)?;
+        self.queue_aria2_status(status)
+    }
+
+    fn queue_aria2_status(&mut self, status: Aria2Status) -> Result<ScanReport> {
         let selection = status.completed_selection()?;
         let mut report = ScanReport {
             scanned_files: selection.scanned_files,
@@ -219,6 +226,60 @@ impl<'a> HeadlessDaemon<'a> {
             if self.queue_completed_file(file) {
                 report.queued_files += 1;
             }
+        }
+
+        Ok(report)
+    }
+
+    /// Poll configured aria2 GIDs once and enqueue completed selected videos.
+    pub fn poll_aria2_once<T: Aria2Transport>(
+        &mut self,
+        settings: &Aria2Settings,
+        transport: T,
+    ) -> Result<Aria2PollReport> {
+        if self.state == DaemonState::Paused || !settings.enabled {
+            return Ok(Aria2PollReport::default());
+        }
+
+        let settings = settings.normalized()?;
+        let mut report = Aria2PollReport {
+            enabled: true,
+            ..Aria2PollReport::default()
+        };
+        if settings.tracked_gids.is_empty() {
+            return Ok(report);
+        }
+
+        self.state = DaemonState::Scanning;
+        let client = Aria2Client::new(settings.endpoint()?, transport);
+        for gid in &settings.tracked_gids {
+            report.attempted_gids += 1;
+            let gid_result = client.tell_status(gid).and_then(|status| {
+                let complete = status.is_complete()?;
+                let scan = self.queue_aria2_status(status)?;
+                Ok((complete, scan))
+            });
+
+            match gid_result {
+                Ok((complete, scan)) => {
+                    if complete {
+                        report.completed_gids += 1;
+                    }
+                    report.queued_files += scan.queued_files;
+                    report.skipped_files += scan.skipped_files;
+                }
+                Err(error) => {
+                    report.failed_gids += 1;
+                    report.errors.push(format!("{gid}: {error}"));
+                }
+            }
+        }
+
+        if report.failed_gids > 0 {
+            self.state = DaemonState::Error;
+            self.last_error = report.errors.first().cloned();
+        } else {
+            self.state = DaemonState::Idle;
         }
 
         Ok(report)
@@ -378,7 +439,11 @@ impl<'a> HeadlessDaemon<'a> {
             }
         }
 
-        Ok(RunOnceReport { scan, process })
+        Ok(RunOnceReport {
+            scan,
+            process,
+            aria2: Aria2PollReport::default(),
+        })
     }
 }
 
