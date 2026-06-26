@@ -73,6 +73,7 @@ pub struct ControlServiceRuntime {
 pub struct ControlServiceHandle {
     host: String,
     port: u16,
+    discovery_path: PathBuf,
     shutdown_tx: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
@@ -136,12 +137,14 @@ impl ControlServiceRuntime {
         )?;
 
         let host = self.config.host.clone();
+        let discovery_path = self.config.discovery_path.clone();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let thread = thread::spawn(move || run_listener(listener, self, shutdown_rx));
 
         Ok(ControlServiceHandle {
             host,
             port,
+            discovery_path,
             shutdown_tx,
             thread: Some(thread),
         })
@@ -219,10 +222,11 @@ impl ControlServiceRuntime {
                 self.status_json()
             }
             ("POST", "/v1/run-once") => {
+                let metadata_provider_enabled = self.metadata_provider_enabled();
                 let report = run_daemon_once(
                     &self.repo,
                     &mut self.daemon,
-                    self.config.metadata_provider_enabled,
+                    metadata_provider_enabled,
                 )?;
                 Ok(serde_json::to_value(report)?)
             }
@@ -247,19 +251,36 @@ impl ControlServiceRuntime {
         let status: DaemonControlStatus = build_daemon_status(
             &self.repo,
             &self.daemon,
-            self.config.metadata_provider_enabled,
+            self.metadata_provider_enabled(),
         )?;
         Ok(serde_json::to_value(status)?)
+    }
+
+    /// Read the current metadata provider flag from SQLite, falling back to startup config.
+    fn metadata_provider_enabled(&self) -> bool {
+        self.repo
+            .get_metadata_provider_enabled()
+            .unwrap_or(self.config.metadata_provider_enabled)
     }
 }
 
 impl ControlServiceHandle {
+    /// Return the loopback host that owns the listener.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// Return the actual bound port. This matters when tests request port 0.
     pub fn port(&self) -> u16 {
         self.port
     }
 
-    /// Ask the listener loop to stop and wait for the service thread.
+    /// Return the discovery file path written for this service instance.
+    pub fn discovery_path(&self) -> &Path {
+        &self.discovery_path
+    }
+
+    /// Ask the listener loop to stop, wait for the service thread, and remove discovery.
     pub fn shutdown(mut self) -> Result<()> {
         let _ = self.shutdown_tx.send(());
         let _ = TcpStream::connect((self.host.as_str(), self.port));
@@ -268,6 +289,7 @@ impl ControlServiceHandle {
                 .join()
                 .map_err(|_| anyhow!("control service thread panicked"))?;
         }
+        let _ = fs::remove_file(&self.discovery_path);
         Ok(())
     }
 }

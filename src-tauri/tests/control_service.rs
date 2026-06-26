@@ -240,6 +240,33 @@ fn v1_routes_require_token_and_allow_pause_resume_status() {
 }
 
 #[test]
+fn service_reads_metadata_provider_setting_after_startup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = configured_repo(&tmp);
+    repo.set_metadata_provider_enabled(false).unwrap();
+    let config = ControlServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        discovery_path: tmp.path().join("control.json"),
+        token: Some("stage5-token".to_string()),
+        metadata_provider_enabled: false,
+    };
+    let handle = ControlServiceRuntime::new(repo, config).unwrap().start().unwrap();
+    let port = handle.port();
+
+    let disabled = authorized_get(port, "/v1/status");
+    assert!(disabled.contains("\"metadata_source\":\"disabled\""));
+
+    let repo = open_repo(&tmp.path().join("library.sqlite"));
+    repo.set_metadata_provider_enabled(true).unwrap();
+
+    let enabled = authorized_get(port, "/v1/status");
+    assert!(enabled.contains("\"metadata_source\":\"example\""));
+
+    handle.shutdown().unwrap();
+}
+
+#[test]
 fn run_once_and_queue_routes_use_existing_daemon_control_helpers() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = configured_repo(&tmp);

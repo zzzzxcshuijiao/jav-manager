@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod archive;
 pub mod commands;
 pub mod control_service;
+pub mod control_service_host;
 pub mod daemon_control;
 pub mod daemon;
 pub mod domain;
