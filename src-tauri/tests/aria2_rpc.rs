@@ -1,6 +1,6 @@
 use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport};
 use media_manager::pipeline::Aria2TaskSnapshot;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -93,4 +93,58 @@ fn tell_status_returns_json_rpc_error_message() {
 
     assert!(error.to_string().contains("aria2 JSON-RPC error 1"));
     assert!(error.to_string().contains("Unauthorized"));
+}
+
+#[test]
+fn completed_selection_keeps_only_selected_completed_existing_videos() {
+    let tmp = tempfile::tempdir().unwrap();
+    let video = tmp.path().join("ABP-600.mp4");
+    let unselected = tmp.path().join("ABP-601.mp4");
+    let partial = tmp.path().join("ABP-602.mp4");
+    let notes = tmp.path().join("notes.txt");
+    std::fs::write(&video, b"good").unwrap();
+    std::fs::write(&unselected, b"skip").unwrap();
+    std::fs::write(&partial, b"half").unwrap();
+    std::fs::write(&notes, b"note").unwrap();
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": "media-manager-tell-status",
+        "result": {
+            "gid": "done",
+            "status": "complete",
+            "totalLength": "20",
+            "completedLength": "20",
+            "files": [
+                {"path": video.to_string_lossy().to_string(), "length": "4", "completedLength": "4", "selected": "true"},
+                {"path": unselected.to_string_lossy().to_string(), "length": "4", "completedLength": "4", "selected": "false"},
+                {"path": partial.to_string_lossy().to_string(), "length": "4", "completedLength": "2", "selected": "true"},
+                {"path": notes.to_string_lossy().to_string(), "length": "4", "completedLength": "4", "selected": "true"},
+                {"path": tmp.path().join("missing.mp4").to_string_lossy().to_string(), "length": "4", "completedLength": "4", "selected": "true"}
+            ]
+        }
+    })
+    .to_string();
+    let client = Aria2Client::new(endpoint_with_secret(), RecordingTransport::new(&response));
+
+    let status = client.tell_status("done").unwrap();
+    let selection = status.completed_selection().unwrap();
+
+    assert_eq!(selection.scanned_files, 5);
+    assert_eq!(selection.skipped_files, 4);
+    assert_eq!(selection.files.len(), 1);
+    assert_eq!(selection.files[0].path, video);
+    assert_eq!(selection.files[0].file_name, "ABP-600.mp4");
+}
+
+#[test]
+fn completed_selection_is_empty_for_unfinished_task() {
+    let response = r#"{"jsonrpc":"2.0","id":"media-manager-tell-status","result":{"gid":"active","status":"active","totalLength":"20","completedLength":"20","files":[]}}"#;
+    let client = Aria2Client::new(endpoint_with_secret(), RecordingTransport::new(response));
+
+    let status = client.tell_status("active").unwrap();
+    let selection = status.completed_selection().unwrap();
+
+    assert_eq!(selection.scanned_files, 0);
+    assert_eq!(selection.skipped_files, 0);
+    assert!(selection.files.is_empty());
 }

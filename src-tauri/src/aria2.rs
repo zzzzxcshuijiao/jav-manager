@@ -1,7 +1,10 @@
+use crate::domain::CompletedFile;
 use crate::pipeline::{is_aria2_complete, Aria2TaskSnapshot};
+use crate::scanner::is_video_file;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::PathBuf;
 
 const TELL_STATUS_ID: &str = "media-manager-tell-status";
 const TELL_STATUS_KEYS: [&str; 5] = [
@@ -111,6 +114,43 @@ impl Aria2Status {
     pub fn is_complete(&self) -> Result<bool> {
         Ok(is_aria2_complete(&self.to_task_snapshot()?))
     }
+
+    /// Extract selected, completed, local video files from a completed aria2 task.
+    pub fn completed_selection(&self) -> Result<Aria2CompletedSelection> {
+        if !self.is_complete()? {
+            return Ok(Aria2CompletedSelection::default());
+        }
+
+        let mut selection = Aria2CompletedSelection {
+            scanned_files: self.files.len(),
+            ..Aria2CompletedSelection::default()
+        };
+
+        for file in &self.files {
+            if !file.is_selected() || !file.is_complete()? {
+                selection.skipped_files += 1;
+                continue;
+            }
+
+            let path = PathBuf::from(&file.path);
+            if file.path.trim().is_empty() || !path.exists() || !is_video_file(&path) {
+                selection.skipped_files += 1;
+                continue;
+            }
+
+            selection.files.push(CompletedFile::from_path(&path)?);
+        }
+
+        Ok(selection)
+    }
+}
+
+/// Files selected from a completed aria2 task and ready for daemon enqueue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Aria2CompletedSelection {
+    pub scanned_files: usize,
+    pub skipped_files: usize,
+    pub files: Vec<CompletedFile>,
 }
 
 /// One file entry returned by aria2 for single-file or BT downloads.
