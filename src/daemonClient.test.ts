@@ -185,4 +185,23 @@ describe("daemon control client", () => {
       expect.objectContaining({ method: "POST" }),
     );
   });
+
+  it("uses the existing Tauri command names for every fallback list method", async () => {
+    const command = vi.fn(async (_name: string) => []);
+    const client = createDaemonControlClient({
+      command,
+      fetchImpl: vi.fn(),
+      getDiscovery: async () => null,
+    });
+
+    await client.listHolding();
+    await client.listExceptions();
+    await client.listRuns();
+
+    expect(command.mock.calls.map((call) => call[0])).toEqual([
+      "list_holding_entries",
+      "list_exception_entries",
+      "list_pipeline_runs",
+    ]);
+  });
 });

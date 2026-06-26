@@ -19,7 +19,7 @@ export interface ControlServiceDiscovery {
   created_at: string;
 }
 
-type CommandExecutor = <T>(name: string, args?: Record<string, unknown>) => Promise<T>;
+type CommandExecutor = (name: string, args?: Record<string, unknown>) => Promise<unknown>;
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 type Envelope<T> = { ok: true; data: T } | { ok: false; error: string };
 
@@ -47,10 +47,10 @@ export function createDaemonControlClient(deps: ClientDeps) {
   /**
    * Return the command bridge result and mark the current control channel.
    */
-  async function callCommand<T>(route: Route<T>): Promise<T> {
-    const result = await deps.command<T>(route.commandName, route.commandArgs);
+  async function callCommand<T>(route: Pick<Route<T, unknown>, "commandName" | "commandArgs">): Promise<T> {
+    const result = await deps.command(route.commandName, route.commandArgs);
     channel = "command";
-    return result;
+    return result as T;
   }
 
   /**

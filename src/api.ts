@@ -1,4 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  createDaemonControlClient,
+  type ControlServiceDiscovery,
+  type DaemonControlChannel,
+} from "./daemonClient";
+
+export type { ControlServiceDiscovery, DaemonControlChannel } from "./daemonClient";
 
 export type IngestDecision = "AutoArchive" | "NeedsReview" | "DuplicateCandidate" | "Failed" | "Ignored";
 export type ReviewReason =
@@ -346,6 +353,11 @@ async function command<T>(name: string, args?: Record<string, unknown>): Promise
   return result.data;
 }
 
+const daemonClient = createDaemonControlClient({
+  command,
+  getDiscovery: () => command<ControlServiceDiscovery | null>("get_control_service_discovery"),
+});
+
 export const api = {
   configureSourceRoots(paths: string[]) {
     return command<string[]>("configure_source_roots", { paths });
@@ -365,29 +377,35 @@ export const api = {
   getMetadataProviderEnabled() {
     return command<boolean>("get_metadata_provider_enabled");
   },
+  getControlServiceDiscovery() {
+    return command<ControlServiceDiscovery | null>("get_control_service_discovery");
+  },
+  getDaemonControlChannel(): DaemonControlChannel {
+    return daemonClient.getChannel();
+  },
   getDaemonStatus() {
-    return command<DaemonControlStatus>("get_daemon_status");
+    return daemonClient.getStatus();
   },
   pauseDaemon() {
-    return command<DaemonControlStatus>("pause_daemon");
+    return daemonClient.pause();
   },
   resumeDaemon() {
-    return command<DaemonControlStatus>("resume_daemon");
+    return daemonClient.resume();
   },
   runDaemonOnce() {
-    return command<DaemonRunOnceReport>("run_daemon_once_command");
+    return daemonClient.runOnce();
   },
   listHoldingEntries() {
-    return command<HoldingEntry[]>("list_holding_entries");
+    return daemonClient.listHolding();
   },
   listExceptionEntries() {
-    return command<ExceptionEntry[]>("list_exception_entries");
+    return daemonClient.listExceptions();
   },
   resolveExceptionEntry(id: number, status: Exclude<ExceptionStatus, "Open">) {
-    return command<boolean>("resolve_exception_entry_command", { id, status });
+    return daemonClient.resolveException(id, status);
   },
   listPipelineRuns() {
-    return command<PipelineRun[]>("list_pipeline_runs");
+    return daemonClient.listRuns();
   },
   startScan(sourceRootIds: string[]) {
     return command<IngestJobSummary>("start_scan", { sourceRootIds });
