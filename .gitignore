@@ -1,5 +1,6 @@
 .ai_state/
 node_modules/
+.npm-cache/
 dist/
 src-tauri/target/
 src-tauri/gen/schemas/
@@ -11,3 +12,4 @@ src-tauri/gen/schemas/
 .superpowers/
 .tmp-*
 .spec-workflow/
+.worktrees/

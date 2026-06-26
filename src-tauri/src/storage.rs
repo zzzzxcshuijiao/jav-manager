@@ -1,14 +1,16 @@
-use crate::domain::{
-    Actor, ArchiveActionLog, CodeConflictEvidence, FileVersion, IngestDecision, IngestItem,
-    IngestItemFilters, IngestJobSummary, PipelineRun, ProviderMetadata, ReviewReason, ScrapeJob,
-    ScrapeStatus, WatchStatus, Work, CodeKind, DimensionCount, Exception, ExceptionKind,
-    ExceptionStatus, HoldingEntry, HoldingReason, Tag, WorkDetail, WorkFilters, WorkRating,
-    WorkSet, Collection,
-};
 use crate::archive::normalized_file_name;
+use crate::aria2::Aria2Settings;
+use crate::domain::{
+    Actor, ArchiveActionLog, CodeConflictEvidence, CodeKind, Collection, DimensionCount, Exception,
+    ExceptionKind, ExceptionStatus, FileVersion, HoldingEntry, HoldingReason, IngestDecision,
+    IngestItem, IngestItemFilters, IngestJobSummary, PipelineRun, PipelineStepRecord,
+    ProviderMetadata, ReviewReason, ScrapeJob, ScrapeStatus, Tag, WatchStatus, Work, WorkDetail,
+    WorkFilters, WorkRating, WorkSet,
+};
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
 use crate::provider::MetadataProvider;
+use crate::remote_scraper::RemoteScraperSettings;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeSet;
@@ -202,7 +204,10 @@ impl Repository {
             "
             CREATE TABLE IF NOT EXISTS scrape_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                work_id INTEGER NOT NULL REFERENCES works(id) ON DELETE CASCADE,
+                work_id INTEGER REFERENCES works(id) ON DELETE CASCADE,
+                normalized_code TEXT,
+                object_path TEXT,
+                pipeline_run_id INTEGER REFERENCES pipeline_runs(id) ON DELETE SET NULL,
                 source TEXT NOT NULL,
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -212,6 +217,10 @@ impl Repository {
             );
             ",
         )?;
+        self.relax_scrape_jobs_work_id()?;
+        self.ensure_column("scrape_jobs", "normalized_code", "TEXT")?;
+        self.ensure_column("scrape_jobs", "object_path", "TEXT")?;
+        self.ensure_column("scrape_jobs", "pipeline_run_id", "INTEGER")?;
         // Exceptions review queue (Task 4). One row per issue the user must
         // triage: code conflicts, duplicate candidates, scrape failures.
         self.conn.execute_batch(
@@ -283,7 +292,10 @@ impl Repository {
     }
 
     pub fn set_source_roots(&self, paths: &[PathBuf]) -> Result<()> {
-        self.set_setting("source_roots", &serde_json::to_string(&source_roots_as_strings(paths))?)
+        self.set_setting(
+            "source_roots",
+            &serde_json::to_string(&source_roots_as_strings(paths))?,
+        )
     }
 
     pub fn get_source_roots(&self) -> Result<Vec<PathBuf>> {
@@ -303,7 +315,10 @@ impl Repository {
     }
 
     pub fn set_metadata_provider_enabled(&self, enabled: bool) -> Result<()> {
-        self.set_setting("metadata_provider_enabled", if enabled { "true" } else { "false" })
+        self.set_setting(
+            "metadata_provider_enabled",
+            if enabled { "true" } else { "false" },
+        )
     }
 
     pub fn get_metadata_provider_enabled(&self) -> Result<bool> {
@@ -311,6 +326,44 @@ impl Repository {
             self.get_setting("metadata_provider_enabled")?.as_deref(),
             Some("true")
         ))
+    }
+
+    /// Persist normalized aria2 settings as one JSON app_settings value.
+    pub fn set_aria2_settings(&self, settings: &Aria2Settings) -> Result<Aria2Settings> {
+        let normalized = settings.normalized()?;
+        self.set_setting("aria2_settings", &serde_json::to_string(&normalized)?)?;
+        Ok(normalized)
+    }
+
+    /// Read aria2 settings, returning safe defaults when not configured.
+    pub fn get_aria2_settings(&self) -> Result<Aria2Settings> {
+        let Some(value) = self.get_setting("aria2_settings")? else {
+            return Ok(Aria2Settings::default());
+        };
+        let settings: Aria2Settings = serde_json::from_str(&value)?;
+        settings.normalized()
+    }
+
+    /// Persist normalized remote scraper settings as one JSON app_settings value.
+    pub fn set_remote_scraper_settings(
+        &self,
+        settings: &RemoteScraperSettings,
+    ) -> Result<RemoteScraperSettings> {
+        let normalized = settings.normalized()?;
+        self.set_setting(
+            "remote_scraper_settings",
+            &serde_json::to_string(&normalized)?,
+        )?;
+        Ok(normalized)
+    }
+
+    /// Read remote scraper settings, returning safe disabled defaults when absent.
+    pub fn get_remote_scraper_settings(&self) -> Result<RemoteScraperSettings> {
+        let Some(value) = self.get_setting("remote_scraper_settings")? else {
+            return Ok(RemoteScraperSettings::default());
+        };
+        let settings: RemoteScraperSettings = serde_json::from_str(&value)?;
+        settings.normalized()
     }
 
     pub fn set_poster_dirs(&self, poster: &Path, screenshot: &Path, gif: &Path) -> Result<()> {
@@ -389,8 +442,55 @@ impl Repository {
                 return Ok(());
             }
         }
-        self.conn
-            .execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        self.conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild the Stage 1 scrape_jobs table when it still has
+    /// `work_id INTEGER NOT NULL`. SQLite cannot relax NOT NULL in place.
+    fn relax_scrape_jobs_work_id(&self) -> Result<()> {
+        let mut statement = self.conn.prepare("PRAGMA table_info(scrape_jobs)")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?;
+        let mut work_id_not_null = false;
+        for row in rows {
+            let (name, not_null) = row?;
+            if name == "work_id" && not_null == 1 {
+                work_id_not_null = true;
+            }
+        }
+        if !work_id_not_null {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "
+            ALTER TABLE scrape_jobs RENAME TO scrape_jobs_old;
+            CREATE TABLE scrape_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                work_id INTEGER REFERENCES works(id) ON DELETE CASCADE,
+                normalized_code TEXT,
+                object_path TEXT,
+                pipeline_run_id INTEGER REFERENCES pipeline_runs(id) ON DELETE SET NULL,
+                source TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_attempted_at TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO scrape_jobs (
+                id, work_id, source, status, attempts, last_attempted_at, error, created_at
+            )
+            SELECT id, work_id, source, status, attempts, last_attempted_at, error, created_at
+            FROM scrape_jobs_old;
+            DROP TABLE scrape_jobs_old;
+            ",
+        )?;
         Ok(())
     }
 
@@ -434,12 +534,30 @@ impl Repository {
         let tags_json = serde_json::to_string(&work.tags)?;
         let lists_json = serde_json::to_string(&work.lists)?;
         let genres_json = serde_json::to_string(&work.genres)?;
-        let cover = work.cover_path.as_ref().map(|p| p.to_string_lossy().to_string());
-        let poster = work.poster_path.as_ref().map(|p| p.to_string_lossy().to_string());
-        let thumb = work.thumb_path.as_ref().map(|p| p.to_string_lossy().to_string());
-        let fanart = work.fanart_path.as_ref().map(|p| p.to_string_lossy().to_string());
-        let screenshot = work.screenshot_path.as_ref().map(|p| p.to_string_lossy().to_string());
-        let gif = work.gif_path.as_ref().map(|p| p.to_string_lossy().to_string());
+        let cover = work
+            .cover_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let poster = work
+            .poster_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let thumb = work
+            .thumb_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let fanart = work
+            .fanart_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let screenshot = work
+            .screenshot_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let gif = work
+            .gif_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
         let watch_status = format!("{:?}", work.watch_status);
         let has_video: i64 = if work.has_video { 1 } else { 0 };
 
@@ -541,9 +659,9 @@ impl Repository {
                     fanart,
                     screenshot,
                     gif,
-                   tags_json,
-                   lists_json,
-                   work.rating,
+                    tags_json,
+                    lists_json,
+                    work.rating,
                     work.rating_value,
                     work.rating_max,
                     work.rating_votes,
@@ -707,9 +825,9 @@ impl Repository {
                         fanart,
                         screenshot,
                         gif,
-                       tags_json,
-                       lists_json,
-                       work.rating,
+                        tags_json,
+                        lists_json,
+                        work.rating,
                         work.rating_value,
                         work.rating_max,
                         work.rating_votes,
@@ -746,7 +864,9 @@ impl Repository {
     /// join key. Blank names are skipped so empty studios never pollute the
     /// dimension panel.
     fn register_dimension_name(&self, table: &str, name: &Option<String>) -> Result<()> {
-        let Some(value) = name else { return Ok(()); };
+        let Some(value) = name else {
+            return Ok(());
+        };
         let trimmed = value.trim();
         if trimmed.is_empty() {
             return Ok(());
@@ -1216,7 +1336,9 @@ impl Repository {
             item.review_reasons.retain(|reason| {
                 !matches!(
                     reason,
-                    ReviewReason::MissingCode | ReviewReason::LowConfidence | ReviewReason::CodeConflict
+                    ReviewReason::MissingCode
+                        | ReviewReason::LowConfidence
+                        | ReviewReason::CodeConflict
                 )
             });
             item.code_conflict = None;
@@ -1250,7 +1372,11 @@ impl Repository {
         // Sync actors from local/online metadata into the actor link table.
         if let Some(names) = item.metadata.as_ref().map(|m| m.actors.clone()) {
             if !names.is_empty() {
-                let source = item.metadata.as_ref().map(|m| m.provider.as_str()).unwrap_or("local");
+                let source = item
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.provider.as_str())
+                    .unwrap_or("local");
                 self.set_work_actors(work_id, &names, source)?;
             }
         }
@@ -1260,10 +1386,12 @@ impl Repository {
         Ok(work_id)
     }
 
-    fn get_work_by_id(&self, work_id: i64) -> Result<Option<Work>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"
-        ))?;
+    /// Fetch one work by row id. Stage 2 uses this after direct pipeline
+    /// persistence; callers still receive None when the id has disappeared.
+    pub fn get_work_by_id(&self, work_id: i64) -> Result<Option<Work>> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("SELECT {WORK_COLUMNS} FROM works WHERE id = ?1"))?;
         let mut rows = statement.query(params![work_id])?;
         let Some(row) = rows.next()? else {
             return Ok(None);
@@ -1282,32 +1410,81 @@ impl Repository {
             ORDER BY id ASC
             ",
         )?;
-        let rows = statement.query_map(params![work_id], |row| {
-            let source_root: String = row.get(2)?;
-            let original_path: String = row.get(3)?;
-            let archived_path: Option<String> = row.get(4)?;
-            Ok(FileVersion {
-                id: row.get(0)?,
-                work_id: row.get(1)?,
-                source_root: PathBuf::from(source_root),
-                original_path: PathBuf::from(original_path),
-                archived_path: archived_path.map(PathBuf::from),
-                original_file_name: row.get(5)?,
-                normalized_file_name: row.get(6)?,
-                size_bytes: row.get::<_, i64>(7)? as u64,
-                duration_seconds: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
-                width: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
-                height: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
-                codec: row.get(11)?,
-                file_hash: row.get(12)?,
-            })
-        })?;
+        let rows = statement.query_map(params![work_id], file_version_from_row)?;
 
         let mut versions = Vec::new();
         for row in rows {
             versions.push(row?);
         }
         Ok(versions)
+    }
+
+    /// Find archived or pending file versions by exact sample fingerprint.
+    /// Stage 2 uses this to route duplicate candidates into the exception queue.
+    pub fn find_file_versions_by_hash(&self, file_hash: &str) -> Result<Vec<FileVersion>> {
+        let mut statement = self.conn.prepare(
+            "
+            SELECT id, work_id, source_root, original_path, archived_path, original_file_name,
+                   normalized_file_name, size_bytes, duration_seconds, width, height, codec,
+                   file_hash
+            FROM file_versions
+            WHERE file_hash = ?1
+            ORDER BY id ASC
+            ",
+        )?;
+        let rows = statement.query_map(params![file_hash], file_version_from_row)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
+    }
+
+    /// Insert or update a file version written by the automatic pipeline.
+    /// Unlike the old ingest path, this accepts the final archive path directly.
+    pub fn upsert_file_version_for_work(
+        &self,
+        work_id: i64,
+        source_root: &Path,
+        original_path: &Path,
+        archived_path: Option<&Path>,
+        original_file_name: &str,
+        normalized_file_name: Option<&str>,
+        size_bytes: u64,
+        file_hash: Option<&str>,
+    ) -> Result<i64> {
+        let source_root = source_root.to_string_lossy().to_string();
+        let original_path = original_path.to_string_lossy().to_string();
+        let archived_path = archived_path.map(|path| path.to_string_lossy().to_string());
+        self.conn.execute(
+            "
+            INSERT INTO file_versions (
+                work_id, source_root, original_path, archived_path, original_file_name,
+                normalized_file_name, size_bytes, file_hash
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(original_path) DO UPDATE SET
+                work_id = excluded.work_id,
+                archived_path = excluded.archived_path,
+                normalized_file_name = excluded.normalized_file_name,
+                size_bytes = excluded.size_bytes,
+                file_hash = excluded.file_hash
+            ",
+            params![
+                work_id,
+                source_root,
+                original_path,
+                archived_path,
+                original_file_name,
+                normalized_file_name,
+                size_bytes as i64,
+                file_hash,
+            ],
+        )?;
+        self.conn
+            .query_row(
+                "SELECT id FROM file_versions WHERE original_path = ?1",
+                params![original_path],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn merge_file_versions_into_work(
@@ -1450,7 +1627,9 @@ impl Repository {
         let Some(row) = rows.next()? else {
             return Ok(None);
         };
-        archive_action_log_from_row(row).map(Some).map_err(Into::into)
+        archive_action_log_from_row(row)
+            .map(Some)
+            .map_err(Into::into)
     }
 
     pub fn list_archive_action_logs(&self) -> Result<Vec<ArchiveActionLog>> {
@@ -1742,25 +1921,47 @@ impl Repository {
         Ok(())
     }
 
-// ===== actor entity + alias model =====
+    // ===== actor entity + alias model =====
 
     fn resolve_actor_by_name(&self, name: &str, source: &str) -> Result<i64> {
-        if let Some(id) = self.conn.query_row("SELECT actor_id FROM actor_names WHERE name = ?1", params![name], |row| row.get(0)).optional()? {
+        if let Some(id) = self
+            .conn
+            .query_row(
+                "SELECT actor_id FROM actor_names WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?
+        {
             return Ok(id);
         }
-        self.conn.execute("INSERT INTO actors (primary_name) VALUES (?1)", params![name])?;
+        self.conn.execute(
+            "INSERT INTO actors (primary_name) VALUES (?1)",
+            params![name],
+        )?;
         let actor_id: i64 = self.conn.last_insert_rowid();
-        self.conn.execute("INSERT INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 1, ?3)", params![actor_id, name, source])?;
+        self.conn.execute(
+            "INSERT INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 1, ?3)",
+            params![actor_id, name, source],
+        )?;
         Ok(actor_id)
     }
 
     pub fn set_work_actors(&self, work_id: i64, names: &[String], source: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM work_actors WHERE work_id = ?1", params![work_id])?;
+        self.conn.execute(
+            "DELETE FROM work_actors WHERE work_id = ?1",
+            params![work_id],
+        )?;
         for name in names {
             let trimmed = name.trim();
-            if trimmed.is_empty() { continue; }
+            if trimmed.is_empty() {
+                continue;
+            }
             let actor_id = self.resolve_actor_by_name(trimmed, source)?;
-            self.conn.execute("INSERT OR IGNORE INTO work_actors (work_id, actor_id) VALUES (?1, ?2)", params![work_id, actor_id])?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO work_actors (work_id, actor_id) VALUES (?1, ?2)",
+                params![work_id, actor_id],
+            )?;
         }
         Ok(())
     }
@@ -1779,7 +1980,9 @@ impl Repository {
     }
 
     pub fn list_actor_names(&self, actor_id: i64) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT name FROM actor_names WHERE actor_id = ?1 ORDER BY is_primary DESC, name")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT name FROM actor_names WHERE actor_id = ?1 ORDER BY is_primary DESC, name",
+        )?;
         let rows = stmt.query_map(params![actor_id], |row| row.get::<_, String>(0))?;
         let result: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(result?)
@@ -1791,22 +1994,38 @@ impl Repository {
     }
 
     pub fn merge_actors(&self, primary_id: i64, secondary_id: i64) -> Result<i64> {
-        if primary_id == secondary_id { return Ok(primary_id); }
+        if primary_id == secondary_id {
+            return Ok(primary_id);
+        }
         let secondary_names: Vec<(i64, String, Option<String>)> = {
-            let mut stmt = self.conn.prepare("SELECT id, name, source FROM actor_names WHERE actor_id = ?1")?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, name, source FROM actor_names WHERE actor_id = ?1")?;
             let rows = stmt.query_map(params![secondary_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })?;
             let collected: rusqlite::Result<Vec<_>> = rows.collect();
             collected?
         };
         for (name_id, name, source) in &secondary_names {
-            self.conn.execute("DELETE FROM actor_names WHERE id = ?1", params![name_id])?;
+            self.conn
+                .execute("DELETE FROM actor_names WHERE id = ?1", params![name_id])?;
             self.conn.execute("INSERT OR IGNORE INTO actor_names (actor_id, name, is_primary, source) VALUES (?1, ?2, 0, ?3)", params![primary_id, name, source])?;
         }
-        self.conn.execute("UPDATE OR IGNORE work_actors SET actor_id = ?1 WHERE actor_id = ?2", params![primary_id, secondary_id])?;
-        self.conn.execute("DELETE FROM work_actors WHERE actor_id = ?1", params![secondary_id])?;
-        self.conn.execute("DELETE FROM actors WHERE id = ?1", params![secondary_id])?;
+        self.conn.execute(
+            "UPDATE OR IGNORE work_actors SET actor_id = ?1 WHERE actor_id = ?2",
+            params![primary_id, secondary_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM work_actors WHERE actor_id = ?1",
+            params![secondary_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM actors WHERE id = ?1", params![secondary_id])?;
         Ok(primary_id)
     }
 
@@ -1814,7 +2033,8 @@ impl Repository {
     /// is upserted into the `tags` registry (UNIQUE) and linked via `work_tags`.
     /// Order is encoded by re-inserting links in input order after the clear.
     pub fn set_work_tags(&self, work_id: i64, names: &[String]) -> Result<()> {
-        self.conn.execute("DELETE FROM work_tags WHERE work_id = ?1", params![work_id])?;
+        self.conn
+            .execute("DELETE FROM work_tags WHERE work_id = ?1", params![work_id])?;
         for name in names {
             let trimmed = name.trim();
             if trimmed.is_empty() {
@@ -1858,7 +2078,8 @@ impl Repository {
     /// Replace a work's sets with the given names, preserving order. Mirrors
     /// `set_work_tags` against the `sets`/`work_sets` tables.
     pub fn set_work_sets(&self, work_id: i64, names: &[String]) -> Result<()> {
-        self.conn.execute("DELETE FROM work_sets WHERE work_id = ?1", params![work_id])?;
+        self.conn
+            .execute("DELETE FROM work_sets WHERE work_id = ?1", params![work_id])?;
         for name in names {
             let trimmed = name.trim();
             if trimmed.is_empty() {
@@ -1901,13 +2122,21 @@ impl Repository {
     /// Replace a work's per-source ratings. Each (work, source) pair is one row;
     /// callers merge across sources themselves.
     pub fn set_work_ratings(&self, work_id: i64, ratings: &[WorkRating]) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM work_ratings WHERE work_id = ?1", params![work_id])?;
+        self.conn.execute(
+            "DELETE FROM work_ratings WHERE work_id = ?1",
+            params![work_id],
+        )?;
         for rating in ratings {
             self.conn.execute(
                 "INSERT OR REPLACE INTO work_ratings (work_id, source, value, max, votes)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![work_id, rating.source, rating.value, rating.max, rating.votes],
+                params![
+                    work_id,
+                    rating.source,
+                    rating.value,
+                    rating.max,
+                    rating.votes
+                ],
             )?;
         }
         Ok(())
@@ -1915,9 +2144,9 @@ impl Repository {
 
     /// List a work's per-source ratings.
     pub fn list_work_ratings(&self, work_id: i64) -> Result<Vec<WorkRating>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT source, value, max, votes FROM work_ratings WHERE work_id = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source, value, max, votes FROM work_ratings WHERE work_id = ?1")?;
         let rows = stmt.query_map(params![work_id], |row| {
             Ok(WorkRating {
                 source: row.get(0)?,
@@ -1942,15 +2171,15 @@ impl Repository {
         let sets = self.list_work_sets(work_id)?;
         let file_versions = self.list_file_versions_for_work(work_id)?;
         let ratings = self.list_work_ratings(work_id)?;
-       Ok(Some(WorkDetail {
-           work,
-           actors,
-           tags,
-           sets,
-           file_versions,
-           ratings,
-       }))
-   }
+        Ok(Some(WorkDetail {
+            work,
+            actors,
+            tags,
+            sets,
+            file_versions,
+            ratings,
+        }))
+    }
 
     // --- metadata dimension queries (Task 4) ---
 
@@ -2063,14 +2292,19 @@ impl Repository {
             ));
         }
 
-        for (registry, ids) in
-            [("studios", &filters.studio_ids), ("labels", &filters.label_ids)]
-        {
+        for (registry, ids) in [
+            ("studios", &filters.studio_ids),
+            ("labels", &filters.label_ids),
+        ] {
             if ids.is_empty() {
                 continue;
             }
             let placeholders = vec!["?"; ids.len()].join(", ");
-            let work_col = if registry == "studios" { "studio" } else { "label" };
+            let work_col = if registry == "studios" {
+                "studio"
+            } else {
+                "label"
+            };
             params_vec.extend(ids.iter().copied().map(rusqlite::types::Value::Integer));
             conditions.push(format!(
                 "works.{work_col} IN (SELECT name FROM {registry} WHERE id IN ({placeholders}))"
@@ -2089,7 +2323,11 @@ impl Repository {
         }
 
         if let Some(has_video) = filters.has_video {
-            params_vec.push(rusqlite::types::Value::Integer(if has_video { 1 } else { 0 }));
+            params_vec.push(rusqlite::types::Value::Integer(if has_video {
+                1
+            } else {
+                0
+            }));
             conditions.push("works.has_video = ?".to_string());
         }
 
@@ -2098,7 +2336,8 @@ impl Repository {
         } else {
             format!(" WHERE {}", conditions.join(" AND "))
         };
-        let sql = format!("SELECT {WORK_COLUMNS} FROM works{where_clause} ORDER BY normalized_code ASC");
+        let sql =
+            format!("SELECT {WORK_COLUMNS} FROM works{where_clause} ORDER BY normalized_code ASC");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), work_from_row)?;
         let mut works = Vec::new();
@@ -2127,10 +2366,10 @@ impl Repository {
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
                 params![table],
                 |row| row.get(0),
-           )
-           .optional()?;
-       Ok(exists.is_some())
-   }
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
 
     // --- NFO rebuild: full-fidelity re-ingest from NFO files ---
 
@@ -2196,7 +2435,11 @@ impl Repository {
         let roots: Vec<PathBuf> = pool
             .works
             .iter()
-            .filter_map(|w| w.nfo_path.as_ref().and_then(|p| p.parent().map(PathBuf::from)))
+            .filter_map(|w| {
+                w.nfo_path
+                    .as_ref()
+                    .and_then(|p| p.parent().map(PathBuf::from))
+            })
             .collect();
         let scanned = crate::scanner::scan_library_roots(&roots)?;
         let grouped = crate::library_rebuild::group_scanned_nfos(&scanned);
@@ -2348,7 +2591,10 @@ impl Repository {
                 }
             }
 
-            let has_video = group.members.iter().any(|member| member.paired_video.is_some());
+            let has_video = group
+                .members
+                .iter()
+                .any(|member| member.paired_video.is_some());
 
             // Image values may be relative filenames (poster.jpg) that need to
             // be resolved against the NFO's directory, or remote URLs / absolute
@@ -2357,8 +2603,10 @@ impl Repository {
             let resolve_image = |raw: &Option<String>| -> Option<PathBuf> {
                 let value = raw.as_ref()?;
                 // Remote URLs and Windows/Unix absolute paths are kept as-is.
-                if value.starts_with("http://") || value.starts_with("https://")
-                    || value.contains(':') || value.starts_with('/')
+                if value.starts_with("http://")
+                    || value.starts_with("https://")
+                    || value.contains(':')
+                    || value.starts_with('/')
                 {
                     return Some(PathBuf::from(value));
                 }
@@ -2432,8 +2680,14 @@ impl Repository {
             // In incremental (per_work_reset) mode, clear this work's stale
             // versions/relations first so the upsert never duplicates rows.
             if per_work_reset {
-                self.conn.execute("DELETE FROM file_versions WHERE work_id = ?1", params![work_id])?;
-                self.conn.execute("DELETE FROM work_actors WHERE work_id = ?1", params![work_id])?;
+                self.conn.execute(
+                    "DELETE FROM file_versions WHERE work_id = ?1",
+                    params![work_id],
+                )?;
+                self.conn.execute(
+                    "DELETE FROM work_actors WHERE work_id = ?1",
+                    params![work_id],
+                )?;
             }
             self.set_work_actors(work_id, &doc.actors, "nfo")?;
 
@@ -2442,10 +2696,9 @@ impl Repository {
             for member in &group.members {
                 let (path, file_name, size_bytes) = match &member.paired_video {
                     Some(video) => {
-                        let size =
-                            std::fs::metadata(video).map(|metadata| metadata.len()).unwrap_or(
-                                member.paired_video_size,
-                            );
+                        let size = std::fs::metadata(video)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or(member.paired_video_size);
                         let name = video
                             .file_name()
                             .and_then(|name| name.to_str())
@@ -2479,6 +2732,8 @@ impl Repository {
         Ok(())
     }
 
+    /// Insert one scrape attempt. Stage 2 allows `work_id` to be NULL because
+    /// failed scrapes must be recorded before a `works` row exists.
     pub fn record_scrape_job(&self, job: &ScrapeJob) -> Result<i64> {
         let status = match job.status {
             ScrapeStatus::Pending => "Pending",
@@ -2486,10 +2741,16 @@ impl Repository {
             ScrapeStatus::Failed => "Failed",
         };
         self.conn.execute(
-            "INSERT INTO scrape_jobs (work_id, source, status, attempts, last_attempted_at, error)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO scrape_jobs (
+                work_id, normalized_code, object_path, pipeline_run_id,
+                source, status, attempts, last_attempted_at, error
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 job.work_id,
+                job.normalized_code,
+                job.object_path,
+                job.pipeline_run_id,
                 job.source,
                 status,
                 job.attempts,
@@ -2502,26 +2763,31 @@ impl Repository {
 
     pub fn list_scrape_jobs(&self) -> Result<Vec<ScrapeJob>> {
         let mut statement = self.conn.prepare(
-            "SELECT id, work_id, source, status, attempts, last_attempted_at, error
+            "SELECT id, work_id, normalized_code, object_path, pipeline_run_id,
+                    source, status, attempts, last_attempted_at, error
              FROM scrape_jobs ORDER BY id DESC",
         )?;
         let rows = statement.query_map([], |row| {
-            let status: String = row.get(3)?;
+            let status: String = row.get(6)?;
             Ok(ScrapeJob {
                 id: row.get(0)?,
                 work_id: row.get(1)?,
-                source: row.get(2)?,
+                normalized_code: row.get(2)?,
+                object_path: row.get(3)?,
+                pipeline_run_id: row.get(4)?,
+                source: row.get(5)?,
                 status: match status.as_str() {
                     "Success" => ScrapeStatus::Success,
                     "Failed" => ScrapeStatus::Failed,
                     _ => ScrapeStatus::Pending,
                 },
-                attempts: row.get(4)?,
-                last_attempted_at: row.get(5)?,
-                error: row.get(6)?,
+                attempts: row.get(7)?,
+                last_attempted_at: row.get(8)?,
+                error: row.get(9)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     // --- exceptions review queue (Task 4) ---
@@ -2563,7 +2829,8 @@ impl Repository {
                 resolved_at: row.get(6)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Move an exception to a terminal status (`Ignored` or `Resolved`) and
@@ -2608,7 +2875,8 @@ impl Repository {
                 created_at: row.get(5)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     // --- pipeline run log (Task 6) ---
@@ -2631,6 +2899,34 @@ impl Repository {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Create a running pipeline row before any destructive filesystem step.
+    /// The returned id is used to correlate scrape jobs and recovery state.
+    pub fn start_pipeline_run(&self, file_path: &Path) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO pipeline_runs (file_path, started_at, steps_json, status)
+             VALUES (?1, CURRENT_TIMESTAMP, '[]', 'running')",
+            params![file_path.to_string_lossy().to_string()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Finish a pipeline row with the terminal status and serialized step log.
+    pub fn finish_pipeline_run(
+        &self,
+        run_id: i64,
+        status: &str,
+        steps: &[PipelineStepRecord],
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE pipeline_runs
+             SET finished_at = CURRENT_TIMESTAMP, steps_json = ?1, status = ?2, error = ?3
+             WHERE id = ?4",
+            params![serde_json::to_string(steps)?, status, error, run_id],
+        )?;
+        Ok(())
+    }
+
     /// List every pipeline run, newest first. The status bar shows the head;
     /// debug views page through the tail.
     pub fn list_pipeline_runs(&self) -> Result<Vec<PipelineRun>> {
@@ -2649,7 +2945,8 @@ impl Repository {
                 error: row.get(6)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Create a user-defined collection. Returns the new collection id. Fails
@@ -2677,7 +2974,8 @@ impl Repository {
                 created_at: row.get(4)?,
             })
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
     /// Link a work to a collection. Idempotent: re-adding the same pair is a
@@ -2690,6 +2988,16 @@ impl Repository {
         Ok(())
     }
 
+    /// Remove a single work-to-collection link without deleting either record.
+    /// Missing links are treated as a no-op so callers can safely retry.
+    pub fn remove_work_from_collection(&self, work_id: i64, collection_id: i64) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM work_collections WHERE work_id = ?1 AND collection_id = ?2",
+            params![work_id, collection_id],
+        )?;
+        Ok(())
+    }
+
     /// List the work ids attached to a collection, ascending. The UI loads the
     /// full Work rows via the existing `get_work_detail` path.
     pub fn list_works_in_collection(&self, collection_id: i64) -> Result<Vec<i64>> {
@@ -2697,9 +3005,18 @@ impl Repository {
             "SELECT work_id FROM work_collections WHERE collection_id = ?1 ORDER BY work_id ASC",
         )?;
         let rows = statement.query_map(params![collection_id], |row| row.get::<_, i64>(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Into::into)
     }
 
+    /// Delete one work row for integration tests that need to assert database
+    /// cascade behavior directly. Production flows should use higher-level
+    /// commands that preserve user intent and archive state.
+    pub fn debug_delete_work(&self, work_id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM works WHERE id = ?1", params![work_id])?;
+        Ok(())
+    }
 }
 
 fn parse_watch_status(value: &str) -> WatchStatus {
@@ -2872,6 +3189,27 @@ fn work_from_row(row: &rusqlite::Row) -> rusqlite::Result<Work> {
     })
 }
 
+fn file_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileVersion> {
+    let source_root: String = row.get(2)?;
+    let original_path: String = row.get(3)?;
+    let archived_path: Option<String> = row.get(4)?;
+    Ok(FileVersion {
+        id: row.get(0)?,
+        work_id: row.get(1)?,
+        source_root: PathBuf::from(source_root),
+        original_path: PathBuf::from(original_path),
+        archived_path: archived_path.map(PathBuf::from),
+        original_file_name: row.get(5)?,
+        normalized_file_name: row.get(6)?,
+        size_bytes: row.get::<_, i64>(7)? as u64,
+        duration_seconds: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
+        width: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
+        height: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
+        codec: row.get(11)?,
+        file_hash: row.get(12)?,
+    })
+}
+
 fn parse_ingest_decision(value: &str) -> IngestDecision {
     match value {
         "AutoArchive" => IngestDecision::AutoArchive,
@@ -2938,7 +3276,10 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
         // source_code flows in via the NFO/scraper path, not the ingest path.
         source_code: None,
         code_kind: CodeKind::Standard,
-        title_zh: item.metadata.as_ref().and_then(|metadata| metadata.title_zh.clone()),
+        title_zh: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.title_zh.clone()),
         original_title: item
             .metadata
             .as_ref()
@@ -2948,7 +3289,10 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
             .as_ref()
             .map(|metadata| metadata.aliases.clone())
             .unwrap_or_default(),
-        summary: item.metadata.as_ref().and_then(|metadata| metadata.summary.clone()),
+        summary: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.summary.clone()),
         outline: None,
         cover_path: item
             .metadata
@@ -2974,7 +3318,10 @@ fn work_from_ingest_item(item: &IngestItem, normalized_code: &str) -> Work {
             .as_ref()
             .map(|metadata| metadata.genres.clone())
             .unwrap_or_default(),
-        studio: item.metadata.as_ref().and_then(|metadata| metadata.studio.clone()),
+        studio: item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.studio.clone()),
         label: None,
         director: item
             .metadata

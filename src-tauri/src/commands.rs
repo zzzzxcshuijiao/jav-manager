@@ -1,20 +1,43 @@
-﻿use crate::archive::ArchivePlanner;
+use crate::archive::ArchivePlanner;
+use crate::aria2::Aria2Settings;
+use crate::control_service::{
+    control_service_discovery_path, read_control_service_discovery, ControlServiceDiscovery,
+    ControlServiceHandle,
+};
+use crate::control_service_host::{
+    control_service_host_status as build_control_service_host_status, start_control_service_host,
+    ControlServiceHostStatus,
+};
+use crate::daemon::RunOnceReport;
+use crate::daemon_control::{
+    build_daemon_status, list_exception_entries as read_exception_entries,
+    list_holding_entries as read_holding_entries, list_recent_pipeline_runs,
+    resolve_exception_entry as resolve_exception_in_repo, run_daemon_once, DaemonControlRuntime,
+    DaemonControlStatus,
+};
+use crate::diagnostics::{
+    build_diagnostic_snapshot, export_diagnostic_snapshot, DiagnosticExportResult, DiagnosticLevel,
+    DiagnosticLogEntry, DiagnosticSnapshotInput, DiagnosticsWriter,
+};
 use crate::domain::{
-    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, FileVersion,
-    IngestDecision, IngestItem, IngestItemFilters, IngestJobSummary, ReviewReason, WatchStatus,
-    Work, WorkDetail, WorkFilters,
+    Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, Exception,
+    ExceptionStatus, FileVersion, HoldingEntry, IngestDecision, IngestItem, IngestItemFilters,
+    IngestJobSummary, PipelineRun, ReviewReason, WatchStatus, Work, WorkDetail, WorkFilters,
 };
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
 use crate::provider::{DisabledProvider, ExampleProvider};
+use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
 use crate::storage::Repository;
 use crate::thumbnail::{
-    clear_thumbnail_cache as clear_thumbnail_cache_dir, get_or_create_thumbnail as create_thumbnail,
+    clear_thumbnail_cache as clear_thumbnail_cache_dir,
+    get_or_create_thumbnail as create_thumbnail,
     thumbnail_cache_summary as read_thumbnail_cache_summary, ThumbnailCacheSummary,
     DEFAULT_THUMBNAIL_CACHE_LIMIT_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,6 +52,12 @@ pub struct AppState {
     pub metadata_provider_enabled: Mutex<bool>,
     pub archive_plans: Mutex<Vec<ArchivePlan>>,
     pub archive_logs: Mutex<Vec<ArchiveActionLog>>,
+    pub daemon_runtime: Mutex<DaemonControlRuntime>,
+    pub aria2_settings: Mutex<Aria2Settings>,
+    pub remote_scraper_settings: Mutex<RemoteScraperSettings>,
+    pub control_service: Mutex<Option<ControlServiceHandle>>,
+    pub control_service_error: Mutex<Option<String>>,
+    pub diagnostics: Mutex<Option<DiagnosticsWriter>>,
     pub next_job_id: Mutex<i64>,
     pub next_item_id: Mutex<i64>,
     pub next_plan_id: Mutex<i64>,
@@ -44,9 +73,39 @@ impl Default for AppState {
             metadata_provider_enabled: Mutex::new(false),
             archive_plans: Mutex::new(Vec::new()),
             archive_logs: Mutex::new(Vec::new()),
+            daemon_runtime: Mutex::new(DaemonControlRuntime::default()),
+            aria2_settings: Mutex::new(Aria2Settings::default()),
+            remote_scraper_settings: Mutex::new(RemoteScraperSettings::default()),
+            control_service: Mutex::new(None),
+            control_service_error: Mutex::new(None),
+            diagnostics: Mutex::new(None),
             next_job_id: Mutex::new(1),
             next_item_id: Mutex::new(1),
             next_plan_id: Mutex::new(1),
+        }
+    }
+}
+
+impl AppState {
+    /// Return a serializable snapshot of the app-owned control service host.
+    pub fn control_service_host_status(
+        &self,
+        app_data_dir: &Path,
+        last_error: Option<String>,
+    ) -> ControlServiceHostStatus {
+        let handle_guard = self.control_service.lock().ok();
+        let handle = handle_guard.as_ref().and_then(|guard| guard.as_ref());
+        build_control_service_host_status(app_data_dir, handle, last_error)
+    }
+}
+
+impl Drop for AppState {
+    /// Shut down the hosted loopback control service when Tauri releases app state.
+    fn drop(&mut self) {
+        if let Ok(slot) = self.control_service.get_mut() {
+            if let Some(handle) = slot.take() {
+                let _ = handle.shutdown();
+            }
         }
     }
 }
@@ -71,7 +130,10 @@ pub fn configure_source_roots(
         repo.set_source_roots(&path_bufs)
             .map_err(|error| error.to_string())?;
     }
-    *state.source_roots.lock().map_err(|error| error.to_string())? = paths.clone();
+    *state
+        .source_roots
+        .lock()
+        .map_err(|error| error.to_string())? = paths.clone();
     Ok(CommandResult { data: paths })
 }
 
@@ -89,7 +151,10 @@ pub fn configure_archive_root(
         repo.set_archive_root(Path::new(&path))
             .map_err(|error| error.to_string())?;
     }
-    *state.archive_root.lock().map_err(|error| error.to_string())? = Some(path.clone());
+    *state
+        .archive_root
+        .lock()
+        .map_err(|error| error.to_string())? = Some(path.clone());
     Ok(CommandResult { data: path })
 }
 
@@ -104,7 +169,9 @@ pub fn get_source_roots(state: State<'_, AppState>) -> Result<CommandResult<Vec<
 }
 
 #[tauri::command]
-pub fn get_archive_root(state: State<'_, AppState>) -> Result<CommandResult<Option<String>>, String> {
+pub fn get_archive_root(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Option<String>>, String> {
     let path = state
         .archive_root
         .lock()
@@ -143,6 +210,397 @@ pub fn get_metadata_provider_enabled(
             .metadata_provider_enabled
             .lock()
             .map_err(|error| error.to_string())?,
+    })
+}
+
+/// Persist aria2 RPC settings used by the automatic pipeline run-once path.
+#[tauri::command]
+pub fn configure_aria2_settings(
+    settings: Aria2Settings,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Aria2Settings>, String> {
+    let normalized = if let Some(repo) = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+    {
+        repo.set_aria2_settings(&settings)
+            .map_err(|error| error.to_string())?
+    } else {
+        settings.normalized().map_err(|error| error.to_string())?
+    };
+    *state
+        .aria2_settings
+        .lock()
+        .map_err(|error| error.to_string())? = normalized.clone();
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "settings.aria2",
+        "aria2 settings saved",
+        json!({
+            "enabled": normalized.enabled,
+            "host": normalized.host,
+            "port": normalized.port,
+            "path": normalized.path,
+            "secret_configured": normalized.secret.is_some(),
+            "tracked_gids": normalized.tracked_gids.len(),
+        }),
+    );
+    Ok(CommandResult { data: normalized })
+}
+
+/// Return the current aria2 RPC settings for the settings page.
+#[tauri::command]
+pub fn get_aria2_settings(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Aria2Settings>, String> {
+    Ok(CommandResult {
+        data: state
+            .aria2_settings
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+    })
+}
+
+fn configure_remote_scraper_settings_in_state(
+    settings: RemoteScraperSettings,
+    state: &AppState,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    let normalized = if let Some(repo) = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+    {
+        repo.set_remote_scraper_settings(&settings)
+            .map_err(|error| error.to_string())?
+    } else {
+        settings.normalized().map_err(|error| error.to_string())?
+    };
+    *state
+        .remote_scraper_settings
+        .lock()
+        .map_err(|error| error.to_string())? = normalized.clone();
+    log_diagnostic_event(
+        state,
+        DiagnosticLevel::Info,
+        "settings.remote_scraper",
+        "remote scraper settings saved",
+        json!({
+            "enabled": normalized.enabled,
+            "sources": normalized.sources.len(),
+            "enabled_sources": normalized.sources.iter().filter(|source| source.enabled).count(),
+            "proxy_configured": normalized.proxy_url.is_some(),
+            "include_example_fallback": normalized.include_example_fallback,
+        }),
+    );
+    Ok(CommandResult { data: normalized })
+}
+
+/// Persist remote scraper settings used by the automatic pipeline.
+#[tauri::command]
+pub fn configure_remote_scraper_settings(
+    settings: RemoteScraperSettings,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    configure_remote_scraper_settings_in_state(settings, &state)
+}
+
+/// Return the current remote scraper settings for the settings page.
+#[tauri::command]
+pub fn get_remote_scraper_settings(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    Ok(CommandResult {
+        data: state
+            .remote_scraper_settings
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+    })
+}
+
+/// Read the Stage 5A loopback control service discovery document from app data.
+#[tauri::command]
+pub fn get_control_service_discovery(
+    app: tauri::AppHandle,
+) -> Result<CommandResult<Option<ControlServiceDiscovery>>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let discovery_path = control_service_discovery_path(&app_data);
+    Ok(CommandResult {
+        data: read_control_service_discovery(&discovery_path).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Return the app-owned control service host status for diagnostics.
+#[tauri::command]
+pub fn get_control_service_host_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<ControlServiceHostStatus>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let last_error = state
+        .control_service_error
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    Ok(CommandResult {
+        data: state.control_service_host_status(&app_data, last_error),
+    })
+}
+
+/// Return the Stage 4 daemon control status for the settings page.
+#[tauri::command]
+pub fn get_daemon_status(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    Ok(CommandResult {
+        data: read_daemon_status(&state)?,
+    })
+}
+
+/// Return the most recent structured diagnostic log entries.
+#[tauri::command]
+pub fn get_diagnostic_log_tail(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<DiagnosticLogEntry>>, String> {
+    let guard = state
+        .diagnostics
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let logs = match guard.as_ref() {
+        Some(writer) => writer
+            .tail(limit.unwrap_or(80))
+            .map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    Ok(CommandResult { data: logs })
+}
+
+/// Export a redacted diagnostic snapshot under the app data diagnostics dir.
+#[tauri::command]
+pub fn export_diagnostics_snapshot_command(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DiagnosticExportResult>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let recent_logs = {
+        let guard = state
+            .diagnostics
+            .lock()
+            .map_err(|error| error.to_string())?;
+        match guard.as_ref() {
+            Some(writer) => writer.tail(200).map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        }
+    };
+    let daemon = read_daemon_status(&state).ok();
+    let last_error = state
+        .control_service_error
+        .lock()
+        .ok()
+        .and_then(|error| error.clone());
+    let control_service = Some(state.control_service_host_status(&app_data, last_error));
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let snapshot = build_diagnostic_snapshot(DiagnosticSnapshotInput {
+        app_data_dir: &app_data,
+        repository: repo_guard.as_ref(),
+        control_service,
+        daemon,
+        recent_logs,
+    })
+    .map_err(|error| error.to_string())?;
+    let result =
+        export_diagnostic_snapshot(&app_data, &snapshot).map_err(|error| error.to_string())?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "diagnostics.export",
+        "diagnostic snapshot exported",
+        json!({
+            "path": result.path.clone(),
+            "logs": result.logs,
+            "pipeline_runs": result.pipeline_runs,
+            "scrape_jobs": result.scrape_jobs,
+            "open_exceptions": result.open_exceptions,
+            "holding_items": result.holding_items,
+        }),
+    );
+    Ok(CommandResult { data: result })
+}
+
+/// Pause future synchronous daemon runs without interrupting a running file operation.
+#[tauri::command]
+pub fn pause_daemon(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    {
+        let mut runtime = state
+            .daemon_runtime
+            .lock()
+            .map_err(|error| error.to_string())?;
+        runtime.paused = true;
+    }
+    let status = read_daemon_status(&state)?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.control",
+        "daemon paused",
+        json!({ "state": status.state }),
+    );
+    Ok(CommandResult { data: status })
+}
+
+/// Resume future synchronous daemon runs and return the refreshed status.
+#[tauri::command]
+pub fn resume_daemon(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DaemonControlStatus>, String> {
+    {
+        let mut runtime = state
+            .daemon_runtime
+            .lock()
+            .map_err(|error| error.to_string())?;
+        runtime.paused = false;
+    }
+    let status = read_daemon_status(&state)?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.control",
+        "daemon resumed",
+        json!({ "state": status.state }),
+    );
+    Ok(CommandResult { data: status })
+}
+
+/// Run one Stage 4 daemon pass through the headless core.
+#[tauri::command]
+pub fn run_daemon_once_command(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RunOnceReport>, String> {
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.run_once",
+        "run started",
+        json!({}),
+    );
+    let metadata_enabled = configured_metadata_provider_enabled(&state)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let mut runtime = state
+        .daemon_runtime
+        .lock()
+        .map_err(|error| error.to_string())?;
+    match run_daemon_once(repo, &mut runtime, metadata_enabled) {
+        Ok(report) => {
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Info,
+                "daemon.run_once",
+                "run completed",
+                json!({
+                    "scan_scanned_files": report.scan.scanned_files,
+                    "scan_queued_files": report.scan.queued_files,
+                    "scan_skipped_files": report.scan.skipped_files,
+                    "aria2_enabled": report.aria2.enabled,
+                    "aria2_completed_gids": report.aria2.completed_gids,
+                    "aria2_failed_gids": report.aria2.failed_gids,
+                    "processed": report.process.processed,
+                    "archived": report.process.archived,
+                    "holding": report.process.holding,
+                    "exceptions": report.process.exceptions,
+                    "failed": report.process.failed,
+                }),
+            );
+            Ok(CommandResult { data: report })
+        }
+        Err(error) => {
+            runtime.last_error = Some(error.to_string());
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Error,
+                "daemon.run_once",
+                "run failed",
+                json!({ "error": error.to_string() }),
+            );
+            Err(error.to_string())
+        }
+    }
+}
+
+/// Return files parked in the holding pen for manual triage.
+#[tauri::command]
+pub fn list_holding_entries(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<HoldingEntry>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: read_holding_entries(repo).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Return exception queue rows for the automatic pipeline panel.
+#[tauri::command]
+pub fn list_exception_entries(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<Exception>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: read_exception_entries(repo).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Mark one exception as resolved or ignored after user review.
+#[tauri::command]
+pub fn resolve_exception_entry_command(
+    id: i64,
+    status: String,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<bool>, String> {
+    let status = parse_exception_status_command(&status)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    resolve_exception_in_repo(repo, id, status).map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: true })
+}
+
+/// Return recent automatic pipeline runs, newest first.
+#[tauri::command]
+pub fn list_pipeline_runs(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<PipelineRun>>, String> {
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    Ok(CommandResult {
+        data: list_recent_pipeline_runs(repo).map_err(|error| error.to_string())?,
     })
 }
 
@@ -339,10 +797,7 @@ pub fn list_file_versions_for_work(
     if work_id <= 0 {
         return Err("work_id must be positive".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -577,8 +1032,8 @@ pub fn resolve_match(
         .find(|item| item.id == Some(item_id))
         .ok_or_else(|| format!("ingest item {item_id} was not found"))?;
     if let Some(code) = normalized_code {
-        let normalized = normalize_code(&code)
-            .ok_or_else(|| format!("invalid normalized_code: {code}"))?;
+        let normalized =
+            normalize_code(&code).ok_or_else(|| format!("invalid normalized_code: {code}"))?;
         item.normalized_code = Some(normalized);
     }
     item.review_reasons.retain(|reason| {
@@ -604,10 +1059,7 @@ pub fn merge_versions(
     if file_version_ids.is_empty() {
         return Err("file_version_ids cannot be empty".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -679,10 +1131,7 @@ pub fn revalidate_move_failed_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -709,10 +1158,7 @@ pub fn ignore_duplicate_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -734,16 +1180,12 @@ pub fn ignore_duplicate_items(
     Ok(CommandResult { data: updated })
 }
 
-
 #[tauri::command]
 pub fn delete_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -773,10 +1215,7 @@ pub fn list_work_actors(
     if work_id <= 0 {
         return Err("work_id must be positive".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -915,9 +1354,8 @@ pub fn rebuild_library_from_nfo(
     let roots: Vec<PathBuf> = source_roots.into_iter().map(PathBuf::from).collect();
     // Build the external image index from configured poster/screenshot/gif dirs
     // so rebuild backfills covers and previews for works without NFO artwork.
-    let (poster_dir, screenshot_dir, gif_dir) = repo
-        .get_poster_dirs()
-        .map_err(|error| error.to_string())?;
+    let (poster_dir, screenshot_dir, gif_dir) =
+        repo.get_poster_dirs().map_err(|error| error.to_string())?;
     let empty = std::path::PathBuf::new();
     let poster_index = crate::poster_index::PosterIndex::scan(
         poster_dir.as_deref().unwrap_or(&empty),
@@ -959,16 +1397,12 @@ pub struct PosterDirs {
 }
 
 #[tauri::command]
-pub fn get_poster_dirs(
-    state: State<'_, AppState>,
-) -> Result<CommandResult<PosterDirs>, String> {
+pub fn get_poster_dirs(state: State<'_, AppState>) -> Result<CommandResult<PosterDirs>, String> {
     let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
-    let (poster, screenshot, gif) = repo
-        .get_poster_dirs()
-        .map_err(|error| error.to_string())?;
+    let (poster, screenshot, gif) = repo.get_poster_dirs().map_err(|error| error.to_string())?;
     Ok(CommandResult {
         data: PosterDirs {
             poster_dir: poster.map(|p| p.to_string_lossy().to_string()),
@@ -1079,8 +1513,7 @@ pub fn plan_centralized_migration(
 pub fn execute_centralized_migration(
     plan: crate::domain::MigrationPlan,
 ) -> Result<CommandResult<usize>, String> {
-    let migrated = crate::migration::execute_migration(&plan)
-        .map_err(|error| error.to_string())?;
+    let migrated = crate::migration::execute_migration(&plan).map_err(|error| error.to_string())?;
     Ok(CommandResult { data: migrated })
 }
 
@@ -1110,7 +1543,10 @@ pub fn get_resource_pool_dirs(
     let dirs = repo
         .get_resource_pool_dirs()
         .map_err(|error| error.to_string())?;
-    let strings: Vec<String> = dirs.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let strings: Vec<String> = dirs
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     Ok(CommandResult { data: strings })
 }
 
@@ -1266,6 +1702,22 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_archive_root,
             configure_metadata_provider_enabled,
             get_metadata_provider_enabled,
+            configure_aria2_settings,
+            get_aria2_settings,
+            configure_remote_scraper_settings,
+            get_remote_scraper_settings,
+            get_control_service_discovery,
+            get_control_service_host_status,
+            get_daemon_status,
+            get_diagnostic_log_tail,
+            export_diagnostics_snapshot_command,
+            pause_daemon,
+            resume_daemon,
+            run_daemon_once_command,
+            list_holding_entries,
+            list_exception_entries,
+            resolve_exception_entry_command,
+            list_pipeline_runs,
             start_scan,
             get_ingest_job,
             get_latest_ingest_job,
@@ -1317,9 +1769,22 @@ pub fn build_app() -> Builder<tauri::Wry> {
                 .app_data_dir()
                 .map_err(|error| error.to_string())?;
             fs::create_dir_all(&app_data).map_err(|error| error.to_string())?;
+            let state = app.state::<AppState>();
+            if let Ok(diagnostics) = DiagnosticsWriter::new(app_data.join("logs")) {
+                *state
+                    .diagnostics
+                    .lock()
+                    .map_err(|error| error.to_string())? = Some(diagnostics);
+            }
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Info,
+                "app.setup",
+                "app data initialized",
+                json!({ "app_data_dir": app_data.to_string_lossy() }),
+            );
             let repo = open_repository(&app_data.join("library.sqlite"))
                 .map_err(|error| error.to_string())?;
-            let state = app.state::<AppState>();
             let source_roots: Vec<String> = repo
                 .get_source_roots()
                 .map_err(|error| error.to_string())?
@@ -1333,13 +1798,66 @@ pub fn build_app() -> Builder<tauri::Wry> {
             let metadata_provider_enabled = repo
                 .get_metadata_provider_enabled()
                 .map_err(|error| error.to_string())?;
-            *state.source_roots.lock().map_err(|error| error.to_string())? = source_roots;
-            *state.archive_root.lock().map_err(|error| error.to_string())? = archive_root;
+            let aria2_settings = repo
+                .get_aria2_settings()
+                .map_err(|error| error.to_string())?;
+            let remote_scraper_settings = repo
+                .get_remote_scraper_settings()
+                .map_err(|error| error.to_string())?;
+            *state
+                .source_roots
+                .lock()
+                .map_err(|error| error.to_string())? = source_roots;
+            *state
+                .archive_root
+                .lock()
+                .map_err(|error| error.to_string())? = archive_root;
             *state
                 .metadata_provider_enabled
                 .lock()
                 .map_err(|error| error.to_string())? = metadata_provider_enabled;
+            *state
+                .aria2_settings
+                .lock()
+                .map_err(|error| error.to_string())? = aria2_settings;
+            *state
+                .remote_scraper_settings
+                .lock()
+                .map_err(|error| error.to_string())? = remote_scraper_settings;
             *state.repository.lock().map_err(|error| error.to_string())? = Some(repo);
+            match start_control_service_host(&app_data) {
+                Ok(handle) => {
+                    let port = handle.port();
+                    *state
+                        .control_service
+                        .lock()
+                        .map_err(|error| error.to_string())? = Some(handle);
+                    *state
+                        .control_service_error
+                        .lock()
+                        .map_err(|error| error.to_string())? = None;
+                    log_diagnostic_event(
+                        &state,
+                        DiagnosticLevel::Info,
+                        "app.setup",
+                        "control service started",
+                        json!({ "port": port }),
+                    );
+                }
+                Err(error) => {
+                    *state
+                        .control_service_error
+                        .lock()
+                        .map_err(|lock_error| lock_error.to_string())? = Some(error.to_string());
+                    log_diagnostic_event(
+                        &state,
+                        DiagnosticLevel::Warn,
+                        "app.setup",
+                        "control service failed to start",
+                        json!({ "error": error.to_string() }),
+                    );
+                }
+            }
             Ok(())
         })
 }
@@ -1423,7 +1941,18 @@ fn parse_watch_status(value: &str) -> WatchStatus {
     match value {
         "Watched" | "watched" => WatchStatus::Watched,
         "Favorite" | "favorite" => WatchStatus::Favorite,
+        "WantToWatch" | "want_to_watch" | "wanttowatch" => WatchStatus::WantToWatch,
+        "Watching" | "watching" => WatchStatus::Watching,
+        "OnHold" | "on_hold" | "onhold" => WatchStatus::OnHold,
         _ => WatchStatus::Unwatched,
+    }
+}
+
+fn parse_exception_status_command(value: &str) -> Result<ExceptionStatus, String> {
+    match value {
+        "Ignored" | "ignored" => Ok(ExceptionStatus::Ignored),
+        "Resolved" | "resolved" => Ok(ExceptionStatus::Resolved),
+        _ => Err("exception status must be Ignored or Resolved".to_string()),
     }
 }
 
@@ -1480,6 +2009,19 @@ fn configured_metadata_provider_enabled(state: &State<'_, AppState>) -> Result<b
         .metadata_provider_enabled
         .lock()
         .map_err(|error| error.to_string())?)
+}
+
+fn read_daemon_status(state: &State<'_, AppState>) -> Result<DaemonControlStatus, String> {
+    let metadata_enabled = configured_metadata_provider_enabled(state)?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let runtime = state
+        .daemon_runtime
+        .lock()
+        .map_err(|error| error.to_string())?;
+    build_daemon_status(repo, &runtime, metadata_enabled).map_err(|error| error.to_string())
 }
 
 fn canonical_existing_roots(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
@@ -1545,4 +2087,127 @@ fn nearest_existing_parent(path: &std::path::Path) -> Option<PathBuf> {
         }
         current = current.parent()?;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::{DiagnosticLevel, DiagnosticsWriter};
+    use crate::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
+    use serde_json::json;
+
+    #[test]
+    fn command_watch_status_parser_accepts_stage1_statuses() {
+        assert_eq!(parse_watch_status("WantToWatch"), WatchStatus::WantToWatch);
+        assert_eq!(parse_watch_status("Watching"), WatchStatus::Watching);
+        assert_eq!(parse_watch_status("OnHold"), WatchStatus::OnHold);
+        assert_eq!(parse_watch_status("watched"), WatchStatus::Watched);
+        assert_eq!(parse_watch_status("favorite"), WatchStatus::Favorite);
+        assert_eq!(parse_watch_status("unknown"), WatchStatus::Unwatched);
+    }
+
+    #[test]
+    fn default_app_state_reports_no_control_service_handle() {
+        let state = AppState::default();
+        let error = Some("startup failed".to_string());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let status = state.control_service_host_status(tmp.path(), error.clone());
+
+        assert!(!status.running);
+        assert_eq!(status.port, None);
+        assert_eq!(status.last_error, error);
+        assert!(status.discovery_path.ends_with("control-service.json"));
+    }
+
+    #[test]
+    fn default_app_state_caches_default_aria2_settings() {
+        let state = AppState::default();
+
+        let settings = state.aria2_settings.lock().unwrap().clone();
+
+        assert!(!settings.enabled);
+        assert_eq!(settings.host, "127.0.0.1");
+        assert_eq!(settings.port, 6800);
+        assert_eq!(settings.path, "/jsonrpc");
+    }
+
+    #[test]
+    fn remote_scraper_settings_command_normalizes_without_repository() {
+        let state = AppState::default();
+        let response = configure_remote_scraper_settings_in_state(
+            RemoteScraperSettings {
+                enabled: true,
+                user_agent: " media-manager-test ".to_string(),
+                sources: vec![RemoteScraperSourceSettings {
+                    id: "javdb".to_string(),
+                    enabled: true,
+                    search_url_template: "https://example.test/{code}".to_string(),
+                    min_confidence: 0.8,
+                }],
+                ..RemoteScraperSettings::default()
+            },
+            &state,
+        )
+        .unwrap();
+
+        assert!(response.data.enabled);
+        assert_eq!(response.data.user_agent, "media-manager-test");
+        assert_eq!(
+            state.remote_scraper_settings.lock().unwrap().user_agent,
+            "media-manager-test"
+        );
+    }
+
+    #[test]
+    fn app_state_diagnostic_logging_is_optional() {
+        let state = AppState::default();
+
+        log_diagnostic_event(
+            &state,
+            DiagnosticLevel::Info,
+            "test.optional",
+            "no writer",
+            json!({ "ok": true }),
+        );
+
+        assert!(state.diagnostics.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn app_state_diagnostic_logging_writes_when_initialized() {
+        let state = AppState::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = DiagnosticsWriter::new(tmp.path().join("logs")).unwrap();
+        *state.diagnostics.lock().unwrap() = Some(writer.clone());
+
+        log_diagnostic_event(
+            &state,
+            DiagnosticLevel::Error,
+            "test.initialized",
+            "failed",
+            json!({ "token": "secret-token" }),
+        );
+
+        let tail = writer.tail(10).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].target, "test.initialized");
+        assert_eq!(tail[0].context["token"], "***");
+    }
+}
+
+fn log_diagnostic_event(
+    state: &AppState,
+    level: DiagnosticLevel,
+    target: &str,
+    message: impl Into<String>,
+    context: serde_json::Value,
+) {
+    let Ok(guard) = state.diagnostics.lock() else {
+        return;
+    };
+    let Some(writer) = guard.as_ref() else {
+        return;
+    };
+    let _ = writer.append(level, target, message, context);
 }

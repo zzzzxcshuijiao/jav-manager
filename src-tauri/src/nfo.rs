@@ -14,6 +14,7 @@
 //!
 //! Public API is fixed: Tasks 2-5 build on these exact signatures.
 
+use crate::domain::ScrapedWorkMetadata;
 use anyhow::Result;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -44,21 +45,21 @@ pub struct ParsedNfoDocument {
     pub runtime_minutes: Option<i64>,
     pub year: Option<i32>,
     pub sets: Vec<String>,
-   pub studio: Option<String>,
-   pub label: Option<String>,
+    pub studio: Option<String>,
+    pub label: Option<String>,
     pub director: Option<String>,
-   pub tags: Vec<String>,
-   pub genres: Vec<String>,
+    pub tags: Vec<String>,
+    pub genres: Vec<String>,
     pub actors: Vec<String>,
-   pub release_date: Option<String>,
+    pub release_date: Option<String>,
     pub cover_url: Option<String>,
     pub poster_path: Option<String>,
     pub thumb_path: Option<String>,
     pub fanart_path: Option<String>,
     pub website: Option<String>,
-   pub mpaa: Option<String>,
+    pub mpaa: Option<String>,
     pub criticrating: Option<f32>,
-   pub rating_sources: Vec<ParsedRatingSource>,
+    pub rating_sources: Vec<ParsedRatingSource>,
 }
 
 /// Trims surrounding whitespace, then strips a matching `<![CDATA[` ... `]]>`
@@ -69,7 +70,10 @@ pub fn strip_cdata(value: &str) -> String {
     let trimmed = value.trim();
     const START: &str = "<![CDATA[";
     const END: &str = "]]>";
-    if trimmed.starts_with(START) && trimmed.ends_with(END) && trimmed.len() >= START.len() + END.len() {
+    if trimmed.starts_with(START)
+        && trimmed.ends_with(END)
+        && trimmed.len() >= START.len() + END.len()
+    {
         trimmed[START.len()..trimmed.len() - END.len()].to_string()
     } else {
         trimmed.to_string()
@@ -352,11 +356,17 @@ fn parse_rating_sources(nfo_text: &str) -> Vec<ParsedRatingSource> {
                 .unwrap_or(false);
             let value = value_re
                 .captures(inner)
-                .and_then(|c| normalize_text(c.get(1).unwrap().as_str()).parse::<f32>().ok())
+                .and_then(|c| {
+                    normalize_text(c.get(1).unwrap().as_str())
+                        .parse::<f32>()
+                        .ok()
+                })
                 .unwrap_or(0.0);
-            let votes = votes_re
-                .captures(inner)
-                .and_then(|c| normalize_text(c.get(1).unwrap().as_str()).parse::<i64>().ok());
+            let votes = votes_re.captures(inner).and_then(|c| {
+                normalize_text(c.get(1).unwrap().as_str())
+                    .parse::<i64>()
+                    .ok()
+            });
             out.push(ParsedRatingSource {
                 source,
                 value,
@@ -380,14 +390,20 @@ fn parse_rating_sources(nfo_text: &str) -> Vec<ParsedRatingSource> {
                     .ok()?
                     .captures(inner.trim())
             })
-            .and_then(|c| normalize_text(c.get(1).unwrap().as_str()).parse::<f32>().ok())
+            .and_then(|c| {
+                normalize_text(c.get(1).unwrap().as_str())
+                    .parse::<f32>()
+                    .ok()
+            })
             .unwrap_or(0.0);
         let max = extract_attribute(attrs, "max")
             .and_then(|v| v.trim().parse::<i32>().ok())
             .unwrap_or(10);
-        let votes = votes_re
-            .captures(nfo_text)
-            .and_then(|c| normalize_text(c.get(1).unwrap().as_str()).parse::<i64>().ok());
+        let votes = votes_re.captures(nfo_text).and_then(|c| {
+            normalize_text(c.get(1).unwrap().as_str())
+                .parse::<i64>()
+                .ok()
+        });
         out.push(ParsedRatingSource {
             source: "nfo".to_string(),
             value,
@@ -410,8 +426,8 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
 
     doc.source_code = extract_tag(xml, "num");
     doc.title = extract_tag(xml, "title");
-    doc.original_title = extract_tag(xml, "originaltitle")
-        .or_else(|| extract_tag(xml, "original_title"));
+    doc.original_title =
+        extract_tag(xml, "originaltitle").or_else(|| extract_tag(xml, "original_title"));
     doc.outline = extract_tag(xml, "outline");
     doc.summary = extract_tag(xml, "plot").or_else(|| extract_tag(xml, "summary"));
     doc.runtime_minutes = extract_tag(xml, "runtime")
@@ -419,13 +435,13 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
         .and_then(parse_runtime_minutes);
     doc.year = extract_tag(xml, "year").and_then(|y| y.trim().parse::<i32>().ok());
     doc.sets = extract_sets(xml);
-   doc.studio = extract_tag(xml, "studio").or_else(|| extract_tag(xml, "maker"));
-   doc.label = extract_tag(xml, "label").or_else(|| extract_tag(xml, "publisher"));
+    doc.studio = extract_tag(xml, "studio").or_else(|| extract_tag(xml, "maker"));
+    doc.label = extract_tag(xml, "label").or_else(|| extract_tag(xml, "publisher"));
     doc.director = extract_tag(xml, "director");
-   doc.tags = extract_all_tags(xml, "tag");
-   doc.genres = extract_all_tags(xml, "genre");
+    doc.tags = extract_all_tags(xml, "tag");
+    doc.genres = extract_all_tags(xml, "genre");
     doc.actors = extract_actors(xml);
-   doc.release_date = extract_tag(xml, "premiered")
+    doc.release_date = extract_tag(xml, "premiered")
         .or_else(|| extract_tag(xml, "releasedate"))
         .or_else(|| extract_tag(xml, "release"));
     doc.cover_url = extract_image_field(xml, "cover");
@@ -443,6 +459,69 @@ pub fn parse_nfo_document(xml: &str) -> Result<ParsedNfoDocument> {
     doc.rating_sources = parse_rating_sources(xml);
 
     Ok(doc)
+}
+
+/// Render scraped metadata to a simple Kodi-compatible movie NFO. This writer
+/// owns only Stage 2 generated NFOs; the existing parser remains tolerant of
+/// richer third-party NFO files.
+pub fn render_scraped_nfo(metadata: &ScrapedWorkMetadata) -> String {
+    let mut xml = String::from("<movie>\n");
+    push_tag(&mut xml, "num", &metadata.normalized_code);
+    push_tag(&mut xml, "title", &metadata.title);
+    if let Some(value) = &metadata.original_title {
+        push_tag(&mut xml, "originaltitle", value);
+    }
+    if let Some(value) = &metadata.summary {
+        push_tag(&mut xml, "plot", value);
+    }
+    if let Some(value) = &metadata.studio {
+        push_tag(&mut xml, "studio", value);
+    }
+    if let Some(value) = &metadata.director {
+        push_tag(&mut xml, "director", value);
+    }
+    if let Some(value) = &metadata.release_date {
+        push_tag(&mut xml, "premiered", value);
+    }
+    for actor in &metadata.actors {
+        xml.push_str("  <actor>");
+        push_inline_tag(&mut xml, "name", actor);
+        xml.push_str("</actor>\n");
+    }
+    for genre in &metadata.genres {
+        push_tag(&mut xml, "genre", genre);
+    }
+    xml.push_str("</movie>\n");
+    xml
+}
+
+fn push_tag(xml: &mut String, name: &str, value: &str) {
+    xml.push_str("  <");
+    xml.push_str(name);
+    xml.push('>');
+    xml.push_str(&escape_xml(value));
+    xml.push_str("</");
+    xml.push_str(name);
+    xml.push_str(">\n");
+}
+
+fn push_inline_tag(xml: &mut String, name: &str, value: &str) {
+    xml.push('<');
+    xml.push_str(name);
+    xml.push('>');
+    xml.push_str(&escape_xml(value));
+    xml.push_str("</");
+    xml.push_str(name);
+    xml.push('>');
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
@@ -482,10 +561,12 @@ mod tests {
         );
     }
 
-
     #[test]
     fn strip_cdata_returns_inner_text_without_markers() {
-        assert_eq!(strip_cdata("<![CDATA[TheLifeErotic.19.06.20-Rope 2]]>"), "TheLifeErotic.19.06.20-Rope 2");
+        assert_eq!(
+            strip_cdata("<![CDATA[TheLifeErotic.19.06.20-Rope 2]]>"),
+            "TheLifeErotic.19.06.20-Rope 2"
+        );
         assert_eq!(strip_cdata("plain text"), "plain text");
     }
 
@@ -523,9 +604,15 @@ mod tests {
   <ratings><rating name="javdb" max="5" default="true"><value>4.0</value><votes>2</votes></rating></ratings>
 </movie>"#;
         let parsed = parse_nfo_document(xml).expect("parse should succeed");
-        assert_eq!(parsed.title.as_deref(), Some("TheLifeErotic.19.06.20-Rope 2"));
+        assert_eq!(
+            parsed.title.as_deref(),
+            Some("TheLifeErotic.19.06.20-Rope 2")
+        );
         assert_eq!(parsed.summary.as_deref(), Some("Plot text"));
-        assert_eq!(parsed.source_code.as_deref(), Some("TheLifeErotic.19.06.20"));
+        assert_eq!(
+            parsed.source_code.as_deref(),
+            Some("TheLifeErotic.19.06.20")
+        );
         assert_eq!(parsed.runtime_minutes, Some(9));
         assert_eq!(parsed.year, Some(2019));
         assert_eq!(parsed.sets, vec!["The Life Erotic"]);
@@ -533,13 +620,16 @@ mod tests {
         assert_eq!(parsed.label.as_deref(), Some("The Life Erotic"));
         assert_eq!(parsed.tags, vec!["中文字幕"]);
         assert_eq!(parsed.genres, vec!["H264"]);
-        assert_eq!(parsed.rating_sources, vec![ParsedRatingSource {
-            source: "javdb".to_string(),
-            value: 4.0,
-            max: 5,
-            votes: Some(2),
-            is_default: true,
-        }]);
+        assert_eq!(
+            parsed.rating_sources,
+            vec![ParsedRatingSource {
+                source: "javdb".to_string(),
+                value: 4.0,
+                max: 5,
+                votes: Some(2),
+                is_default: true,
+            }]
+        );
     }
 
     #[test]

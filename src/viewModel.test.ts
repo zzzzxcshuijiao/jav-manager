@@ -16,11 +16,20 @@ import {
   filterItems,
   filterWorksForLibrary,
   findIngestItemForWork,
+  formatDaemonChannel,
+  formatDaemonState,
+  formatDiagnosticExportSummary,
+  formatDiagnosticLogLine,
+  formatRemoteScraperSettingsSummary,
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
+  formatExceptionKind,
+  formatExceptionStatus,
   formatFileVersionSummary,
+  formatHoldingReason,
   formatMediaInfo,
+  formatPipelineStatus,
   formatWorkOption,
   mergeVersionTargetWorks,
   normalizeManualCodeInput,
@@ -35,6 +44,8 @@ import {
   viewItemsForMode,
   workbenchViewTitle,
   formatRebuildReport,
+  shortEvidence,
+  summarizeRunOnceReport,
   libraryCardArtwork,
   libraryCardSubtitle,
   libraryCardTitle,
@@ -457,6 +468,91 @@ describe("formatRebuildReport", () => {
     const message = formatRebuildReport("rebuild", report);
     expect(message).toContain("重建完成");
     expect(message).toContain("1 个 NFO 解析失败");
+  });
+});
+
+describe("daemon view helpers", () => {
+  it("labels daemon states, holding reasons, exception kinds and run statuses", () => {
+    expect(formatDaemonState("Idle")).toBe("空闲");
+    expect(formatDaemonState("Paused")).toBe("已暂停");
+    expect(formatDaemonChannel("service")).toBe("本地服务");
+    expect(formatDaemonChannel("command")).toBe("命令桥");
+    expect(formatDaemonChannel("none")).toBe("未连接");
+    expect(formatHoldingReason("NoCode")).toBe("缺少番号");
+    expect(formatHoldingReason("Unrecognizable")).toBe("无法识别");
+    expect(formatExceptionKind("ScrapeFailed")).toBe("刮削失败");
+    expect(formatExceptionStatus("Resolved")).toBe("已解决");
+    expect(formatPipelineStatus("archived")).toBe("已归档");
+    expect(formatPipelineStatus("failed")).toBe("失败");
+  });
+
+  it("summarizes daemon run reports and trims JSON evidence", () => {
+    expect(summarizeRunOnceReport({
+      scan: { scanned_files: 3, queued_files: 2, skipped_files: 1 },
+      aria2: {
+        enabled: true,
+        attempted_gids: 2,
+        completed_gids: 1,
+        queued_files: 1,
+        skipped_files: 0,
+        failed_gids: 1,
+        errors: ["gid-bad: forbidden"]
+      },
+      process: { processed: 2, archived: 1, holding: 1, exceptions: 0, failed: 0 }
+    })).toBe("aria2 尝试 2 个 GID，完成 1 个，入队 1 个，失败 1 个；扫描 3 个文件，入队 2 个，跳过 1 个；处理 2 个：归档 1，搁置 1，异常 0，失败 0。");
+
+    expect(shortEvidence("{\"source\":\"example\",\"message\":\"not found\"}", 24)).toBe("{\"source\":\"example\",\"...");
+    expect(shortEvidence("", 24)).toBe("无证据");
+  });
+
+  it("formats remote scraper settings summary", () => {
+    expect(formatRemoteScraperSettingsSummary({
+      enabled: true,
+      timeout_ms: 8000,
+      user_agent: "media-manager-test",
+      proxy_url: null,
+      include_example_fallback: true,
+      sources: [
+        { id: "javdb", enabled: true, search_url_template: "https://example.test/{code}", min_confidence: 0.82 },
+        { id: "javbus", enabled: false, search_url_template: "https://example.test/{code}", min_confidence: 0.82 }
+      ]
+    })).toBe("已启用 · 1 个远程源 · 保留示例 fallback");
+
+    expect(formatRemoteScraperSettingsSummary({
+      enabled: false,
+      timeout_ms: 8000,
+      user_agent: "media-manager-test",
+      proxy_url: null,
+      include_example_fallback: false,
+      sources: []
+    })).toBe("已停用");
+  });
+});
+
+describe("diagnostics formatting", () => {
+  it("formats diagnostic log lines", () => {
+    expect(
+      formatDiagnosticLogLine({
+        timestamp: "2026-06-26T10:00:00Z",
+        level: "Error",
+        target: "daemon.run_once",
+        message: "run failed",
+        context: { error: "boom" }
+      })
+    ).toBe("2026-06-26T10:00:00Z · 错误 · daemon.run_once · run failed");
+  });
+
+  it("formats diagnostic export summaries", () => {
+    expect(
+      formatDiagnosticExportSummary({
+        path: "C:/Users/DELL/AppData/Roaming/local.media-manager/diagnostics/diagnostics-20260626-100000.json",
+        logs: 12,
+        pipeline_runs: 2,
+        scrape_jobs: 3,
+        open_exceptions: 1,
+        holding_items: 4
+      })
+    ).toContain("已导出诊断快照");
   });
 });
 

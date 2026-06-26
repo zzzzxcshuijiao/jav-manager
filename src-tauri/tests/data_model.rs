@@ -1,6 +1,6 @@
 use media_manager::domain::{
-    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason,
-    PipelineRun, ScrapeJob, ScrapeStatus, WatchStatus, Work,
+    CodeKind, Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
+    ScrapeJob, ScrapeStatus, WatchStatus, Work,
 };
 use media_manager::storage::Repository;
 
@@ -62,8 +62,9 @@ fn watch_status_roundtrips_new_variants() {
         WatchStatus::Watching,
         WatchStatus::OnHold,
     ] {
-        let updated =
-            repo.update_work_profile(id, Vec::new(), Vec::new(), None, status.clone()).unwrap();
+        let updated = repo
+            .update_work_profile(id, Vec::new(), Vec::new(), None, status.clone())
+            .unwrap();
         assert_eq!(updated.watch_status, status);
     }
 }
@@ -78,10 +79,14 @@ fn watch_progress_is_persisted_and_read_back() {
     work.normalized_code = Some("ABP-002".to_string());
     let id = repo.upsert_work(&work).unwrap();
 
-    let updated =
-        repo.set_watch_progress(id, Some(1865), Some("2026-06-25T21:00:00Z".to_string())).unwrap();
+    let updated = repo
+        .set_watch_progress(id, Some(1865), Some("2026-06-25T21:00:00Z".to_string()))
+        .unwrap();
     assert_eq!(updated.watch_progress_seconds, Some(1865));
-    assert_eq!(updated.last_played_at.as_deref(), Some("2026-06-25T21:00:00Z"));
+    assert_eq!(
+        updated.last_played_at.as_deref(),
+        Some("2026-06-25T21:00:00Z")
+    );
 
     let cleared = repo.set_watch_progress(id, None, None).unwrap();
     assert_eq!(cleared.watch_progress_seconds, None);
@@ -100,7 +105,10 @@ fn scrape_jobs_roundtrip() {
     let id = repo
         .record_scrape_job(&ScrapeJob {
             id: None,
-            work_id,
+            work_id: Some(work_id),
+            normalized_code: Some("ABP-003".to_string()),
+            object_path: Some("H:/dl/ABP-003.mp4".to_string()),
+            pipeline_run_id: None,
             source: "FANZA".to_string(),
             status: ScrapeStatus::Failed,
             attempts: 2,
@@ -115,6 +123,8 @@ fn scrape_jobs_roundtrip() {
     assert_eq!(jobs[0].source, "FANZA");
     assert_eq!(jobs[0].status, ScrapeStatus::Failed);
     assert_eq!(jobs[0].attempts, 2);
+    assert_eq!(jobs[0].normalized_code.as_deref(), Some("ABP-003"));
+    assert_eq!(jobs[0].object_path.as_deref(), Some("H:/dl/ABP-003.mp4"));
 }
 
 #[test]
@@ -139,7 +149,8 @@ fn exceptions_record_list_and_resolve() {
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].kind, ExceptionKind::ScrapeFailed);
 
-    repo.resolve_exception(id, ExceptionStatus::Resolved).unwrap();
+    repo.resolve_exception(id, ExceptionStatus::Resolved)
+        .unwrap();
     let after = repo.list_exceptions().unwrap();
     assert_eq!(after[0].status, ExceptionStatus::Resolved);
     assert!(after[0].resolved_at.is_some());
@@ -213,4 +224,40 @@ fn collections_hold_works_many_to_many() {
 
     let work_ids = repo.list_works_in_collection(col_id).unwrap();
     assert_eq!(work_ids, vec![work_id]);
+}
+
+#[test]
+fn work_can_be_removed_from_collection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    let mut w = sample_work();
+    w.normalized_code = Some("ABP-006".to_string());
+    let work_id = repo.upsert_work(&w).unwrap();
+    let col_id = repo.create_collection("watch later", None).unwrap();
+    repo.add_work_to_collection(work_id, col_id).unwrap();
+
+    repo.remove_work_from_collection(work_id, col_id).unwrap();
+
+    assert!(repo.list_works_in_collection(col_id).unwrap().is_empty());
+}
+
+#[test]
+fn deleting_work_cascades_collection_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&tmp.path().join("t.sqlite")).unwrap();
+    repo.migrate().unwrap();
+
+    let mut w = sample_work();
+    w.normalized_code = Some("ABP-007".to_string());
+    let work_id = repo.upsert_work(&w).unwrap();
+    let col_id = repo
+        .create_collection("favorites", Some("#00a4dc"))
+        .unwrap();
+    repo.add_work_to_collection(work_id, col_id).unwrap();
+
+    repo.debug_delete_work(work_id).unwrap();
+
+    assert!(repo.list_works_in_collection(col_id).unwrap().is_empty());
 }

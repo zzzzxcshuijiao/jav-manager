@@ -1,4 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
+import {
+  createDaemonControlClient,
+  type ControlServiceDiscovery,
+  type DaemonControlChannel,
+} from "./daemonClient";
+
+export type { ControlServiceDiscovery, DaemonControlChannel } from "./daemonClient";
+
+export interface ControlServiceHostStatus {
+  running: boolean;
+  host: string;
+  port?: number | null;
+  discovery_path: string;
+  last_error?: string | null;
+}
 
 export type IngestDecision = "AutoArchive" | "NeedsReview" | "DuplicateCandidate" | "Failed" | "Ignored";
 export type ReviewReason =
@@ -87,7 +102,7 @@ export interface Work {
   rating_max?: number | null;
   rating_votes?: number | null;
   criticrating?: number | null;
-  watch_status: "Unwatched" | "Watched" | "Favorite";
+  watch_status: "Unwatched" | "WantToWatch" | "Watching" | "Watched" | "OnHold" | "Favorite";
   studio?: string | null;
   label?: string | null;
   director?: string | null;
@@ -102,6 +117,134 @@ export interface Work {
 export type WatchStatus = Work["watch_status"];
 
 export type CodeKind = "standard" | "non_standard";
+
+export type DaemonState = "Idle" | "Scanning" | "Processing" | "Paused" | "Error";
+export type MetadataSource = "example" | "disabled";
+
+export interface DaemonControlStatus {
+  state: DaemonState;
+  configured: boolean;
+  source_roots: string[];
+  archive_root?: string | null;
+  asset_roots: string[];
+  queued: number;
+  processed: number;
+  last_error?: string | null;
+  open_exceptions: number;
+  holding_items: number;
+  recent_runs: number;
+  metadata_source: MetadataSource;
+}
+
+export interface DaemonScanReport {
+  scanned_files: number;
+  queued_files: number;
+  skipped_files: number;
+}
+
+export interface DaemonProcessReport {
+  processed: number;
+  archived: number;
+  holding: number;
+  exceptions: number;
+  failed: number;
+}
+
+export interface Aria2Settings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  path: string;
+  secret?: string | null;
+  timeout_ms: number;
+  poll_interval_secs: number;
+  tracked_gids: string[];
+}
+
+export interface Aria2PollReport {
+  enabled: boolean;
+  attempted_gids: number;
+  completed_gids: number;
+  queued_files: number;
+  skipped_files: number;
+  failed_gids: number;
+  errors: string[];
+}
+
+export interface RemoteScraperSourceSettings {
+  id: string;
+  enabled: boolean;
+  search_url_template: string;
+  min_confidence: number;
+}
+
+export interface RemoteScraperSettings {
+  enabled: boolean;
+  timeout_ms: number;
+  user_agent: string;
+  proxy_url?: string | null;
+  include_example_fallback: boolean;
+  sources: RemoteScraperSourceSettings[];
+}
+
+export interface DaemonRunOnceReport {
+  scan: DaemonScanReport;
+  aria2?: Aria2PollReport;
+  process: DaemonProcessReport;
+}
+
+export type HoldingReason = "NoCode" | "ShortVideo" | "NonJapanese" | "Unrecognizable";
+
+export interface HoldingEntry {
+  id?: number | null;
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  reason: HoldingReason;
+  created_at?: string | null;
+}
+
+export type ExceptionKind = "CodeConflict" | "DuplicateCandidate" | "ScrapeFailed";
+export type ExceptionStatus = "Open" | "Ignored" | "Resolved";
+
+export interface ExceptionEntry {
+  id?: number | null;
+  object_path: string;
+  kind: ExceptionKind;
+  evidence_json: string;
+  status: ExceptionStatus;
+  created_at?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface PipelineRun {
+  id?: number | null;
+  file_path: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  steps_json: string;
+  status: string;
+  error?: string | null;
+}
+
+export type DiagnosticLevel = "Info" | "Warn" | "Error";
+
+export interface DiagnosticLogEntry {
+  timestamp: string;
+  level: DiagnosticLevel;
+  target: string;
+  message: string;
+  context: unknown;
+}
+
+export interface DiagnosticExportResult {
+  path: string;
+  logs: number;
+  pipeline_runs: number;
+  scrape_jobs: number;
+  open_exceptions: number;
+  holding_items: number;
+}
 
 export interface WorkDetail {
   work: Work;
@@ -275,6 +418,11 @@ async function command<T>(name: string, args?: Record<string, unknown>): Promise
   return result.data;
 }
 
+const daemonClient = createDaemonControlClient({
+  command,
+  getDiscovery: () => command<ControlServiceDiscovery | null>("get_control_service_discovery"),
+});
+
 export const api = {
   configureSourceRoots(paths: string[]) {
     return command<string[]>("configure_source_roots", { paths });
@@ -293,6 +441,57 @@ export const api = {
   },
   getMetadataProviderEnabled() {
     return command<boolean>("get_metadata_provider_enabled");
+  },
+  configureAria2Settings(settings: Aria2Settings) {
+    return command<Aria2Settings>("configure_aria2_settings", { settings });
+  },
+  getAria2Settings() {
+    return command<Aria2Settings>("get_aria2_settings");
+  },
+  configureRemoteScraperSettings(settings: RemoteScraperSettings) {
+    return command<RemoteScraperSettings>("configure_remote_scraper_settings", { settings });
+  },
+  getRemoteScraperSettings() {
+    return command<RemoteScraperSettings>("get_remote_scraper_settings");
+  },
+  getControlServiceDiscovery() {
+    return command<ControlServiceDiscovery | null>("get_control_service_discovery");
+  },
+  getControlServiceHostStatus() {
+    return command<ControlServiceHostStatus>("get_control_service_host_status");
+  },
+  getDaemonControlChannel(): DaemonControlChannel {
+    return daemonClient.getChannel();
+  },
+  getDaemonStatus() {
+    return daemonClient.getStatus();
+  },
+  getDiagnosticLogTail(limit = 80) {
+    return command<DiagnosticLogEntry[]>("get_diagnostic_log_tail", { limit });
+  },
+  exportDiagnosticsSnapshot() {
+    return command<DiagnosticExportResult>("export_diagnostics_snapshot_command");
+  },
+  pauseDaemon() {
+    return daemonClient.pause();
+  },
+  resumeDaemon() {
+    return daemonClient.resume();
+  },
+  runDaemonOnce() {
+    return daemonClient.runOnce();
+  },
+  listHoldingEntries() {
+    return daemonClient.listHolding();
+  },
+  listExceptionEntries() {
+    return daemonClient.listExceptions();
+  },
+  resolveExceptionEntry(id: number, status: Exclude<ExceptionStatus, "Open">) {
+    return daemonClient.resolveException(id, status);
+  },
+  listPipelineRuns() {
+    return daemonClient.listRuns();
   },
   startScan(sourceRootIds: string[]) {
     return command<IngestJobSummary>("start_scan", { sourceRootIds });

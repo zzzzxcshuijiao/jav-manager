@@ -27,14 +27,23 @@ import type {
   Actor,
   ArchiveActionLog,
   ArchivePlan,
+  Aria2Settings,
+  DaemonControlChannel,
+  DaemonControlStatus,
+  DaemonRunOnceReport,
+  DiagnosticLogEntry,
+  ExceptionEntry,
   FileVersion,
+  HoldingEntry,
   IngestDecision,
   IngestItem,
   IngestJobSummary,
   MigrationPlan,
+  PipelineRun,
   PooledWork,
   ResourcePool,
   ReviewReason,
+  RemoteScraperSettings,
   ThumbnailCacheSummary,
   RebuildReport,
   Tag,
@@ -59,6 +68,10 @@ import {
   coverPreviewPathForItem,
   duplicateCandidatesForItem,
   findIngestItemForWork,
+  formatDaemonChannel,
+  formatDaemonState,
+  formatDiagnosticExportSummary,
+  formatDiagnosticLogLine,
   formatRuntime,
   libraryCardArtwork,
   libraryCardSubtitle,
@@ -70,8 +83,13 @@ import {
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
+  formatExceptionKind,
+  formatExceptionStatus,
   formatFileVersionSummary,
+  formatHoldingReason,
   formatMediaInfo,
+  formatPipelineStatus,
+  formatRemoteScraperSettingsSummary,
   formatRebuildReport,
   formatWorkOption,
   ignorableDuplicateItems,
@@ -85,6 +103,8 @@ import {
   resolvableSelectedItems,
   selectedItemIds,
   type ReviewReasonFilter,
+  shortEvidence,
+  summarizeRunOnceReport,
   viewItemsForMode,
   type WorkStatusFilter,
   type WorkbenchView,
@@ -112,8 +132,50 @@ const availableActions = ["扫描真实目录", "筛选扫描结果", "查看条
 
 const watchStatusLabels: Record<WatchStatus, string> = {
   Unwatched: "未观看",
+  WantToWatch: "想看",
+  Watching: "观看中",
   Watched: "已观看",
+  OnHold: "搁置",
   Favorite: "收藏"
+};
+
+const defaultAria2Settings: Aria2Settings = {
+  enabled: false,
+  host: "127.0.0.1",
+  port: 6800,
+  path: "/jsonrpc",
+  secret: "",
+  timeout_ms: 5000,
+  poll_interval_secs: 30,
+  tracked_gids: []
+};
+
+const defaultRemoteScraperSettings: RemoteScraperSettings = {
+  enabled: false,
+  timeout_ms: 8000,
+  user_agent: "media-manager/0.1 local scraper",
+  proxy_url: "",
+  include_example_fallback: true,
+  sources: [
+    {
+      id: "javdb",
+      enabled: false,
+      search_url_template: "https://javdb.com/search?q={code}&f=all",
+      min_confidence: 0.82
+    },
+    {
+      id: "javbus",
+      enabled: false,
+      search_url_template: "https://www.javbus.com/search/{code}",
+      min_confidence: 0.82
+    },
+    {
+      id: "fanza",
+      enabled: false,
+      search_url_template: "https://www.dmm.co.jp/digital/videoa/-/list/search/=/?searchstr={code}",
+      min_confidence: 0.82
+    }
+  ]
 };
 
 export function App() {
@@ -153,7 +215,21 @@ export function App() {
   const [unifiedPlan, setUnifiedPlan] = useState<UnifiedMigrationPlan | null>(null);
   const [resourcePool, setResourcePool] = useState<ResourcePool | null>(null);
   const [primaryLibraryDir, setPrimaryLibraryDir] = useState("");
-  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache">("pool");
+  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache" | "daemon">("pool");
+  const [daemonStatus, setDaemonStatus] = useState<DaemonControlStatus | null>(null);
+  const [daemonChannel, setDaemonChannel] = useState<DaemonControlChannel>("none");
+  const [daemonReport, setDaemonReport] = useState<DaemonRunOnceReport | null>(null);
+  const [holdingEntries, setHoldingEntries] = useState<HoldingEntry[]>([]);
+  const [exceptionEntries, setExceptionEntries] = useState<ExceptionEntry[]>([]);
+  const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
+  const [daemonBusy, setDaemonBusy] = useState<"refresh" | "run" | "pause" | "resume" | "resolve" | null>(null);
+  const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "export" | null>(null);
+  const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
+  const [aria2GidsText, setAria2GidsText] = useState("");
+  const [aria2Busy, setAria2Busy] = useState(false);
+  const [remoteScraperSettings, setRemoteScraperSettings] = useState<RemoteScraperSettings>(defaultRemoteScraperSettings);
+  const [remoteScraperBusy, setRemoteScraperBusy] = useState(false);
   const [libraryWorkDetail, setLibraryWorkDetail] = useState<WorkDetail | null>(null);
   const [nonStandardCollapsed, setNonStandardCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -427,6 +503,17 @@ export function App() {
   }, [activeView]);
 
   useEffect(() => {
+    if (activeView !== "settings" || settingsTab !== "daemon") {
+      return;
+    }
+    if (!hasBackend) {
+      setStatus("自动管线需要 Tauri 后端；普通浏览器只能查看前端壳。");
+      return;
+    }
+    refreshDaemonPanel();
+  }, [activeView, settingsTab]);
+
+  useEffect(() => {
     if (activeView !== "library") {
       return;
     }
@@ -619,6 +706,197 @@ export function App() {
       setStatus(`作品库已刷新：${nextWorks.length} 个作品。`);
     } catch (error) {
       setStatus(`刷新作品库失败：${String(error)}`);
+    }
+  }
+
+  function applyAria2Settings(settings: Aria2Settings) {
+    setAria2Settings({ ...settings, secret: settings.secret ?? "" });
+    setAria2GidsText(settings.tracked_gids.join("\n"));
+  }
+
+  function applyRemoteScraperSettings(settings: RemoteScraperSettings) {
+    setRemoteScraperSettings({ ...settings, proxy_url: settings.proxy_url ?? "" });
+  }
+
+  async function loadDaemonPanelData() {
+    const [
+      nextStatus,
+      nextHolding,
+      nextExceptions,
+      nextRuns,
+      nextAria2Settings,
+      nextRemoteScraperSettings,
+      nextDiagnosticLogs
+    ] = await Promise.all([
+      api.getDaemonStatus(),
+      api.listHoldingEntries(),
+      api.listExceptionEntries(),
+      api.listPipelineRuns(),
+      api.getAria2Settings(),
+      api.getRemoteScraperSettings(),
+      api.getDiagnosticLogTail(80)
+    ]);
+    setDaemonStatus(nextStatus);
+    setHoldingEntries(nextHolding);
+    setExceptionEntries(nextExceptions);
+    setPipelineRuns(nextRuns);
+    setDaemonChannel(api.getDaemonControlChannel());
+    applyAria2Settings(nextAria2Settings);
+    applyRemoteScraperSettings(nextRemoteScraperSettings);
+    setDiagnosticLogs(nextDiagnosticLogs);
+    return nextStatus;
+  }
+
+  async function refreshDaemonPanel() {
+    if (daemonBusy) return;
+    setDaemonBusy("refresh");
+    setStatus("正在刷新自动管线状态...");
+    try {
+      const nextStatus = await loadDaemonPanelData();
+      setStatus(`自动管线状态：${formatDaemonState(nextStatus.state)}，异常 ${nextStatus.open_exceptions}，搁置 ${nextStatus.holding_items}。`);
+    } catch (error) {
+      setStatus(`刷新自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function runDaemonOnce() {
+    if (daemonBusy) return;
+    setDaemonBusy("run");
+    setStatus("自动管线正在运行一轮...");
+    try {
+      const report = await api.runDaemonOnce();
+      setDaemonReport(report);
+      await loadDaemonPanelData();
+      setStatus(summarizeRunOnceReport(report));
+    } catch (error) {
+      setStatus(`自动管线运行失败：${String(error)}`);
+      try {
+        await loadDaemonPanelData();
+      } catch {
+        // Preserve the operation failure as the visible status.
+      }
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function saveAria2Settings() {
+    if (aria2Busy) return;
+    setAria2Busy(true);
+    setStatus("正在保存 aria2 配置...");
+    try {
+      const saved = await api.configureAria2Settings({
+        ...aria2Settings,
+        secret: aria2Settings.secret?.trim() ? aria2Settings.secret : null,
+        tracked_gids: aria2GidsText
+          .split(/\r?\n|,/)
+          .map((gid) => gid.trim())
+          .filter(Boolean)
+      });
+      applyAria2Settings(saved);
+      setStatus(`aria2 配置已保存：${saved.enabled ? "已启用" : "已停用"}，跟踪 ${saved.tracked_gids.length} 个 GID。`);
+    } catch (error) {
+      setStatus(`保存 aria2 配置失败：${String(error)}`);
+    } finally {
+      setAria2Busy(false);
+    }
+  }
+
+  async function saveRemoteScraperSettings() {
+    if (remoteScraperBusy) return;
+    setRemoteScraperBusy(true);
+    setStatus("正在保存远程刮削器配置...");
+    try {
+      const saved = await api.configureRemoteScraperSettings({
+        ...remoteScraperSettings,
+        proxy_url: remoteScraperSettings.proxy_url?.trim() ? remoteScraperSettings.proxy_url : null
+      });
+      applyRemoteScraperSettings(saved);
+      setStatus(`远程刮削器配置已保存：${formatRemoteScraperSettingsSummary(saved)}。`);
+    } catch (error) {
+      setStatus(`保存远程刮削器配置失败：${String(error)}`);
+    } finally {
+      setRemoteScraperBusy(false);
+    }
+  }
+
+  async function refreshDiagnosticLogs() {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy("refresh");
+    setStatus("正在刷新诊断日志...");
+    try {
+      const logs = await api.getDiagnosticLogTail(80);
+      setDiagnosticLogs(logs);
+      setStatus(`已刷新诊断日志：${logs.length} 条。`);
+    } catch (error) {
+      setStatus(`刷新诊断日志失败：${String(error)}`);
+    } finally {
+      setDiagnosticsBusy(null);
+    }
+  }
+
+  async function exportDiagnosticsSnapshot() {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy("export");
+    setStatus("正在导出诊断快照...");
+    try {
+      const result = await api.exportDiagnosticsSnapshot();
+      setStatus(formatDiagnosticExportSummary(result));
+      const logs = await api.getDiagnosticLogTail(80);
+      setDiagnosticLogs(logs);
+    } catch (error) {
+      setStatus(`导出诊断快照失败：${String(error)}`);
+    } finally {
+      setDiagnosticsBusy(null);
+    }
+  }
+
+  async function pauseDaemon() {
+    if (daemonBusy) return;
+    setDaemonBusy("pause");
+    setStatus("正在暂停自动管线...");
+    try {
+      const nextStatus = await api.pauseDaemon();
+      await loadDaemonPanelData();
+      setDaemonStatus(nextStatus);
+      setStatus("自动管线已暂停。");
+    } catch (error) {
+      setStatus(`暂停自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function resumeDaemon() {
+    if (daemonBusy) return;
+    setDaemonBusy("resume");
+    setStatus("正在恢复自动管线...");
+    try {
+      const nextStatus = await api.resumeDaemon();
+      await loadDaemonPanelData();
+      setDaemonStatus(nextStatus);
+      setStatus("自动管线已恢复。");
+    } catch (error) {
+      setStatus(`恢复自动管线失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
+    }
+  }
+
+  async function resolveDaemonException(id: number | null | undefined, nextStatus: "Ignored" | "Resolved") {
+    if (daemonBusy || id == null) return;
+    setDaemonBusy("resolve");
+    setStatus(nextStatus === "Resolved" ? "正在标记异常为已解决..." : "正在忽略异常...");
+    try {
+      await api.resolveExceptionEntry(id, nextStatus);
+      await loadDaemonPanelData();
+      setStatus(nextStatus === "Resolved" ? "异常已标记为已解决。" : "异常已忽略。");
+    } catch (error) {
+      setStatus(`更新异常状态失败：${String(error)}`);
+    } finally {
+      setDaemonBusy(null);
     }
   }
 
@@ -1269,6 +1547,7 @@ export function App() {
               <button type="button" className={settingsTab === "pool" ? "active" : ""} onClick={() => setSettingsTab("pool")}>目录与资源池</button>
               <button type="button" className={settingsTab === "rebuild" ? "active" : ""} onClick={() => setSettingsTab("rebuild")}>作品库</button>
               <button type="button" className={settingsTab === "migrate" ? "active" : ""} onClick={() => setSettingsTab("migrate")}>迁移</button>
+              <button type="button" className={settingsTab === "daemon" ? "active" : ""} onClick={() => setSettingsTab("daemon")}>自动管线</button>
               <button type="button" className={settingsTab === "cache" ? "active" : ""} onClick={() => setSettingsTab("cache")}>缓存</button>
             </div>
 
@@ -1395,6 +1674,325 @@ export function App() {
                   </div>
                 ) : null}
               </>
+            ) : null}
+
+            {settingsTab === "daemon" ? (
+              <div className="daemon-panel">
+                <div className="rebuild-tools">
+                  <div>
+                    <strong>自动管线状态</strong>
+                    <span>
+                      {daemonStatus
+                        ? `${formatDaemonState(daemonStatus.state)} · ${daemonStatus.configured ? "配置完整" : "缺少归档根目录"} · 元数据源 ${daemonStatus.metadata_source === "example" ? "示例" : "未启用"} · 控制通道 ${formatDaemonChannel(daemonChannel)}`
+                        : "尚未读取"}
+                    </span>
+                  </div>
+                  <button type="button" onClick={refreshDaemonPanel} disabled={daemonBusy !== null}>
+                    <RefreshCw size={16} /> {daemonBusy === "refresh" ? "刷新中" : "刷新状态"}
+                  </button>
+                  <button type="button" className="primary" onClick={runDaemonOnce} disabled={daemonBusy !== null || !daemonStatus?.configured || daemonStatus?.state === "Paused"}>
+                    <Play size={16} /> {daemonBusy === "run" ? "运行中" : "运行一轮"}
+                  </button>
+                </div>
+
+                <div className="daemon-actions">
+                  <button type="button" onClick={pauseDaemon} disabled={daemonBusy !== null || daemonStatus?.state === "Paused"}>
+                    <TriangleAlert size={16} /> {daemonBusy === "pause" ? "暂停中" : "暂停"}
+                  </button>
+                  <button type="button" onClick={resumeDaemon} disabled={daemonBusy !== null || daemonStatus?.state !== "Paused"}>
+                    <RefreshCw size={16} /> {daemonBusy === "resume" ? "恢复中" : "恢复"}
+                  </button>
+                </div>
+
+                <div className="aria2-settings">
+                  <div className="aria2-settings-head">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={aria2Settings.enabled}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, enabled: event.target.checked })}
+                      />
+                      aria2 轮询
+                    </label>
+                    <button type="button" onClick={saveAria2Settings} disabled={aria2Busy || !hasBackend}>
+                      <Settings size={16} /> {aria2Busy ? "保存中" : "保存 aria2"}
+                    </button>
+                  </div>
+                  <div className="aria2-settings-grid">
+                    <label>
+                      主机
+                      <input
+                        value={aria2Settings.host}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, host: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      端口
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={aria2Settings.port}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, port: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      RPC 路径
+                      <input
+                        value={aria2Settings.path}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, path: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Secret
+                      <input
+                        value={aria2Settings.secret ?? ""}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, secret: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      超时 ms
+                      <input
+                        type="number"
+                        min={1}
+                        value={aria2Settings.timeout_ms}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, timeout_ms: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      轮询间隔 s
+                      <input
+                        type="number"
+                        min={1}
+                        value={aria2Settings.poll_interval_secs}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, poll_interval_secs: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                  <label className="aria2-gids-field">
+                    跟踪 GID
+                    <textarea
+                      rows={4}
+                      value={aria2GidsText}
+                      onChange={(event) => setAria2GidsText(event.target.value)}
+                    />
+                  </label>
+                </div>
+
+                <div className="remote-scraper-settings">
+                  <div className="remote-scraper-settings-head">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={remoteScraperSettings.enabled}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, enabled: event.target.checked })}
+                      />
+                      远程刮削器
+                    </label>
+                    <button type="button" onClick={saveRemoteScraperSettings} disabled={remoteScraperBusy || !hasBackend}>
+                      <Settings size={16} /> {remoteScraperBusy ? "保存中" : "保存刮削器"}
+                    </button>
+                  </div>
+                  <div className="remote-scraper-settings-grid">
+                    <label>
+                      User-Agent
+                      <input
+                        value={remoteScraperSettings.user_agent}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, user_agent: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      超时 ms
+                      <input
+                        type="number"
+                        min={1}
+                        value={remoteScraperSettings.timeout_ms}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, timeout_ms: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      代理 URL
+                      <input
+                        value={remoteScraperSettings.proxy_url ?? ""}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, proxy_url: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <label className="remote-scraper-fallback">
+                    <input
+                      type="checkbox"
+                      checked={remoteScraperSettings.include_example_fallback}
+                      onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, include_example_fallback: event.target.checked })}
+                    />
+                    保留示例 fallback
+                  </label>
+                  <div className="remote-scraper-source-list">
+                    {remoteScraperSettings.sources.map((source, index) => (
+                      <div className="remote-scraper-source-row" key={source.id}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={source.enabled}
+                            onChange={(event) => {
+                              const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                                sourceIndex === index ? { ...candidate, enabled: event.target.checked } : candidate
+                              );
+                              setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                            }}
+                          />
+                          {source.id}
+                        </label>
+                        <input
+                          value={source.search_url_template}
+                          onChange={(event) => {
+                            const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                              sourceIndex === index ? { ...candidate, search_url_template: event.target.value } : candidate
+                            );
+                            setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                          }}
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={source.min_confidence}
+                          onChange={(event) => {
+                            const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                              sourceIndex === index ? { ...candidate, min_confidence: Number(event.target.value) } : candidate
+                            );
+                            setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {daemonStatus ? (
+                  <div className="daemon-grid">
+                    <div className="metric-card">
+                      <span>来源目录</span>
+                      <strong>{daemonStatus.source_roots.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>资源池目录</span>
+                      <strong>{daemonStatus.asset_roots.length}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>异常</span>
+                      <strong>{daemonStatus.open_exceptions}</strong>
+                    </div>
+                    <div className="metric-card">
+                      <span>搁置</span>
+                      <strong>{daemonStatus.holding_items}</strong>
+                    </div>
+                  </div>
+                ) : null}
+
+                {daemonStatus?.archive_root ? (
+                  <div className="rebuild-report">
+                    <span>归档根目录：{daemonStatus.archive_root}</span>
+                    {daemonStatus.last_error ? <span>最近错误：{daemonStatus.last_error}</span> : null}
+                  </div>
+                ) : null}
+
+                {daemonReport ? (
+                  <div className="rebuild-report">
+                    <span>{summarizeRunOnceReport(daemonReport)}</span>
+                  </div>
+                ) : null}
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>搁置区</strong>
+                    <span>{holdingEntries.length} 项</span>
+                  </div>
+                  {holdingEntries.length === 0 ? (
+                    <span className="empty-text">暂无搁置文件</span>
+                  ) : (
+                    holdingEntries.slice(0, 10).map((entry) => (
+                      <div className="daemon-list-row" key={entry.id ?? entry.path}>
+                        <strong>{entry.file_name}</strong>
+                        <span>{formatHoldingReason(entry.reason)} · {formatBytes(entry.size_bytes)}</span>
+                        <small>{entry.path}</small>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>异常队列</strong>
+                    <span>{exceptionEntries.length} 项</span>
+                  </div>
+                  {exceptionEntries.length === 0 ? (
+                    <span className="empty-text">暂无异常</span>
+                  ) : (
+                    exceptionEntries.slice(0, 10).map((entry) => (
+                      <div className="daemon-list-row" key={entry.id ?? entry.object_path}>
+                        <strong>{formatExceptionKind(entry.kind)} · {formatExceptionStatus(entry.status)}</strong>
+                        <span>{entry.object_path}</span>
+                        <small>{shortEvidence(entry.evidence_json)}</small>
+                        {entry.status === "Open" ? (
+                          <div className="daemon-row-actions">
+                            <button type="button" onClick={() => resolveDaemonException(entry.id, "Resolved")} disabled={daemonBusy !== null}>
+                              <CheckCircle2 size={14} /> 已解决
+                            </button>
+                            <button type="button" onClick={() => resolveDaemonException(entry.id, "Ignored")} disabled={daemonBusy !== null}>
+                              <X size={14} /> 忽略
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="daemon-list">
+                  <div className="daemon-list-head">
+                    <strong>最近运行</strong>
+                    <span>{pipelineRuns.length} 条</span>
+                  </div>
+                  {pipelineRuns.length === 0 ? (
+                    <span className="empty-text">暂无运行记录</span>
+                  ) : (
+                    pipelineRuns.slice(0, 10).map((run) => (
+                      <div className="daemon-list-row" key={run.id ?? run.file_path}>
+                        <strong>{formatPipelineStatus(run.status)}</strong>
+                        <span>{run.file_path}</span>
+                        <small>{run.error || run.finished_at || run.started_at || "无错误"}</small>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="diagnostics-panel">
+                  <div className="daemon-list-head">
+                    <strong>诊断日志</strong>
+                    <span>{diagnosticLogs.length} 条</span>
+                  </div>
+                  <div className="daemon-actions">
+                    <button type="button" onClick={refreshDiagnosticLogs} disabled={diagnosticsBusy !== null || !hasBackend}>
+                      <RefreshCw size={16} /> {diagnosticsBusy === "refresh" ? "刷新中" : "刷新日志"}
+                    </button>
+                    <button type="button" onClick={exportDiagnosticsSnapshot} disabled={diagnosticsBusy !== null || !hasBackend}>
+                      <Settings size={16} /> {diagnosticsBusy === "export" ? "导出中" : "导出诊断"}
+                    </button>
+                  </div>
+                  <div className="diagnostic-log-list">
+                    {diagnosticLogs.length === 0 ? (
+                      <span className="empty-text">暂无诊断日志</span>
+                    ) : (
+                      diagnosticLogs.slice(-20).map((entry, index) => (
+                        <div className={`diagnostic-log-row ${entry.level.toLowerCase()}`} key={`${entry.timestamp}-${entry.target}-${index}`}>
+                          {formatDiagnosticLogLine(entry)}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
             ) : null}
 
             {settingsTab === "cache" ? (

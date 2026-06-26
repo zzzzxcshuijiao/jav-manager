@@ -2,6 +2,7 @@ use media_manager::acceptance::{
     build_phase_f_dry_run_report, format_count_pairs, summarize_phase_f_dry_run,
 };
 use media_manager::archive::{normalized_file_name, ArchivePlanner};
+use media_manager::aria2::Aria2Settings;
 use media_manager::commands::{
     decide_items_with_provider_enabled,
     execute_archive_actions, existing_file_parent_directory, require_existing_path,
@@ -15,6 +16,7 @@ use media_manager::identifier::{extract_code_from_text, normalize_code};
 use media_manager::ingest::IngestEngine;
 use media_manager::matcher::attach_version_to_work;
 use media_manager::provider::{DisabledProvider, ExampleProvider, MetadataProvider};
+use media_manager::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
 use media_manager::scanner::{is_video_file, parse_ffprobe_media_info, should_probe_media_file, Scanner};
 use media_manager::storage::Repository;
 use media_manager::thumbnail::{
@@ -1267,6 +1269,91 @@ fn repository_defaults_metadata_provider_to_disabled_and_persists_toggle() {
 
     repo.set_metadata_provider_enabled(false).unwrap();
     assert!(!repo.get_metadata_provider_enabled().unwrap());
+}
+
+#[test]
+fn repository_defaults_and_persists_aria2_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_path = temp.path().join("library.sqlite");
+    {
+        let repo = Repository::open(&db_path).unwrap();
+        repo.migrate().unwrap();
+        let defaults = repo.get_aria2_settings().unwrap();
+        assert!(!defaults.enabled);
+        assert_eq!(defaults.host, "127.0.0.1");
+        assert_eq!(defaults.port, 6800);
+        assert_eq!(defaults.path, "/jsonrpc");
+
+        repo.set_aria2_settings(&Aria2Settings {
+            enabled: true,
+            host: " localhost ".to_string(),
+            port: 6801,
+            path: "jsonrpc".to_string(),
+            secret: Some("  ".to_string()),
+            timeout_ms: 7000,
+            poll_interval_secs: 45,
+            tracked_gids: vec![
+                " gid-1 ".to_string(),
+                "gid-1".to_string(),
+                "".to_string(),
+                "gid-2".to_string(),
+            ],
+        })
+        .unwrap();
+    }
+
+    let reopened = Repository::open(&db_path).unwrap();
+    reopened.migrate().unwrap();
+    let settings = reopened.get_aria2_settings().unwrap();
+
+    assert!(settings.enabled);
+    assert_eq!(settings.host, "localhost");
+    assert_eq!(settings.port, 6801);
+    assert_eq!(settings.path, "/jsonrpc");
+    assert_eq!(settings.secret, None);
+    assert_eq!(settings.timeout_ms, 7000);
+    assert_eq!(settings.poll_interval_secs, 45);
+    assert_eq!(settings.tracked_gids, vec!["gid-1", "gid-2"]);
+}
+
+#[test]
+fn repository_persists_remote_scraper_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&temp.path().join("library.sqlite")).unwrap();
+    repo.migrate().unwrap();
+    let settings = RemoteScraperSettings {
+        enabled: true,
+        timeout_ms: 9000,
+        user_agent: "media-manager-test".to_string(),
+        proxy_url: Some("http://127.0.0.1:8888".to_string()),
+        include_example_fallback: false,
+        sources: vec![RemoteScraperSourceSettings {
+            id: "javdb".to_string(),
+            enabled: true,
+            search_url_template: "https://example.test/search?q={code}".to_string(),
+            min_confidence: 0.88,
+        }],
+    };
+
+    let saved = repo.set_remote_scraper_settings(&settings).unwrap();
+    let loaded = repo.get_remote_scraper_settings().unwrap();
+
+    assert_eq!(saved, loaded);
+    assert_eq!(loaded.sources[0].id, "javdb");
+}
+
+#[test]
+fn repository_rejects_invalid_aria2_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&temp.path().join("library.sqlite")).unwrap();
+    repo.migrate().unwrap();
+    let mut settings = Aria2Settings::default();
+    settings.enabled = true;
+    settings.host = " ".to_string();
+
+    let error = repo.set_aria2_settings(&settings).unwrap_err();
+
+    assert!(error.to_string().contains("aria2 host is required"));
 }
 
 #[test]

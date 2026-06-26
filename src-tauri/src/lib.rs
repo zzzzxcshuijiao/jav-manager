@@ -1,17 +1,25 @@
 pub mod acceptance;
 pub mod archive;
+pub mod aria2;
 pub mod commands;
+pub mod control_service;
+pub mod control_service_host;
+pub mod daemon;
+pub mod daemon_control;
+pub mod diagnostics;
 pub mod domain;
 pub mod identifier;
 pub mod ingest;
 pub mod matcher;
 pub mod migration;
+pub mod nfo;
+pub mod pipeline;
 pub mod provider;
+pub mod remote_scraper;
 pub mod resource_pool;
 pub mod scanner;
 pub mod storage;
 pub mod thumbnail;
-pub mod nfo;
 
 pub mod library_rebuild;
 pub mod poster_index;

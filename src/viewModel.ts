@@ -2,11 +2,20 @@ import type {
   ArchiveActionLog,
   ArchivePlan,
   CodeConflictEvidence,
+  DaemonControlChannel,
+  DaemonRunOnceReport,
+  DaemonState,
+  DiagnosticExportResult,
+  DiagnosticLogEntry,
+  ExceptionKind,
+  ExceptionStatus,
   FileVersion,
+  HoldingReason,
   IngestDecision,
   IngestItem,
   IngestItemFilters,
   RebuildReport,
+  RemoteScraperSettings,
   ReviewReason,
   Work
 } from "./api";
@@ -409,6 +418,131 @@ export function formatRebuildReport(mode: RebuildMode, report: RebuildReport): s
   const verb = mode === "preview" ? "预览完成" : "重建完成";
   const errorPart = report.errors.length > 0 ? `，${report.errors.length} 个 NFO 解析失败` : "";
   return `${verb}：${report.nfos_scanned} 个 NFO，${report.works_created} 个作品，${report.works_merged} 个多文件合并组${errorPart}。`;
+}
+
+export function formatDaemonState(state: DaemonState): string {
+  const labels: Record<DaemonState, string> = {
+    Idle: "空闲",
+    Scanning: "扫描中",
+    Processing: "处理中",
+    Paused: "已暂停",
+    Error: "错误"
+  };
+  return labels[state];
+}
+
+/** Format the active daemon control channel for the settings status line. */
+export function formatDaemonChannel(channel: DaemonControlChannel): string {
+  const labels: Record<DaemonControlChannel, string> = {
+    service: "本地服务",
+    command: "命令桥",
+    none: "未连接"
+  };
+  return labels[channel];
+}
+
+/** Format remote scraper settings for compact settings-page feedback. */
+export function formatRemoteScraperSettingsSummary(settings: RemoteScraperSettings): string {
+  if (!settings.enabled) {
+    return "已停用";
+  }
+  const enabledSources = settings.sources.filter((source) => source.enabled).length;
+  const fallback = settings.include_example_fallback
+    ? "保留示例 fallback"
+    : "不使用示例 fallback";
+  return `已启用 · ${enabledSources} 个远程源 · ${fallback}`;
+}
+
+/** Format a diagnostic severity for compact log rows. */
+export function formatDiagnosticLevel(level: DiagnosticLogEntry["level"]): string {
+  const labels: Record<DiagnosticLogEntry["level"], string> = {
+    Info: "信息",
+    Warn: "警告",
+    Error: "错误"
+  };
+  return labels[level] ?? level;
+}
+
+/** Format one diagnostic log entry for the settings diagnostics list. */
+export function formatDiagnosticLogLine(entry: DiagnosticLogEntry): string {
+  return `${entry.timestamp} · ${formatDiagnosticLevel(entry.level)} · ${entry.target} · ${entry.message}`;
+}
+
+/** Format the diagnostic export result for the global status line. */
+export function formatDiagnosticExportSummary(result: DiagnosticExportResult): string {
+  return `已导出诊断快照：${result.path}（日志 ${result.logs} 条，管线 ${result.pipeline_runs} 条，刮削 ${result.scrape_jobs} 条，异常 ${result.open_exceptions} 条，搁置 ${result.holding_items} 条）`;
+}
+
+export function formatHoldingReason(reason: HoldingReason): string {
+  const labels: Record<HoldingReason, string> = {
+    NoCode: "缺少番号",
+    ShortVideo: "短视频",
+    NonJapanese: "非日系内容",
+    Unrecognizable: "无法识别"
+  };
+  return labels[reason];
+}
+
+export function formatExceptionKind(kind: ExceptionKind): string {
+  const labels: Record<ExceptionKind, string> = {
+    CodeConflict: "番号冲突",
+    DuplicateCandidate: "重复候选",
+    ScrapeFailed: "刮削失败"
+  };
+  return labels[kind];
+}
+
+export function formatExceptionStatus(status: ExceptionStatus): string {
+  const labels: Record<ExceptionStatus, string> = {
+    Open: "待处理",
+    Ignored: "已忽略",
+    Resolved: "已解决"
+  };
+  return labels[status];
+}
+
+export function formatPipelineStatus(status: string): string {
+  const labels: Record<string, string> = {
+    running: "运行中",
+    archived: "已归档",
+    holding: "已搁置",
+    exception: "异常",
+    failed: "失败"
+  };
+  return labels[status] ?? status;
+}
+
+export function summarizeRunOnceReport(report: DaemonRunOnceReport): string {
+  const sections = [
+    `扫描 ${report.scan.scanned_files} 个文件，入队 ${report.scan.queued_files} 个，跳过 ${report.scan.skipped_files} 个`,
+    `处理 ${report.process.processed} 个：归档 ${report.process.archived}，搁置 ${report.process.holding}，异常 ${report.process.exceptions}，失败 ${report.process.failed}。`
+  ];
+  const aria2 = report.aria2;
+  const hasAria2Activity = aria2
+    ? aria2.attempted_gids > 0 ||
+      aria2.completed_gids > 0 ||
+      aria2.queued_files > 0 ||
+      aria2.skipped_files > 0 ||
+      aria2.failed_gids > 0
+    : false;
+  if (aria2?.enabled && hasAria2Activity) {
+    const skipped = aria2.skipped_files > 0 ? `，跳过 ${aria2.skipped_files} 个` : "";
+    sections.unshift(
+      `aria2 尝试 ${aria2.attempted_gids} 个 GID，完成 ${aria2.completed_gids} 个，入队 ${aria2.queued_files} 个${skipped}，失败 ${aria2.failed_gids} 个`
+    );
+  }
+  return sections.join("；");
+}
+
+export function shortEvidence(value: string | null | undefined, maxLength = 120): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "无证据";
+  }
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 // --- Library browse layer helpers (Phase H follow-up) ---

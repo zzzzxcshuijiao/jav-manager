@@ -200,7 +200,6 @@ pub struct WorkProfile {
     pub status: WatchStatus,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub id: Option<i64>,
@@ -388,15 +387,38 @@ pub enum ScrapeStatus {
     Failed,
 }
 
+/// One scraper attempt. Stage 2 allows this row to exist before a work exists,
+/// so failed lookups can be audited without creating placeholder works.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrapeJob {
     pub id: Option<i64>,
-    pub work_id: i64,
+    pub work_id: Option<i64>,
+    pub normalized_code: Option<String>,
+    pub object_path: Option<String>,
+    pub pipeline_run_id: Option<i64>,
     pub source: String,
     pub status: ScrapeStatus,
     pub attempts: i64,
     pub last_attempted_at: Option<String>,
     pub error: Option<String>,
+}
+
+/// Normalized metadata returned by one scraper source. It is intentionally
+/// local-path based for artwork in Stage 2; network downloads stay behind the
+/// scraper adapter boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrapedWorkMetadata {
+    pub source: String,
+    pub normalized_code: String,
+    pub title: String,
+    pub original_title: Option<String>,
+    pub summary: Option<String>,
+    pub actors: Vec<String>,
+    pub genres: Vec<String>,
+    pub studio: Option<String>,
+    pub director: Option<String>,
+    pub release_date: Option<String>,
+    pub cover_path: Option<PathBuf>,
 }
 
 /// The kind of issue an exception row represents. Drives the review-queue UI:
@@ -468,6 +490,27 @@ pub struct PipelineRun {
     pub error: Option<String>,
 }
 
+/// One visible step in a pipeline run. Stored as JSON in `pipeline_runs` so the
+/// daemon and UI can show progress without schema changes for every new step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineStepRecord {
+    pub step: String,
+    pub status: String,
+    pub message: Option<String>,
+}
+
+/// High-level result of processing one completed file. Exactly one of
+/// `work_id`, `holding_id`, or `exception_id` is populated for terminal states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PipelineOutcome {
+    pub status: String,
+    pub work_id: Option<i64>,
+    pub archived_video_path: Option<PathBuf>,
+    pub holding_id: Option<i64>,
+    pub exception_id: Option<i64>,
+    pub steps: Vec<PipelineStepRecord>,
+}
+
 /// A user-defined collection. Many-to-many with works through `work_collections`:
 /// a work can belong to several collections, and each collection groups many works.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,4 +520,43 @@ pub struct Collection {
     pub color: Option<String>,
     pub sort_order: i64,
     pub created_at: Option<String>,
+}
+
+/// A single file that the pipeline is allowed to process. It is created only
+/// after completion checks pass, so downstream steps can treat the file as
+/// immutable for this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompletedFile {
+    pub path: PathBuf,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub file_hash: Option<String>,
+}
+
+impl CompletedFile {
+    /// Build a completed-file snapshot from filesystem metadata and the
+    /// bounded sample fingerprint used by the existing scanner.
+    pub fn from_path(path: &std::path::Path) -> anyhow::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(Self {
+            path: path.to_path_buf(),
+            file_name,
+            size_bytes: metadata.len(),
+            file_hash: crate::scanner::sample_file_fingerprint(path).ok(),
+        })
+    }
+}
+
+/// One non-video file copied into a self-contained archive directory. The
+/// target is relative to the work directory so the executor can validate that
+/// every write stays below `<archive_root>/<code>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveAsset {
+    pub source_path: PathBuf,
+    pub relative_target: PathBuf,
 }
