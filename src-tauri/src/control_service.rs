@@ -12,13 +12,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
+pub const CONTROL_SERVICE_DISCOVERY_FILE: &str = "control-service.json";
 
 /// Configuration for the Stage 5A loopback control service. It contains only
 /// local runtime values; product-level persistence remains in SQLite settings.
@@ -42,6 +43,20 @@ pub struct ControlServiceDiscovery {
     pub token: String,
     pub pid: u32,
     pub created_at: String,
+}
+
+/// Return the Stage 5B discovery document path under the application data dir.
+pub fn control_service_discovery_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(CONTROL_SERVICE_DISCOVERY_FILE)
+}
+
+/// Read the advertised control service discovery document, if one exists.
+pub fn read_control_service_discovery(path: &Path) -> Result<Option<ControlServiceDiscovery>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&raw)?))
 }
 
 /// In-process runtime for handling control API requests. Stage 5A keeps this

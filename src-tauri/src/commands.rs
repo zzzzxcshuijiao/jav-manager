@@ -1,4 +1,7 @@
 use crate::archive::ArchivePlanner;
+use crate::control_service::{
+    control_service_discovery_path, read_control_service_discovery, ControlServiceDiscovery,
+};
 use crate::daemon::RunOnceReport;
 use crate::daemon_control::{
     build_daemon_status, list_exception_entries as read_exception_entries,
@@ -152,6 +155,18 @@ pub fn get_metadata_provider_enabled(
             .metadata_provider_enabled
             .lock()
             .map_err(|error| error.to_string())?,
+    })
+}
+
+/// Read the Stage 5A loopback control service discovery document from app data.
+#[tauri::command]
+pub fn get_control_service_discovery(
+    app: tauri::AppHandle,
+) -> Result<CommandResult<Option<ControlServiceDiscovery>>, String> {
+    let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let discovery_path = control_service_discovery_path(&app_data);
+    Ok(CommandResult {
+        data: read_control_service_discovery(&discovery_path).map_err(|error| error.to_string())?,
     })
 }
 
@@ -1400,6 +1415,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_archive_root,
             configure_metadata_provider_enabled,
             get_metadata_provider_enabled,
+            get_control_service_discovery,
             get_daemon_status,
             pause_daemon,
             resume_daemon,

@@ -1,4 +1,7 @@
-use media_manager::control_service::{ControlServiceConfig, ControlServiceRuntime};
+use media_manager::control_service::{
+    control_service_discovery_path, read_control_service_discovery, ControlServiceConfig,
+    ControlServiceDiscovery, ControlServiceRuntime, CONTROL_SERVICE_DISCOVERY_FILE,
+};
 use media_manager::domain::{
     Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
 };
@@ -51,6 +54,43 @@ fn discovery_document_contains_bound_endpoint_and_token() {
     assert_eq!(discovery.token, "stage5-token");
     assert_eq!(discovery.base_url, "http://127.0.0.1:45123");
     assert_eq!(discovery.service, "media-manager-control");
+}
+
+#[test]
+fn discovery_file_helpers_read_missing_valid_and_corrupt_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let discovery_path = control_service_discovery_path(tmp.path());
+
+    assert_eq!(
+        discovery_path,
+        tmp.path().join(CONTROL_SERVICE_DISCOVERY_FILE)
+    );
+    assert!(read_control_service_discovery(&discovery_path)
+        .unwrap()
+        .is_none());
+
+    let discovery = ControlServiceDiscovery {
+        service: "media-manager-control".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 45123,
+        base_url: "http://127.0.0.1:45123".to_string(),
+        token: "stage5-token".to_string(),
+        pid: 123,
+        created_at: "2026-06-26T00:00:00Z".to_string(),
+    };
+    std::fs::write(
+        &discovery_path,
+        serde_json::to_string(&discovery).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_control_service_discovery(&discovery_path).unwrap(),
+        Some(discovery)
+    );
+
+    std::fs::write(&discovery_path, "{not-json").unwrap();
+    assert!(read_control_service_discovery(&discovery_path).is_err());
 }
 
 fn request(port: u16, raw: &str) -> String {
