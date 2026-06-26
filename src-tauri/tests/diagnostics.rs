@@ -157,7 +157,7 @@ fn diagnostic_snapshot_exports_redacted_settings_and_recent_rows() {
         finished_at: Some("2026-06-26T00:00:01Z".to_string()),
         steps_json: "[]".to_string(),
         status: "completed".to_string(),
-        error: None,
+        error: Some("http://user:pass@127.0.0.1:8888/proxy failed".to_string()),
     })
     .unwrap();
     repo.record_scrape_job(&ScrapeJob {
@@ -170,14 +170,16 @@ fn diagnostic_snapshot_exports_redacted_settings_and_recent_rows() {
         status: ScrapeStatus::Failed,
         attempts: 1,
         last_attempted_at: Some("2026-06-26T00:00:00Z".to_string()),
-        error: Some("fixture failure".to_string()),
+        error: Some("{\"authorization\":\"Bearer scrape-secret\"}".to_string()),
     })
     .unwrap();
     repo.record_exception(&Exception {
         id: None,
         object_path: "H:/fake/ABP-001.mp4".to_string(),
         kind: ExceptionKind::ScrapeFailed,
-        evidence_json: "{}".to_string(),
+        evidence_json:
+            "{\"token\":\"exception-secret\",\"proxy_url\":\"http://user:pass@127.0.0.1:8888\"}"
+                .to_string(),
         status: ExceptionStatus::Open,
         created_at: None,
         resolved_at: None,
@@ -220,5 +222,7 @@ fn diagnostic_snapshot_exports_redacted_settings_and_recent_rows() {
     assert!(exported.contains("\"aria2_secret_configured\": true"));
     assert!(exported.contains("http://***@127.0.0.1:8888"));
     assert!(!exported.contains("aria-secret"));
+    assert!(!exported.contains("exception-secret"));
+    assert!(!exported.contains("scrape-secret"));
     assert!(!exported.contains("user:pass"));
 }

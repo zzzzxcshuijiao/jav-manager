@@ -260,12 +260,12 @@ pub fn build_diagnostic_snapshot(input: DiagnosticSnapshotInput<'_>) -> Result<D
     Ok(DiagnosticSnapshot {
         generated_at: Utc::now().to_rfc3339(),
         app_data_dir: input.app_data_dir.to_string_lossy().to_string(),
-        control_service: input.control_service,
-        daemon: input.daemon,
+        control_service: input.control_service.map(redact_control_service_status),
+        daemon: input.daemon.map(redact_daemon_status),
         settings,
-        recent_pipeline_runs,
-        recent_scrape_jobs,
-        open_exceptions,
+        recent_pipeline_runs: redact_pipeline_runs(recent_pipeline_runs),
+        recent_scrape_jobs: redact_scrape_jobs(recent_scrape_jobs),
+        open_exceptions: redact_exceptions(open_exceptions),
         holding_items,
         recent_logs: input.recent_logs,
     })
@@ -312,4 +312,60 @@ fn build_settings_summary(repo: &Repository) -> Result<DiagnosticSettingsSummary
         remote_scraper_sources: remote_scraper.sources.len(),
         remote_scraper_proxy_url: remote_scraper.proxy_url.as_deref().map(redact_proxy_url),
     })
+}
+
+fn redact_control_service_status(
+    mut status: ControlServiceHostStatus,
+) -> ControlServiceHostStatus {
+    status.last_error = status
+        .last_error
+        .map(|value| redact_diagnostic_text(&value));
+    status
+}
+
+fn redact_daemon_status(mut status: DaemonControlStatus) -> DaemonControlStatus {
+    status.last_error = status
+        .last_error
+        .map(|value| redact_diagnostic_text(&value));
+    status
+}
+
+fn redact_pipeline_runs(runs: Vec<PipelineRun>) -> Vec<PipelineRun> {
+    runs.into_iter()
+        .map(|mut run| {
+            run.error = run.error.map(|value| redact_diagnostic_text(&value));
+            run
+        })
+        .collect()
+}
+
+fn redact_scrape_jobs(jobs: Vec<ScrapeJob>) -> Vec<ScrapeJob> {
+    jobs.into_iter()
+        .map(|mut job| {
+            job.error = job.error.map(|value| redact_diagnostic_text(&value));
+            job
+        })
+        .collect()
+}
+
+fn redact_exceptions(exceptions: Vec<Exception>) -> Vec<Exception> {
+    exceptions
+        .into_iter()
+        .map(|mut entry| {
+            entry.evidence_json = redact_diagnostic_text(&entry.evidence_json);
+            entry
+        })
+        .collect()
+}
+
+fn redact_diagnostic_text(value: &str) -> String {
+    if let Ok(json) = serde_json::from_str::<Value>(value) {
+        return serde_json::to_string(&redact_diagnostic_value(json))
+            .unwrap_or_else(|_| "***".to_string());
+    }
+    value
+        .split_whitespace()
+        .map(redact_proxy_url)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
