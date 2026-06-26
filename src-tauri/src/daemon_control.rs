@@ -2,6 +2,10 @@ use crate::aria2::{Aria2Transport, HttpAria2Transport};
 use crate::daemon::{CompletionPolicy, DaemonConfig, HeadlessDaemon, RunOnceReport};
 use crate::domain::{Exception, ExceptionStatus, HoldingEntry, PipelineRun, ScrapedWorkMetadata};
 use crate::pipeline::{ScrapeCoordinator, ScraperSource};
+use crate::remote_scraper::{
+    build_remote_scraper_sources, HttpRemoteMetadataClient, RemoteMetadataHttpClient,
+    RemoteScraperSettings,
+};
 use crate::storage::Repository;
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -68,6 +72,54 @@ impl ScraperSource for ExamplePipelineScraper {
             release_date: None,
             cover_path: None,
         }))
+    }
+}
+
+/// Owns scraper instances long enough to lend them to `ScrapeCoordinator`.
+pub struct ConfiguredPipelineScrapers {
+    sources: Vec<Box<dyn ScraperSource>>,
+}
+
+impl ConfiguredPipelineScrapers {
+    /// Build production scraper sources from repository settings.
+    pub fn from_repository(repo: &Repository, metadata_enabled: bool) -> Result<Self> {
+        let settings = repo.get_remote_scraper_settings()?;
+        let client = HttpRemoteMetadataClient::from_settings(&settings)?;
+        Self::with_remote_client(&settings, metadata_enabled, client)
+    }
+
+    /// Build scraper sources with an injected client for tests.
+    pub fn with_remote_client<C>(
+        settings: &RemoteScraperSettings,
+        metadata_enabled: bool,
+        remote_client: C,
+    ) -> Result<Self>
+    where
+        C: RemoteMetadataHttpClient + Clone + 'static,
+    {
+        if !metadata_enabled {
+            bail!("示例元数据源未开启，阶段 4 不会用空 scraper 处理真实文件");
+        }
+        let normalized = settings.normalized()?;
+        let mut sources = build_remote_scraper_sources(&normalized, remote_client)?;
+        if normalized.include_example_fallback {
+            sources.push(Box::new(ExamplePipelineScraper));
+        }
+        if sources.is_empty() {
+            bail!("没有可用元数据源，自动管线不会处理真实文件");
+        }
+        Ok(Self { sources })
+    }
+
+    /// Borrow scraper sources for the pipeline coordinator.
+    pub fn coordinator(&self) -> ScrapeCoordinator<'_> {
+        ScrapeCoordinator {
+            sources: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref())
+                .collect(),
+        }
     }
 }
 
@@ -138,21 +190,42 @@ pub fn run_daemon_once_with_aria2_transport<T: Aria2Transport>(
     metadata_enabled: bool,
     aria2_transport: T,
 ) -> Result<RunOnceReport> {
+    let remote_settings = repo.get_remote_scraper_settings()?;
+    let remote_client = HttpRemoteMetadataClient::from_settings(&remote_settings)?;
+    run_daemon_once_with_transports(
+        repo,
+        runtime,
+        metadata_enabled,
+        aria2_transport,
+        remote_client,
+    )
+}
+
+/// Run one daemon pass with injectable aria2 and remote scraper transports for tests.
+pub fn run_daemon_once_with_transports<T, C>(
+    repo: &Repository,
+    runtime: &mut DaemonControlRuntime,
+    metadata_enabled: bool,
+    aria2_transport: T,
+    remote_client: C,
+) -> Result<RunOnceReport>
+where
+    T: Aria2Transport,
+    C: RemoteMetadataHttpClient + Clone + 'static,
+{
     if runtime.paused {
         return Ok(RunOnceReport::default());
     }
-    if !metadata_enabled {
-        bail!("示例元数据源未开启，阶段 4 不会用空 scraper 处理真实文件");
-    }
 
-    let scraper = ExamplePipelineScraper;
+    let remote_settings = repo.get_remote_scraper_settings()?;
+    let scrapers =
+        ConfiguredPipelineScrapers::with_remote_client(&remote_settings, metadata_enabled, remote_client)?;
     let config = DaemonConfig::load(repo)?;
+    let coordinator = scrapers.coordinator();
     let mut daemon = HeadlessDaemon::with_completion_policy(
         repo,
         config,
-        ScrapeCoordinator {
-            sources: vec![&scraper],
-        },
+        coordinator,
         CompletionPolicy {
             sample_delay: Duration::ZERO,
         },

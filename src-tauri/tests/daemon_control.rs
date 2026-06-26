@@ -2,12 +2,15 @@ use media_manager::aria2::{Aria2RpcEndpoint, Aria2Settings, Aria2Transport};
 use media_manager::daemon_control::{
     build_daemon_status, list_exception_entries, list_holding_entries, list_recent_pipeline_runs,
     resolve_exception_entry, run_daemon_once, run_daemon_once_with_aria2_transport,
-    DaemonControlRuntime, ExamplePipelineScraper, MetadataSource,
+    run_daemon_once_with_transports, DaemonControlRuntime, ExamplePipelineScraper, MetadataSource,
 };
 use media_manager::domain::{
     Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
 };
 use media_manager::pipeline::ScraperSource;
+use media_manager::remote_scraper::{
+    RemoteMetadataHttpClient, RemoteScraperSettings, RemoteScraperSourceSettings,
+};
 use media_manager::storage::Repository;
 use std::path::{Path, PathBuf};
 
@@ -19,6 +22,17 @@ struct CommandAria2Transport {
 impl Aria2Transport for CommandAria2Transport {
     fn post_json(&self, _endpoint: &Aria2RpcEndpoint, _body: &str) -> anyhow::Result<String> {
         Ok(self.response.clone())
+    }
+}
+
+#[derive(Clone)]
+struct CommandRemoteClient {
+    html: String,
+}
+
+impl RemoteMetadataHttpClient for CommandRemoteClient {
+    fn get_text(&self, _url: &str) -> anyhow::Result<String> {
+        Ok(self.html.clone())
     }
 }
 
@@ -186,6 +200,46 @@ fn run_once_polls_configured_aria2_gid_before_directory_scan() {
     assert_eq!(report.aria2.queued_files, 1);
     assert_eq!(report.process.archived, 1);
     assert!(archive.join("ABP-404").join("ABP-404.mp4").exists());
+}
+
+#[test]
+fn run_once_uses_configured_remote_scraper_before_example_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, archive, _assets) = configured_repo(&tmp);
+    let video = inbox.join("ABP-600.mp4");
+    std::fs::write(&video, b"stable video bytes").unwrap();
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: true,
+        include_example_fallback: true,
+        sources: vec![RemoteScraperSourceSettings {
+            id: "javdb".to_string(),
+            enabled: true,
+            search_url_template: "https://example.test/search?q={code}".to_string(),
+            min_confidence: 0.86,
+        }],
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
+    let mut runtime = DaemonControlRuntime::default();
+    let html = r#"<script type="application/ld+json">{"@type":"Movie","name":"Remote Pipeline Title","actor":"Actor R"}</script>"#;
+
+    let report = run_daemon_once_with_transports(
+        &repo,
+        &mut runtime,
+        true,
+        CommandAria2Transport {
+            response: "{}".to_string(),
+        },
+        CommandRemoteClient {
+            html: html.to_string(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.process.archived, 1);
+    let works = repo.list_works().unwrap();
+    assert_eq!(works[0].title_zh, Some("Remote Pipeline Title".to_string()));
+    assert!(archive.join("ABP-600").join("ABP-600.mp4").exists());
 }
 
 #[test]

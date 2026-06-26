@@ -400,6 +400,26 @@ impl<C: RemoteMetadataHttpClient> crate::pipeline::ScraperSource for RemoteScrap
     }
 }
 
+/// Build enabled remote scraper sources from normalized settings and a reusable client.
+pub fn build_remote_scraper_sources<C>(
+    settings: &RemoteScraperSettings,
+    client: C,
+) -> Result<Vec<Box<dyn crate::pipeline::ScraperSource>>>
+where
+    C: RemoteMetadataHttpClient + Clone + 'static,
+{
+    let mut sources: Vec<Box<dyn crate::pipeline::ScraperSource>> = Vec::new();
+    for source in settings.enabled_sources()? {
+        let config = RemoteScraperConfig::new(
+            &source.id,
+            &source.search_url_template,
+            source.min_confidence,
+        )?;
+        sources.push(Box::new(RemoteScraperSource::new(config, client.clone())));
+    }
+    Ok(sources)
+}
+
 /// Parse one remote page using the parser associated with the source id.
 pub fn parse_remote_source_metadata(
     source_name: &str,
