@@ -40,6 +40,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 6D（真实 scraper adapter 可验证接入）已实现并验证。**
 阶段 6D 新增远程 scraper settings、真实 HTTPS-capable HTTP client、javdb/javbus/fanza adapter registry、checked-in HTML fixtures、run-once 远程 source 接入、Tauri 设置命令、前端“自动管线”里的远程刮削器配置表单。验证使用 fake client、本地 TCP server、临时 SQLite 和 fixture HTML，不访问真实 scraper 站点，不处理登录/cookie/验证码/反爬，也不下载封面。默认远程 scraper disabled，example fallback 默认保留；用户显式启用远程 source 后，run-once 会优先尝试远程 metadata，再按配置 fallback。
 
+**阶段 6E（日志与诊断系统）已实现并验证。**
+阶段 6E 新增本地结构化 JSONL 诊断日志、日志 tail、简单轮转、脱敏诊断快照导出、Tauri 诊断命令、关键命令边界事件记录，以及前端“自动管线”里的诊断日志/导出诊断块。日志写入 best-effort，不阻断保存配置或 run-once；诊断导出默认写到 app data 的 `diagnostics/diagnostics-*.json`，日志位于 app data 的 `logs/media-manager.jsonl`。验证使用临时目录、临时 SQLite 和假数据，不依赖真实资源；导出会脱敏 secret/token/password/authorization/cookie/proxy credentials，不导出媒体、NFO、封面或缩略图内容。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -50,6 +53,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo test --manifest-path src-tauri/Cargo.toml --test control_service -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test control_service_host -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test remote_scraper -j 1`
+- `cargo test --manifest-path src-tauri/Cargo.toml --test diagnostics -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`
 - `npm test`
 - `npx tsc --noEmit`
@@ -108,6 +112,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 20. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6c-aria2-config-polling.md`** — 阶段 6C plan（已完成，含 TDD 步骤与验收）。
 21. **`docs/superpowers/specs/2026-06-26-media-manager-stage6d-real-scraper-adapter-design.md`** — 阶段 6D 真实 scraper adapter 可验证接入设计（已完成）。
 22. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6d-real-scraper-adapter.md`** — 阶段 6D plan（已完成，含 TDD 步骤与验收）。
+23. **`docs/superpowers/specs/2026-06-26-media-manager-stage6e-logging-diagnostics-design.md`** — 阶段 6E 日志与诊断系统设计（已完成）。
+24. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6e-logging-diagnostics.md`** — 阶段 6E plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -219,6 +225,19 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 设置页“自动管线”新增远程刮削器配置块：总开关、User-Agent、timeout、proxy URL、example fallback、source enable/template/confidence，保存按钮有 loading/disabled/status 反馈。
 - 新增/更新测试：`remote_scraper`、`core_behaviour`、`daemon_control`、`commands` unit、`viewModel.test.ts`；完整 gate 通过 `cargo test`、`npm test`、`npx tsc --noEmit`、`npm run build`。
 
+## 阶段 6E 交付物
+
+- 新增 `src-tauri/src/diagnostics.rs`：`DiagnosticLevel`、`DiagnosticLogEntry`、`DiagnosticsWriter`、`DiagnosticSnapshot`、`DiagnosticExportResult`、redaction helper、snapshot builder 和 export helper。
+- `DiagnosticsWriter` 写入 app data `logs/media-manager.jsonl`，支持 tail 读取、最大 200 条返回、简单文件轮转和上下文脱敏。
+- 诊断快照汇总控制服务状态、daemon 状态、脱敏 settings、最近 pipeline runs、scrape jobs、open exceptions、holding items 和最近日志；导出为 app data `diagnostics/diagnostics-*.json`。
+- 快照导出会脱敏 structured context、settings proxy、业务行错误字段、exception evidence JSON、control/daemon last_error 中的 secret/token/password/authorization/cookie/proxy credentials。
+- `AppState` 新增 optional diagnostics writer；Tauri setup 初始化 writer 并记录 app/setup/control-service 事件，失败不阻断应用。
+- `commands.rs` 新增并注册 `get_diagnostic_log_tail`、`export_diagnostics_snapshot_command`，并记录 aria2 settings、remote scraper settings、pause/resume、run-once start/success/failure 事件。
+- `src/api.ts` 新增诊断 DTO 和 API wrapper；`src/viewModel.ts` 新增诊断日志/导出摘要格式化 helper。
+- 设置页“自动管线”新增诊断块：刷新日志、导出诊断、最近日志列表，按钮有 loading/disabled/status 反馈。
+- 新增 `src-tauri/tests/diagnostics.rs`，覆盖 JSONL append/tail/rotation/redaction、快照导出、业务行敏感字段脱敏；更新 `commands` unit 与 `viewModel.test.ts`。
+- 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -241,9 +260,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，以及远程刮削器配置保存后，启用的 source 是否在 `run-once` 中优先写入远程 metadata。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
+如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，远程刮削器配置保存后启用的 source 是否在 `run-once` 中优先写入远程 metadata，以及“诊断日志/导出诊断”是否生成 `logs/media-manager.jsonl` 和 `diagnostics/diagnostics-*.json`。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
 
-如果继续做 Codex 可编码工作，建议下一步二选一：一是 **阶段 6E metadata 真实环境反馈闭环**（基于用户实际验证结果补 parser fallback、错误可视化、scrape job 面板、metadata retry），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，建议下一步二选一：一是 **阶段 6F 真实环境反馈闭环**（基于用户实际验证结果补 parser fallback、错误可视化、scrape job 面板、metadata retry、诊断导出可读性），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
