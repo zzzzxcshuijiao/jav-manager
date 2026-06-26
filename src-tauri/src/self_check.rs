@@ -1,10 +1,16 @@
 use crate::aria2::Aria2Settings;
+use crate::aria2::{Aria2RpcEndpoint, Aria2Transport};
 use crate::control_service_host::ControlServiceHostStatus;
-use crate::daemon_control::DaemonControlStatus;
-use crate::remote_scraper::RemoteScraperSettings;
+use crate::daemon_control::{
+    run_daemon_once_with_transports, DaemonControlRuntime, DaemonControlStatus,
+};
+use crate::remote_scraper::{RemoteMetadataHttpClient, RemoteScraperSettings};
 use crate::storage::Repository;
 use anyhow::Result;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Severity of one self-check item. Serialized in lowercase so TypeScript can
 /// use a compact string union without additional mapping.
@@ -103,6 +109,27 @@ pub fn summarize_overall(checks: &[SelfCheckItem]) -> SelfCheckOverall {
     SelfCheckOverall::Pass
 }
 
+/// Run the full self-check: configuration checks plus an isolated sandbox
+/// archive pass. The sandbox uses its own SQLite and never writes real library rows.
+pub fn run_pipeline_self_check(
+    app_data_dir: &Path,
+    repo: &Repository,
+    control_service: Option<ControlServiceHostStatus>,
+    daemon: Option<DaemonControlStatus>,
+    diagnostics_available: bool,
+) -> Result<SelfCheckReport> {
+    let mut checks =
+        build_config_self_check_items(repo, control_service, daemon, diagnostics_available)?;
+    let sandbox = run_sandbox_archive_check(app_data_dir, &mut checks);
+    let overall = summarize_overall(&checks);
+    Ok(SelfCheckReport {
+        generated_at: Utc::now().to_rfc3339(),
+        overall,
+        checks,
+        sandbox,
+    })
+}
+
 /// Return whether any metadata source can feed the automatic pipeline.
 pub fn metadata_source_available(
     metadata_provider_enabled: bool,
@@ -161,10 +188,7 @@ fn check_configured_roots(repo: &Repository) -> Result<SelfCheckItem> {
             id: "configured_roots".to_string(),
             title: "真实目录配置".to_string(),
             severity: SelfCheckSeverity::Pass,
-            message: format!(
-                "已配置 {} 个来源目录和归档根目录。",
-                source_roots.len()
-            ),
+            message: format!("已配置 {} 个来源目录和归档根目录。", source_roots.len()),
             action: None,
         })
     } else {
@@ -195,7 +219,10 @@ fn check_metadata_source(repo: &Repository) -> Result<SelfCheckItem> {
             title: "元数据源".to_string(),
             severity: SelfCheckSeverity::Fail,
             message: "没有可用元数据源，自动管线不会处理真实文件。".to_string(),
-            action: Some("启用示例元数据源、保留示例 fallback，或启用至少一个远程 scraper source。".to_string()),
+            action: Some(
+                "启用示例元数据源、保留示例 fallback，或启用至少一个远程 scraper source。"
+                    .to_string(),
+            ),
         })
     }
 }
@@ -209,7 +236,9 @@ fn check_aria2_settings(settings: &Aria2Settings) -> SelfCheckItem {
                 title: "aria2 配置".to_string(),
                 severity: SelfCheckSeverity::Fail,
                 message: format!("aria2 配置无法归一化：{error}。"),
-                action: Some("修正 aria2 主机、端口、RPC 路径、超时或轮询间隔后重新保存。".to_string()),
+                action: Some(
+                    "修正 aria2 主机、端口、RPC 路径、超时或轮询间隔后重新保存。".to_string(),
+                ),
             }
         }
     };
@@ -247,7 +276,10 @@ fn check_aria2_settings(settings: &Aria2Settings) -> SelfCheckItem {
         id: "aria2_settings".to_string(),
         title: "aria2 配置".to_string(),
         severity: SelfCheckSeverity::Pass,
-        message: format!("aria2 已启用并跟踪 {} 个 GID。", normalized.tracked_gids.len()),
+        message: format!(
+            "aria2 已启用并跟踪 {} 个 GID。",
+            normalized.tracked_gids.len()
+        ),
         action: None,
     }
 }
@@ -261,7 +293,10 @@ fn check_remote_scraper_settings(settings: &RemoteScraperSettings) -> SelfCheckI
                 title: "远程刮削器配置".to_string(),
                 severity: SelfCheckSeverity::Fail,
                 message: format!("远程刮削器配置无效：{error}。"),
-                action: Some("检查 source URL 模板是否包含 {code}，以及置信度是否在 0 到 1 之间。".to_string()),
+                action: Some(
+                    "检查 source URL 模板是否包含 {code}，以及置信度是否在 0 到 1 之间。"
+                        .to_string(),
+                ),
             }
         }
     };
@@ -282,7 +317,8 @@ fn check_remote_scraper_settings(settings: &RemoteScraperSettings) -> SelfCheckI
             id: "remote_scraper_settings".to_string(),
             title: "远程刮削器配置".to_string(),
             severity: SelfCheckSeverity::Fail,
-            message: "远程刮削器已启用，但没有启用任何 source，且示例 fallback 已关闭。".to_string(),
+            message: "远程刮削器已启用，但没有启用任何 source，且示例 fallback 已关闭。"
+                .to_string(),
             action: Some("启用至少一个远程 source，或重新打开示例 fallback。".to_string()),
         };
     }
@@ -302,7 +338,10 @@ fn check_remote_scraper_settings(settings: &RemoteScraperSettings) -> SelfCheckI
         title: "远程刮削器配置".to_string(),
         severity: SelfCheckSeverity::Pass,
         message: if normalized.enabled {
-            format!("远程刮削器配置可用：{} 个 source 已启用。", enabled_sources.len())
+            format!(
+                "远程刮削器配置可用：{} 个 source 已启用。",
+                enabled_sources.len()
+            )
         } else if normalized.include_example_fallback {
             "远程刮削器未启用，示例 fallback 可用于基础归档验证。".to_string()
         } else {
@@ -329,5 +368,112 @@ fn check_diagnostics(diagnostics_available: bool) -> SelfCheckItem {
             message: "诊断日志 writer 不可用，自检仍可运行但排障信息会减少。".to_string(),
             action: Some("重启应用后再导出诊断快照。".to_string()),
         }
+    }
+}
+
+fn run_sandbox_archive_check(
+    app_data_dir: &Path,
+    checks: &mut Vec<SelfCheckItem>,
+) -> Option<SelfCheckSandboxSummary> {
+    match try_run_sandbox_archive_check(app_data_dir) {
+        Ok(summary) => {
+            checks.push(SelfCheckItem {
+                id: "sandbox_archive".to_string(),
+                title: "沙盒归档".to_string(),
+                severity: SelfCheckSeverity::Pass,
+                message: "沙盒视频已成功归档，自动管线核心链路可用。".to_string(),
+                action: None,
+            });
+            Some(summary)
+        }
+        Err(error) => {
+            checks.push(SelfCheckItem {
+                id: "sandbox_archive".to_string(),
+                title: "沙盒归档".to_string(),
+                severity: SelfCheckSeverity::Fail,
+                message: format!("沙盒归档未完成：{error}。"),
+                action: Some("导出诊断快照并检查自动管线最近运行记录。".to_string()),
+            });
+            None
+        }
+    }
+}
+
+fn try_run_sandbox_archive_check(app_data_dir: &Path) -> Result<SelfCheckSandboxSummary> {
+    let root = unique_sandbox_root(app_data_dir);
+    let inbox = root.join("inbox");
+    let archive = root.join("archive");
+    let assets = root.join("assets");
+    fs::create_dir_all(&inbox)?;
+    fs::create_dir_all(&archive)?;
+    fs::create_dir_all(&assets)?;
+
+    let video_path = inbox.join("MMT-001.mp4");
+    fs::write(&video_path, b"stable self-check video bytes")?;
+
+    let repo = Repository::open(&root.join("library.sqlite"))?;
+    repo.migrate()?;
+    repo.set_source_roots(&[inbox.clone()])?;
+    repo.set_archive_root(&archive)?;
+    repo.set_resource_pool_dirs(&[assets])?;
+    repo.set_metadata_provider_enabled(false)?;
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: true,
+        ..RemoteScraperSettings::default()
+    })?;
+    repo.set_aria2_settings(&Aria2Settings::default())?;
+
+    let mut runtime = DaemonControlRuntime::default();
+    let report = run_daemon_once_with_transports(
+        &repo,
+        &mut runtime,
+        false,
+        SelfCheckAria2Transport,
+        SelfCheckRemoteClient,
+    )?;
+    let run = repo.list_pipeline_runs()?.into_iter().next();
+    let archived_path = archive.join("MMT-001").join("MMT-001.mp4");
+    if report.process.archived != 1 || !archived_path.exists() {
+        anyhow::bail!(
+            "expected one archived sandbox video, got archived={}",
+            report.process.archived
+        );
+    }
+
+    Ok(SelfCheckSandboxSummary {
+        root: path_to_string(root),
+        inbox: path_to_string(inbox),
+        archive: path_to_string(archive),
+        video_path: path_to_string(video_path),
+        archived_path: Some(path_to_string(archived_path)),
+        pipeline_status: run.map(|value| value.status),
+    })
+}
+
+fn unique_sandbox_root(app_data_dir: &Path) -> PathBuf {
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S%.3f");
+    app_data_dir.join("self-check").join(stamp.to_string())
+}
+
+fn path_to_string(path: PathBuf) -> String {
+    path.to_string_lossy().to_string()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelfCheckAria2Transport;
+
+impl Aria2Transport for SelfCheckAria2Transport {
+    fn post_json(&self, _endpoint: &Aria2RpcEndpoint, _body: &str) -> Result<String> {
+        Ok("{}".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelfCheckRemoteClient;
+
+impl RemoteMetadataHttpClient for SelfCheckRemoteClient {
+    fn get_text(&self, _url: &str) -> Result<String> {
+        Ok(String::new())
     }
 }

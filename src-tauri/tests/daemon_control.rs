@@ -129,11 +129,17 @@ fn daemon_status_reports_configuration_and_queue_counts() {
 }
 
 #[test]
-fn run_once_requires_example_metadata_source_before_touching_files() {
+fn run_once_requires_any_metadata_source_before_touching_files() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, inbox, _archive, _assets) = configured_repo(&tmp);
     let video = inbox.join("ABP-404.mp4");
     std::fs::write(&video, b"stable video bytes").unwrap();
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: false,
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
     let mut runtime = DaemonControlRuntime::default();
 
     let error = run_daemon_once(&repo, &mut runtime, false).unwrap_err();
@@ -141,6 +147,37 @@ fn run_once_requires_example_metadata_source_before_touching_files() {
     assert!(error.to_string().contains("元数据源未开启"));
     assert!(video.exists());
     assert_eq!(repo.list_pipeline_runs().unwrap().len(), 0);
+}
+
+#[test]
+fn run_once_allows_example_fallback_when_legacy_metadata_toggle_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, archive, _assets) = configured_repo(&tmp);
+    let video = inbox.join("ABP-701.mp4");
+    std::fs::write(&video, b"stable video bytes").unwrap();
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: true,
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
+    let mut runtime = DaemonControlRuntime::default();
+
+    let report = run_daemon_once_with_transports(
+        &repo,
+        &mut runtime,
+        false,
+        CommandAria2Transport {
+            response: "{}".to_string(),
+        },
+        CommandRemoteClient {
+            html: String::new(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.process.archived, 1);
+    assert!(archive.join("ABP-701").join("ABP-701.mp4").exists());
 }
 
 #[test]

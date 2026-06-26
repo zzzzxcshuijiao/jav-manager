@@ -97,16 +97,13 @@ impl ConfiguredPipelineScrapers {
     where
         C: RemoteMetadataHttpClient + Clone + 'static,
     {
-        if !metadata_enabled {
-            bail!("元数据源未开启，自动管线不会用空 scraper 处理真实文件");
-        }
         let normalized = settings.normalized()?;
         let mut sources = build_remote_scraper_sources(&normalized, remote_client)?;
-        if normalized.include_example_fallback {
+        if metadata_enabled || normalized.include_example_fallback {
             sources.push(Box::new(ExamplePipelineScraper));
         }
         if sources.is_empty() {
-            bail!("没有可用元数据源，自动管线不会处理真实文件");
+            bail!("元数据源未开启，自动管线不会用空 scraper 处理真实文件");
         }
         Ok(Self { sources })
     }
