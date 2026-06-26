@@ -1,10 +1,45 @@
+use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport};
 use media_manager::daemon::{CompletionPolicy, DaemonConfig, DaemonState, HeadlessDaemon};
 use media_manager::domain::{ExceptionKind, ScrapedWorkMetadata};
 use media_manager::pipeline::{ScrapeCoordinator, ScraperSource};
 use media_manager::storage::Repository;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 struct FakeScraper;
+
+#[derive(Clone)]
+struct StaticAria2Transport {
+    response: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl StaticAria2Transport {
+    fn new(response: String) -> Self {
+        Self {
+            response,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl Aria2Transport for StaticAria2Transport {
+    fn post_json(
+        &self,
+        _endpoint: &Aria2RpcEndpoint,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        self.requests.lock().unwrap().push(body.to_string());
+        Ok(self.response.clone())
+    }
+}
+
+fn aria2_client(response: String) -> Aria2Client<StaticAria2Transport> {
+    Aria2Client::new(
+        Aria2RpcEndpoint::loopback_default(None),
+        StaticAria2Transport::new(response),
+    )
+}
 
 impl ScraperSource for FakeScraper {
     fn name(&self) -> &str {
@@ -314,4 +349,86 @@ fn operational_archive_failure_counts_failed_without_content_exception() {
     assert_eq!(repo.list_pipeline_runs().unwrap()[0].status, "failed");
     assert_eq!(daemon.status().state, DaemonState::Error);
     assert!(daemon.status().last_error.is_some());
+}
+
+#[test]
+fn scan_aria2_gid_queues_completed_selected_video() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let video = inbox.join("ABP-300.mp4");
+    std::fs::write(&video, b"video-300").unwrap();
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "media-manager-tell-status",
+        "result": {
+            "gid": "gid-1",
+            "status": "complete",
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {"path": video.to_string_lossy().to_string(), "length": "9", "completedLength": "9", "selected": "true"}
+            ]
+        }
+    })
+    .to_string();
+    let client = aria2_client(response);
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.scan_aria2_gid(&client, "gid-1").unwrap();
+
+    assert_eq!(report.scanned_files, 1);
+    assert_eq!(report.queued_files, 1);
+    assert_eq!(report.skipped_files, 0);
+    assert_eq!(daemon.status().queued, 1);
+}
+
+#[test]
+fn scan_aria2_gid_does_not_duplicate_known_completed_video() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, _, _) = configured_repo(&tmp);
+    let video = inbox.join("ABP-300.mp4");
+    std::fs::write(&video, b"video-300").unwrap();
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "media-manager-tell-status",
+        "result": {
+            "gid": "gid-1",
+            "status": "complete",
+            "totalLength": "9",
+            "completedLength": "9",
+            "files": [
+                {"path": video.to_string_lossy().to_string(), "length": "9", "completedLength": "9", "selected": "true"}
+            ]
+        }
+    })
+    .to_string();
+    let client = aria2_client(response);
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let first = daemon.scan_aria2_gid(&client, "gid-1").unwrap();
+    let second = daemon.scan_aria2_gid(&client, "gid-1").unwrap();
+
+    assert_eq!(first.queued_files, 1);
+    assert_eq!(second.scanned_files, 1);
+    assert_eq!(second.queued_files, 0);
+    assert_eq!(daemon.status().queued, 1);
+}
+
+#[test]
+fn scan_aria2_gid_ignores_unfinished_task_without_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, _, _, _) = configured_repo(&tmp);
+    let response = r#"{"jsonrpc":"2.0","id":"media-manager-tell-status","result":{"gid":"gid-1","status":"active","totalLength":"9","completedLength":"9","files":[]}}"#.to_string();
+    let client = aria2_client(response);
+    let scraper = FakeScraper;
+    let mut daemon = daemon(&repo, &scraper);
+
+    let report = daemon.scan_aria2_gid(&client, "gid-1").unwrap();
+
+    assert_eq!(report.scanned_files, 0);
+    assert_eq!(report.queued_files, 0);
+    assert_eq!(report.skipped_files, 0);
+    assert_eq!(daemon.status().state, DaemonState::Idle);
 }

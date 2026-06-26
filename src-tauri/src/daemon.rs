@@ -1,3 +1,4 @@
+use crate::aria2::{Aria2Client, Aria2Transport};
 use crate::domain::CompletedFile;
 use crate::domain::PipelineOutcome;
 use crate::pipeline::{
@@ -176,6 +177,51 @@ impl<'a> HeadlessDaemon<'a> {
             self.last_error = Some(error.to_string());
         }
         result
+    }
+
+    /// Poll one aria2 GID and enqueue completed selected video files.
+    pub fn scan_aria2_gid<T: Aria2Transport>(
+        &mut self,
+        client: &Aria2Client<T>,
+        gid: &str,
+    ) -> Result<ScanReport> {
+        if self.state == DaemonState::Paused {
+            return Ok(ScanReport::default());
+        }
+
+        self.state = DaemonState::Scanning;
+        let result = self.scan_aria2_gid_inner(client, gid);
+        self.state = if result.is_ok() {
+            DaemonState::Idle
+        } else {
+            DaemonState::Error
+        };
+        if let Err(error) = &result {
+            self.last_error = Some(error.to_string());
+        }
+        result
+    }
+
+    fn scan_aria2_gid_inner<T: Aria2Transport>(
+        &mut self,
+        client: &Aria2Client<T>,
+        gid: &str,
+    ) -> Result<ScanReport> {
+        let status = client.tell_status(gid)?;
+        let selection = status.completed_selection()?;
+        let mut report = ScanReport {
+            scanned_files: selection.scanned_files,
+            skipped_files: selection.skipped_files,
+            ..ScanReport::default()
+        };
+
+        for file in selection.files {
+            if self.queue_completed_file(file) {
+                report.queued_files += 1;
+            }
+        }
+
+        Ok(report)
     }
 
     fn scan_roots(&mut self) -> Result<ScanReport> {
