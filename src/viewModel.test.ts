@@ -16,6 +16,7 @@ import {
   filterItems,
   filterWorksForLibrary,
   findIngestItemForWork,
+  formatDaemonChannel,
   formatDaemonState,
   formatBytes,
   formatCodeConflictEvidence,
@@ -471,6 +472,9 @@ describe("daemon view helpers", () => {
   it("labels daemon states, holding reasons, exception kinds and run statuses", () => {
     expect(formatDaemonState("Idle")).toBe("空闲");
     expect(formatDaemonState("Paused")).toBe("已暂停");
+    expect(formatDaemonChannel("service")).toBe("本地服务");
+    expect(formatDaemonChannel("command")).toBe("命令桥");
+    expect(formatDaemonChannel("none")).toBe("未连接");
     expect(formatHoldingReason("NoCode")).toBe("缺少番号");
     expect(formatHoldingReason("Unrecognizable")).toBe("无法识别");
     expect(formatExceptionKind("ScrapeFailed")).toBe("刮削失败");

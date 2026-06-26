@@ -27,6 +27,7 @@ import type {
   Actor,
   ArchiveActionLog,
   ArchivePlan,
+  DaemonControlChannel,
   DaemonControlStatus,
   DaemonRunOnceReport,
   ExceptionEntry,
@@ -64,6 +65,7 @@ import {
   coverPreviewPathForItem,
   duplicateCandidatesForItem,
   findIngestItemForWork,
+  formatDaemonChannel,
   formatDaemonState,
   formatRuntime,
   libraryCardArtwork,
@@ -170,6 +172,7 @@ export function App() {
   const [primaryLibraryDir, setPrimaryLibraryDir] = useState("");
   const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache" | "daemon">("pool");
   const [daemonStatus, setDaemonStatus] = useState<DaemonControlStatus | null>(null);
+  const [daemonChannel, setDaemonChannel] = useState<DaemonControlChannel>("none");
   const [daemonReport, setDaemonReport] = useState<DaemonRunOnceReport | null>(null);
   const [holdingEntries, setHoldingEntries] = useState<HoldingEntry[]>([]);
   const [exceptionEntries, setExceptionEntries] = useState<ExceptionEntry[]>([]);
@@ -665,6 +668,7 @@ export function App() {
     setHoldingEntries(nextHolding);
     setExceptionEntries(nextExceptions);
     setPipelineRuns(nextRuns);
+    setDaemonChannel(api.getDaemonControlChannel());
     return nextStatus;
   }
 
@@ -1533,14 +1537,14 @@ export function App() {
                     <strong>自动管线状态</strong>
                     <span>
                       {daemonStatus
-                        ? `${formatDaemonState(daemonStatus.state)} · ${daemonStatus.configured ? "配置完整" : "缺少归档根目录"} · 元数据源 ${daemonStatus.metadata_source === "example" ? "示例" : "未启用"}`
+                        ? `${formatDaemonState(daemonStatus.state)} · ${daemonStatus.configured ? "配置完整" : "缺少归档根目录"} · 元数据源 ${daemonStatus.metadata_source === "example" ? "示例" : "未启用"} · 控制通道 ${formatDaemonChannel(daemonChannel)}`
                         : "尚未读取"}
                     </span>
                   </div>
                   <button type="button" onClick={refreshDaemonPanel} disabled={daemonBusy !== null}>
                     <RefreshCw size={16} /> {daemonBusy === "refresh" ? "刷新中" : "刷新状态"}
                   </button>
-                  <button type="button" className="primary" onClick={runDaemonOnce} disabled={daemonBusy !== null || !daemonStatus?.configured}>
+                  <button type="button" className="primary" onClick={runDaemonOnce} disabled={daemonBusy !== null || !daemonStatus?.configured || daemonStatus?.state === "Paused"}>
                     <Play size={16} /> {daemonBusy === "run" ? "运行中" : "运行一轮"}
                   </button>
                 </div>

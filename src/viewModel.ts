@@ -2,6 +2,7 @@ import type {
   ArchiveActionLog,
   ArchivePlan,
   CodeConflictEvidence,
+  DaemonControlChannel,
   DaemonRunOnceReport,
   DaemonState,
   ExceptionKind,
@@ -425,6 +426,16 @@ export function formatDaemonState(state: DaemonState): string {
     Error: "错误"
   };
   return labels[state];
+}
+
+/** Format the active daemon control channel for the settings status line. */
+export function formatDaemonChannel(channel: DaemonControlChannel): string {
+  const labels: Record<DaemonControlChannel, string> = {
+    service: "本地服务",
+    command: "命令桥",
+    none: "未连接"
+  };
+  return labels[channel];
 }
 
 export function formatHoldingReason(reason: HoldingReason): string {
