@@ -27,11 +27,7 @@ impl RecordingTransport {
 }
 
 impl Aria2Transport for RecordingTransport {
-    fn post_json(
-        &self,
-        _endpoint: &Aria2RpcEndpoint,
-        body: &str,
-    ) -> anyhow::Result<String> {
+    fn post_json(&self, _endpoint: &Aria2RpcEndpoint, body: &str) -> anyhow::Result<String> {
         self.requests.lock().unwrap().push(body.to_string());
         Ok(self.response.clone())
     }

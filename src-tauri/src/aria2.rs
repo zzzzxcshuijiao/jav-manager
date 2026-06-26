@@ -10,13 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const TELL_STATUS_ID: &str = "media-manager-tell-status";
-const TELL_STATUS_KEYS: [&str; 5] = [
-    "gid",
-    "status",
-    "totalLength",
-    "completedLength",
-    "files",
-];
+const TELL_STATUS_KEYS: [&str; 5] = ["gid", "status", "totalLength", "completedLength", "files"];
 
 /// Connection settings for one aria2 JSON-RPC endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +85,10 @@ pub struct Aria2Client<T> {
 impl<T: Aria2Transport> Aria2Client<T> {
     /// Create a client with an explicit endpoint and transport.
     pub fn new(endpoint: Aria2RpcEndpoint, transport: T) -> Self {
-        Self { endpoint, transport }
+        Self {
+            endpoint,
+            transport,
+        }
     }
 
     /// Fetch a single aria2 task status by GID using `aria2.tellStatus`.

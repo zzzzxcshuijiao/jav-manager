@@ -1,11 +1,11 @@
 pub mod acceptance;
-pub mod aria2;
 pub mod archive;
+pub mod aria2;
 pub mod commands;
 pub mod control_service;
 pub mod control_service_host;
-pub mod daemon_control;
 pub mod daemon;
+pub mod daemon_control;
 pub mod domain;
 pub mod identifier;
 pub mod ingest;
