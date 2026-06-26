@@ -150,8 +150,30 @@ export interface DaemonProcessReport {
   failed: number;
 }
 
+export interface Aria2Settings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  path: string;
+  secret?: string | null;
+  timeout_ms: number;
+  poll_interval_secs: number;
+  tracked_gids: string[];
+}
+
+export interface Aria2PollReport {
+  enabled: boolean;
+  attempted_gids: number;
+  completed_gids: number;
+  queued_files: number;
+  skipped_files: number;
+  failed_gids: number;
+  errors: string[];
+}
+
 export interface DaemonRunOnceReport {
   scan: DaemonScanReport;
+  aria2?: Aria2PollReport;
   process: DaemonProcessReport;
 }
 
@@ -384,6 +406,12 @@ export const api = {
   },
   getMetadataProviderEnabled() {
     return command<boolean>("get_metadata_provider_enabled");
+  },
+  configureAria2Settings(settings: Aria2Settings) {
+    return command<Aria2Settings>("configure_aria2_settings", { settings });
+  },
+  getAria2Settings() {
+    return command<Aria2Settings>("get_aria2_settings");
   },
   getControlServiceDiscovery() {
     return command<ControlServiceDiscovery | null>("get_control_service_discovery");

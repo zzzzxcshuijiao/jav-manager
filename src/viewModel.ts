@@ -478,10 +478,25 @@ export function formatPipelineStatus(status: string): string {
 }
 
 export function summarizeRunOnceReport(report: DaemonRunOnceReport): string {
-  return [
+  const sections = [
     `扫描 ${report.scan.scanned_files} 个文件，入队 ${report.scan.queued_files} 个，跳过 ${report.scan.skipped_files} 个`,
     `处理 ${report.process.processed} 个：归档 ${report.process.archived}，搁置 ${report.process.holding}，异常 ${report.process.exceptions}，失败 ${report.process.failed}。`
-  ].join("；");
+  ];
+  const aria2 = report.aria2;
+  const hasAria2Activity = aria2
+    ? aria2.attempted_gids > 0 ||
+      aria2.completed_gids > 0 ||
+      aria2.queued_files > 0 ||
+      aria2.skipped_files > 0 ||
+      aria2.failed_gids > 0
+    : false;
+  if (aria2?.enabled && hasAria2Activity) {
+    const skipped = aria2.skipped_files > 0 ? `，跳过 ${aria2.skipped_files} 个` : "";
+    sections.unshift(
+      `aria2 尝试 ${aria2.attempted_gids} 个 GID，完成 ${aria2.completed_gids} 个，入队 ${aria2.queued_files} 个${skipped}，失败 ${aria2.failed_gids} 个`
+    );
+  }
+  return sections.join("；");
 }
 
 export function shortEvidence(value: string | null | undefined, maxLength = 120): string {

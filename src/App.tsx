@@ -27,6 +27,7 @@ import type {
   Actor,
   ArchiveActionLog,
   ArchivePlan,
+  Aria2Settings,
   DaemonControlChannel,
   DaemonControlStatus,
   DaemonRunOnceReport,
@@ -133,6 +134,17 @@ const watchStatusLabels: Record<WatchStatus, string> = {
   Favorite: "收藏"
 };
 
+const defaultAria2Settings: Aria2Settings = {
+  enabled: false,
+  host: "127.0.0.1",
+  port: 6800,
+  path: "/jsonrpc",
+  secret: "",
+  timeout_ms: 5000,
+  poll_interval_secs: 30,
+  tracked_gids: []
+};
+
 export function App() {
   const [sourceRoots, setSourceRoots] = useState("H:/Downloads/A\nH:/Downloads/B\nH:/Inbox");
   const [archiveRoot, setArchiveRoot] = useState("H:/Archive");
@@ -178,6 +190,9 @@ export function App() {
   const [exceptionEntries, setExceptionEntries] = useState<ExceptionEntry[]>([]);
   const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
   const [daemonBusy, setDaemonBusy] = useState<"refresh" | "run" | "pause" | "resume" | "resolve" | null>(null);
+  const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
+  const [aria2GidsText, setAria2GidsText] = useState("");
+  const [aria2Busy, setAria2Busy] = useState(false);
   const [libraryWorkDetail, setLibraryWorkDetail] = useState<WorkDetail | null>(null);
   const [nonStandardCollapsed, setNonStandardCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -657,18 +672,25 @@ export function App() {
     }
   }
 
+  function applyAria2Settings(settings: Aria2Settings) {
+    setAria2Settings({ ...settings, secret: settings.secret ?? "" });
+    setAria2GidsText(settings.tracked_gids.join("\n"));
+  }
+
   async function loadDaemonPanelData() {
-    const [nextStatus, nextHolding, nextExceptions, nextRuns] = await Promise.all([
+    const [nextStatus, nextHolding, nextExceptions, nextRuns, nextAria2Settings] = await Promise.all([
       api.getDaemonStatus(),
       api.listHoldingEntries(),
       api.listExceptionEntries(),
-      api.listPipelineRuns()
+      api.listPipelineRuns(),
+      api.getAria2Settings()
     ]);
     setDaemonStatus(nextStatus);
     setHoldingEntries(nextHolding);
     setExceptionEntries(nextExceptions);
     setPipelineRuns(nextRuns);
     setDaemonChannel(api.getDaemonControlChannel());
+    applyAria2Settings(nextAria2Settings);
     return nextStatus;
   }
 
@@ -704,6 +726,28 @@ export function App() {
       }
     } finally {
       setDaemonBusy(null);
+    }
+  }
+
+  async function saveAria2Settings() {
+    if (aria2Busy) return;
+    setAria2Busy(true);
+    setStatus("正在保存 aria2 配置...");
+    try {
+      const saved = await api.configureAria2Settings({
+        ...aria2Settings,
+        secret: aria2Settings.secret?.trim() ? aria2Settings.secret : null,
+        tracked_gids: aria2GidsText
+          .split(/\r?\n|,/)
+          .map((gid) => gid.trim())
+          .filter(Boolean)
+      });
+      applyAria2Settings(saved);
+      setStatus(`aria2 配置已保存：${saved.enabled ? "已启用" : "已停用"}，跟踪 ${saved.tracked_gids.length} 个 GID。`);
+    } catch (error) {
+      setStatus(`保存 aria2 配置失败：${String(error)}`);
+    } finally {
+      setAria2Busy(false);
     }
   }
 
@@ -1556,6 +1600,81 @@ export function App() {
                   <button type="button" onClick={resumeDaemon} disabled={daemonBusy !== null || daemonStatus?.state !== "Paused"}>
                     <RefreshCw size={16} /> {daemonBusy === "resume" ? "恢复中" : "恢复"}
                   </button>
+                </div>
+
+                <div className="aria2-settings">
+                  <div className="aria2-settings-head">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={aria2Settings.enabled}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, enabled: event.target.checked })}
+                      />
+                      aria2 轮询
+                    </label>
+                    <button type="button" onClick={saveAria2Settings} disabled={aria2Busy || !hasBackend}>
+                      <Settings size={16} /> {aria2Busy ? "保存中" : "保存 aria2"}
+                    </button>
+                  </div>
+                  <div className="aria2-settings-grid">
+                    <label>
+                      主机
+                      <input
+                        value={aria2Settings.host}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, host: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      端口
+                      <input
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={aria2Settings.port}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, port: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      RPC 路径
+                      <input
+                        value={aria2Settings.path}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, path: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      Secret
+                      <input
+                        value={aria2Settings.secret ?? ""}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, secret: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      超时 ms
+                      <input
+                        type="number"
+                        min={1}
+                        value={aria2Settings.timeout_ms}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, timeout_ms: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      轮询间隔 s
+                      <input
+                        type="number"
+                        min={1}
+                        value={aria2Settings.poll_interval_secs}
+                        onChange={(event) => setAria2Settings({ ...aria2Settings, poll_interval_secs: Number(event.target.value) })}
+                      />
+                    </label>
+                  </div>
+                  <label className="aria2-gids-field">
+                    跟踪 GID
+                    <textarea
+                      rows={4}
+                      value={aria2GidsText}
+                      onChange={(event) => setAria2GidsText(event.target.value)}
+                    />
+                  </label>
                 </div>
 
                 {daemonStatus ? (

@@ -1,4 +1,5 @@
 use crate::archive::ArchivePlanner;
+use crate::aria2::Aria2Settings;
 use crate::control_service::{
     control_service_discovery_path, read_control_service_discovery, ControlServiceDiscovery,
     ControlServiceHandle,
@@ -45,6 +46,7 @@ pub struct AppState {
     pub archive_plans: Mutex<Vec<ArchivePlan>>,
     pub archive_logs: Mutex<Vec<ArchiveActionLog>>,
     pub daemon_runtime: Mutex<DaemonControlRuntime>,
+    pub aria2_settings: Mutex<Aria2Settings>,
     pub control_service: Mutex<Option<ControlServiceHandle>>,
     pub control_service_error: Mutex<Option<String>>,
     pub next_job_id: Mutex<i64>,
@@ -63,6 +65,7 @@ impl Default for AppState {
             archive_plans: Mutex::new(Vec::new()),
             archive_logs: Mutex::new(Vec::new()),
             daemon_runtime: Mutex::new(DaemonControlRuntime::default()),
+            aria2_settings: Mutex::new(Aria2Settings::default()),
             control_service: Mutex::new(None),
             control_service_error: Mutex::new(None),
             next_job_id: Mutex::new(1),
@@ -188,6 +191,44 @@ pub fn get_metadata_provider_enabled(
             .metadata_provider_enabled
             .lock()
             .map_err(|error| error.to_string())?,
+    })
+}
+
+/// Persist aria2 RPC settings used by the automatic pipeline run-once path.
+#[tauri::command]
+pub fn configure_aria2_settings(
+    settings: Aria2Settings,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Aria2Settings>, String> {
+    let normalized = if let Some(repo) = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+    {
+        repo.set_aria2_settings(&settings)
+            .map_err(|error| error.to_string())?
+    } else {
+        settings.normalized().map_err(|error| error.to_string())?
+    };
+    *state
+        .aria2_settings
+        .lock()
+        .map_err(|error| error.to_string())? = normalized.clone();
+    Ok(CommandResult { data: normalized })
+}
+
+/// Return the current aria2 RPC settings for the settings page.
+#[tauri::command]
+pub fn get_aria2_settings(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Aria2Settings>, String> {
+    Ok(CommandResult {
+        data: state
+            .aria2_settings
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
     })
 }
 
@@ -1465,6 +1506,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_archive_root,
             configure_metadata_provider_enabled,
             get_metadata_provider_enabled,
+            configure_aria2_settings,
+            get_aria2_settings,
             get_control_service_discovery,
             get_control_service_host_status,
             get_daemon_status,
@@ -1542,12 +1585,19 @@ pub fn build_app() -> Builder<tauri::Wry> {
             let metadata_provider_enabled = repo
                 .get_metadata_provider_enabled()
                 .map_err(|error| error.to_string())?;
+            let aria2_settings = repo
+                .get_aria2_settings()
+                .map_err(|error| error.to_string())?;
             *state.source_roots.lock().map_err(|error| error.to_string())? = source_roots;
             *state.archive_root.lock().map_err(|error| error.to_string())? = archive_root;
             *state
                 .metadata_provider_enabled
                 .lock()
                 .map_err(|error| error.to_string())? = metadata_provider_enabled;
+            *state
+                .aria2_settings
+                .lock()
+                .map_err(|error| error.to_string())? = aria2_settings;
             *state.repository.lock().map_err(|error| error.to_string())? = Some(repo);
             match start_control_service_host(&app_data) {
                 Ok(handle) => {
@@ -1824,5 +1874,17 @@ mod tests {
         assert_eq!(status.port, None);
         assert_eq!(status.last_error, error);
         assert!(status.discovery_path.ends_with("control-service.json"));
+    }
+
+    #[test]
+    fn default_app_state_caches_default_aria2_settings() {
+        let state = AppState::default();
+
+        let settings = state.aria2_settings.lock().unwrap().clone();
+
+        assert!(!settings.enabled);
+        assert_eq!(settings.host, "127.0.0.1");
+        assert_eq!(settings.port, 6800);
+        assert_eq!(settings.path, "/jsonrpc");
     }
 }

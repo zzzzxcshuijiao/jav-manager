@@ -486,8 +486,17 @@ describe("daemon view helpers", () => {
   it("summarizes daemon run reports and trims JSON evidence", () => {
     expect(summarizeRunOnceReport({
       scan: { scanned_files: 3, queued_files: 2, skipped_files: 1 },
+      aria2: {
+        enabled: true,
+        attempted_gids: 2,
+        completed_gids: 1,
+        queued_files: 1,
+        skipped_files: 0,
+        failed_gids: 1,
+        errors: ["gid-bad: forbidden"]
+      },
       process: { processed: 2, archived: 1, holding: 1, exceptions: 0, failed: 0 }
-    })).toBe("扫描 3 个文件，入队 2 个，跳过 1 个；处理 2 个：归档 1，搁置 1，异常 0，失败 0。");
+    })).toBe("aria2 尝试 2 个 GID，完成 1 个，入队 1 个，失败 1 个；扫描 3 个文件，入队 2 个，跳过 1 个；处理 2 个：归档 1，搁置 1，异常 0，失败 0。");
 
     expect(shortEvidence("{\"source\":\"example\",\"message\":\"not found\"}", 24)).toBe("{\"source\":\"example\",\"...");
     expect(shortEvidence("", 24)).toBe("无证据");

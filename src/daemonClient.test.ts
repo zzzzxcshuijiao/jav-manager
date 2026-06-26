@@ -120,6 +120,46 @@ describe("daemon control client", () => {
     expect(client.getChannel()).toBe("service");
   });
 
+  it("returns aria2 run report from REST run-once", async () => {
+    const command = vi.fn();
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: { service: "media-manager-control", status: "ok" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          data: {
+            scan: { scanned_files: 0, queued_files: 0, skipped_files: 0 },
+            aria2: {
+              enabled: true,
+              attempted_gids: 1,
+              completed_gids: 1,
+              queued_files: 1,
+              skipped_files: 0,
+              failed_gids: 0,
+              errors: [],
+            },
+            process: { processed: 1, archived: 1, holding: 0, exceptions: 0, failed: 0 },
+          },
+        }),
+      );
+    const client = createDaemonControlClient({
+      command,
+      fetchImpl,
+      getDiscovery: async () => discovery,
+    });
+
+    const report = await client.runOnce();
+
+    expect(report.aria2?.queued_files).toBe(1);
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it("falls back to command bridge when the service is unreachable", async () => {
     const command = vi.fn(async (name: string) => {
       expect(name).toBe("pause_daemon");
