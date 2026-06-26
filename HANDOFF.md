@@ -43,6 +43,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 6E（日志与诊断系统）已实现并验证。**
 阶段 6E 新增本地结构化 JSONL 诊断日志、日志 tail、简单轮转、脱敏诊断快照导出、Tauri 诊断命令、关键命令边界事件记录，以及前端“自动管线”里的诊断日志/导出诊断块。日志写入 best-effort，不阻断保存配置或 run-once；诊断导出默认写到 app data 的 `diagnostics/diagnostics-*.json`，日志位于 app data 的 `logs/media-manager.jsonl`。验证使用临时目录、临时 SQLite 和假数据，不依赖真实资源；导出会脱敏 secret/token/password/authorization/cookie/proxy credentials，不导出媒体、NFO、封面或缩略图内容。
 
+**阶段 6F（一键测试与配置自检）已实现并验证。**
+阶段 6F 新增本地一键自检：后端 `self_check` 模块会在 app data 下创建隔离 `self-check/<timestamp>/` 沙盒、独立 SQLite、假视频和临时归档目录，运行自动管线核心确认 `MMT-001.mp4` 可归档；同时输出控制服务、真实目录、元数据源、aria2、远程 scraper、诊断系统的 pass/warn/fail 配置健康检查。前端“自动管线”页新增“一键自检”按钮和结果面板，所有操作有 loading/disabled/status 反馈。自检不连接真实 aria2，不访问真实 scraper 站点，不创建下载任务，不写真实媒体库。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -54,6 +57,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo test --manifest-path src-tauri/Cargo.toml --test control_service_host -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test remote_scraper -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test diagnostics -j 1`
+- `cargo test --manifest-path src-tauri/Cargo.toml --test self_check -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`
 - `npm test`
 - `npx tsc --noEmit`
@@ -61,7 +65,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1`
 
-说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。阶段 6C 收尾时默认 `src-tauri/target` 出现过 rlib mmap/metadata 异常，完整 gate 使用 `$env:CARGO_TARGET_DIR='src-tauri/target/stage6c'` 通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 6C 新增失败。
+说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。阶段 6C 收尾时默认 `src-tauri/target` 出现过 rlib mmap/metadata 异常，完整 gate 使用 `$env:CARGO_TARGET_DIR='src-tauri/target/stage6c'` 通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 6F 新增失败。
 
 ## 接手步骤（新电脑）
 
@@ -114,6 +118,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 22. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6d-real-scraper-adapter.md`** — 阶段 6D plan（已完成，含 TDD 步骤与验收）。
 23. **`docs/superpowers/specs/2026-06-26-media-manager-stage6e-logging-diagnostics-design.md`** — 阶段 6E 日志与诊断系统设计（已完成）。
 24. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6e-logging-diagnostics.md`** — 阶段 6E plan（已完成，含 TDD 步骤与验收）。
+25. **`docs/superpowers/specs/2026-06-27-media-manager-stage6f-self-check-design.md`** — 阶段 6F 一键测试与配置自检设计（已完成）。
+26. **`docs/superpowers/plans/2026-06-27-media-manager-stage6f-self-check.md`** — 阶段 6F plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -238,6 +244,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 新增 `src-tauri/tests/diagnostics.rs`，覆盖 JSONL append/tail/rotation/redaction、快照导出、业务行敏感字段脱敏；更新 `commands` unit 与 `viewModel.test.ts`。
 - 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
 
+## 阶段 6F 交付物
+
+- 新增 `src-tauri/src/self_check.rs`：`SelfCheckSeverity`、`SelfCheckItem`、`SelfCheckSandboxSummary`、`SelfCheckOverall`、`SelfCheckReport`、配置健康检查和沙盒归档 runner。
+- 沙盒自检在 app data 下创建隔离 `self-check/<timestamp>/`、独立 `library.sqlite`、`inbox/archive/assets` 和 `MMT-001.mp4`，使用 fake aria2 transport 与 fake remote client 运行自动管线，不读写真实媒体库作品表。
+- `daemon_control::metadata_source_available` 统一元数据源可用性判定：旧示例开关、远程 enabled source、example fallback 任一可用即认为自动管线有元数据源。
+- `ConfiguredPipelineScrapers` 不再只因旧 `metadata_provider_enabled=false` 拒绝处理；只有远程 source 和 example fallback 都不可用时才报“元数据源未开启”。
+- `commands.rs` 新增并注册 `run_pipeline_self_check_command`，命令边界记录 `self_check.run` started/completed/failed 诊断事件。
+- `src/api.ts` 新增自检 DTO 和 `runPipelineSelfCheck()`；`src/viewModel.ts` 新增自检 severity/overall/summary 中文格式化。
+- 设置页“自动管线”新增“一键自检”按钮和结果面板，展示总评、沙盒路径、每项 pass/warn/fail 和建议动作。
+- 新增/更新测试：`src-tauri/tests/self_check.rs`、`src-tauri/tests/daemon_control.rs`、`src-tauri/tests/control_service.rs`、`commands` unit、`src/viewModel.test.ts`。
+- 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -260,9 +278,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，远程刮削器配置保存后启用的 source 是否在 `run-once` 中优先写入远程 metadata，以及“诊断日志/导出诊断”是否生成 `logs/media-manager.jsonl` 和 `diagnostics/diagnostics-*.json`。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
+如果先做实际环境验证，重点先点设置页“自动管线”的“一键自检”：期望看到沙盒归档通过；真实目录、aria2、远程 scraper 等未配置项以 warning/fail 分项展示，但不会污染真实媒体库。然后再检查控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，远程刮削器配置保存后启用的 source 是否在 `run-once` 中优先写入远程 metadata，以及“诊断日志/导出诊断”是否生成 `logs/media-manager.jsonl` 和 `diagnostics/diagnostics-*.json`。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
 
-如果继续做 Codex 可编码工作，建议下一步二选一：一是 **阶段 6F 真实环境反馈闭环**（基于用户实际验证结果补 parser fallback、错误可视化、scrape job 面板、metadata retry、诊断导出可读性），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，建议下一步二选一：一是 **真实环境反馈闭环**（基于用户实际自检和 run-once 结果补 parser fallback、错误可视化、scrape job 面板、metadata retry、诊断导出可读性），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 

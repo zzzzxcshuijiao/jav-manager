@@ -116,6 +116,22 @@ impl ConfiguredPipelineScrapers {
     }
 }
 
+/// Return whether the current settings provide any metadata source for the
+/// automatic pipeline, including the legacy local example toggle.
+pub fn metadata_source_available(
+    metadata_provider_enabled: bool,
+    settings: &RemoteScraperSettings,
+) -> Result<bool> {
+    if metadata_provider_enabled {
+        return Ok(true);
+    }
+    let normalized = settings.normalized()?;
+    if normalized.include_example_fallback {
+        return Ok(true);
+    }
+    Ok(!normalized.enabled_sources()?.is_empty())
+}
+
 /// Build a frontend status snapshot from SQLite settings, queue tables, and
 /// command-layer runtime flags. This function performs no filesystem writes.
 pub fn build_daemon_status(
@@ -143,6 +159,8 @@ pub fn build_daemon_status(
         .count();
     let holding_items = repo.list_holding()?.len();
     let recent_runs = repo.list_pipeline_runs()?.len().min(10);
+    let remote_settings = repo.get_remote_scraper_settings()?;
+    let metadata_available = metadata_source_available(metadata_enabled, &remote_settings)?;
 
     Ok(DaemonControlStatus {
         state: if runtime.paused { "Paused" } else { "Idle" }.to_string(),
@@ -156,7 +174,7 @@ pub fn build_daemon_status(
         open_exceptions,
         holding_items,
         recent_runs,
-        metadata_source: if metadata_enabled {
+        metadata_source: if metadata_available {
             MetadataSource::Example
         } else {
             MetadataSource::Disabled

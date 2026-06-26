@@ -245,6 +245,12 @@ fn service_reads_metadata_provider_setting_after_startup() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = configured_repo(&tmp);
     repo.set_metadata_provider_enabled(false).unwrap();
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: false,
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
     let config = ControlServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,

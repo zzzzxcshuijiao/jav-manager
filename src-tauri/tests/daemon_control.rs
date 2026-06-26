@@ -129,6 +129,23 @@ fn daemon_status_reports_configuration_and_queue_counts() {
 }
 
 #[test]
+fn daemon_status_reports_example_fallback_when_legacy_metadata_toggle_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, _inbox, _archive, _assets) = configured_repo(&tmp);
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: true,
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
+    let runtime = DaemonControlRuntime::default();
+
+    let status = build_daemon_status(&repo, &runtime, false).unwrap();
+
+    assert_eq!(status.metadata_source, MetadataSource::Example);
+}
+
+#[test]
 fn run_once_requires_any_metadata_source_before_touching_files() {
     let tmp = tempfile::tempdir().unwrap();
     let (repo, inbox, _archive, _assets) = configured_repo(&tmp);

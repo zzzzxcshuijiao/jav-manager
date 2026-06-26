@@ -2,7 +2,8 @@ use crate::aria2::Aria2Settings;
 use crate::aria2::{Aria2RpcEndpoint, Aria2Transport};
 use crate::control_service_host::ControlServiceHostStatus;
 use crate::daemon_control::{
-    run_daemon_once_with_transports, DaemonControlRuntime, DaemonControlStatus,
+    metadata_source_available, run_daemon_once_with_transports, DaemonControlRuntime,
+    DaemonControlStatus,
 };
 use crate::remote_scraper::{RemoteMetadataHttpClient, RemoteScraperSettings};
 use crate::storage::Repository;
@@ -128,21 +129,6 @@ pub fn run_pipeline_self_check(
         checks,
         sandbox,
     })
-}
-
-/// Return whether any metadata source can feed the automatic pipeline.
-pub fn metadata_source_available(
-    metadata_provider_enabled: bool,
-    settings: &RemoteScraperSettings,
-) -> Result<bool> {
-    if metadata_provider_enabled {
-        return Ok(true);
-    }
-    let normalized = settings.normalized()?;
-    if normalized.include_example_fallback {
-        return Ok(true);
-    }
-    Ok(!normalized.enabled_sources()?.is_empty())
 }
 
 fn check_control_service(control_service: Option<ControlServiceHostStatus>) -> SelfCheckItem {
