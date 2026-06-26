@@ -1,4 +1,6 @@
-use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport, HttpAria2Transport};
+use media_manager::aria2::{
+    Aria2Client, Aria2RpcEndpoint, Aria2Settings, Aria2Transport, HttpAria2Transport,
+};
 use media_manager::pipeline::Aria2TaskSnapshot;
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -146,6 +148,28 @@ fn completed_selection_is_empty_for_unfinished_task() {
     assert_eq!(selection.scanned_files, 0);
     assert_eq!(selection.skipped_files, 0);
     assert!(selection.files.is_empty());
+}
+
+#[test]
+fn aria2_settings_build_endpoint_with_normalized_path_and_secret() {
+    let settings = Aria2Settings {
+        enabled: true,
+        host: "127.0.0.1".to_string(),
+        port: 6800,
+        path: "jsonrpc".to_string(),
+        secret: Some("secret".to_string()),
+        timeout_ms: 9000,
+        poll_interval_secs: 30,
+        tracked_gids: vec![],
+    };
+
+    let endpoint = settings.normalized().unwrap().endpoint().unwrap();
+
+    assert_eq!(endpoint.host, "127.0.0.1");
+    assert_eq!(endpoint.port, 6800);
+    assert_eq!(endpoint.path, "/jsonrpc");
+    assert_eq!(endpoint.secret.as_deref(), Some("secret"));
+    assert_eq!(endpoint.timeout_ms, 9000);
 }
 
 #[test]

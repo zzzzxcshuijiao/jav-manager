@@ -35,6 +35,100 @@ impl Aria2RpcEndpoint {
     }
 }
 
+/// User-editable aria2 RPC settings persisted in SQLite app_settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Aria2Settings {
+    pub enabled: bool,
+    pub host: String,
+    pub port: u16,
+    pub path: String,
+    pub secret: Option<String>,
+    pub timeout_ms: u64,
+    pub poll_interval_secs: u64,
+    pub tracked_gids: Vec<String>,
+}
+
+impl Default for Aria2Settings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: "127.0.0.1".to_string(),
+            port: 6800,
+            path: "/jsonrpc".to_string(),
+            secret: None,
+            timeout_ms: 5_000,
+            poll_interval_secs: 30,
+            tracked_gids: Vec::new(),
+        }
+    }
+}
+
+impl Aria2Settings {
+    /// Return a validated copy with trimmed strings, normalized path, empty
+    /// secret removed, and duplicate GIDs collapsed in first-seen order.
+    pub fn normalized(&self) -> Result<Self> {
+        let host = self.host.trim().to_string();
+        if host.is_empty() {
+            return Err(anyhow!("aria2 host is required"));
+        }
+        if self.port == 0 {
+            return Err(anyhow!("aria2 port is required"));
+        }
+        let raw_path = self.path.trim();
+        if raw_path.is_empty() {
+            return Err(anyhow!("aria2 RPC path is required"));
+        }
+        if self.timeout_ms == 0 {
+            return Err(anyhow!("aria2 timeout_ms must be greater than zero"));
+        }
+        if self.poll_interval_secs == 0 {
+            return Err(anyhow!(
+                "aria2 poll_interval_secs must be greater than zero"
+            ));
+        }
+
+        let mut tracked_gids = Vec::new();
+        for gid in &self.tracked_gids {
+            let trimmed = gid.trim();
+            if !trimmed.is_empty() && !tracked_gids.iter().any(|existing| existing == trimmed) {
+                tracked_gids.push(trimmed.to_string());
+            }
+        }
+
+        Ok(Self {
+            enabled: self.enabled,
+            host,
+            port: self.port,
+            path: if raw_path.starts_with('/') {
+                raw_path.to_string()
+            } else {
+                format!("/{raw_path}")
+            },
+            secret: self
+                .secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            timeout_ms: self.timeout_ms,
+            poll_interval_secs: self.poll_interval_secs,
+            tracked_gids,
+        })
+    }
+
+    /// Convert the persisted settings into the Stage 6B RPC endpoint DTO.
+    pub fn endpoint(&self) -> Result<Aria2RpcEndpoint> {
+        let normalized = self.normalized()?;
+        Ok(Aria2RpcEndpoint {
+            host: normalized.host,
+            port: normalized.port,
+            path: normalized.path,
+            secret: normalized.secret,
+            timeout_ms: normalized.timeout_ms,
+        })
+    }
+}
+
 /// Transport boundary for posting JSON-RPC bodies to aria2.
 pub trait Aria2Transport {
     /// Send one JSON body to the configured endpoint and return the response body.

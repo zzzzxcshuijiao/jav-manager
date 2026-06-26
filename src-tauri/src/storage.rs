@@ -1,4 +1,5 @@
 use crate::archive::normalized_file_name;
+use crate::aria2::Aria2Settings;
 use crate::domain::{
     Actor, ArchiveActionLog, CodeConflictEvidence, CodeKind, Collection, DimensionCount, Exception,
     ExceptionKind, ExceptionStatus, FileVersion, HoldingEntry, HoldingReason, IngestDecision,
@@ -324,6 +325,22 @@ impl Repository {
             self.get_setting("metadata_provider_enabled")?.as_deref(),
             Some("true")
         ))
+    }
+
+    /// Persist normalized aria2 settings as one JSON app_settings value.
+    pub fn set_aria2_settings(&self, settings: &Aria2Settings) -> Result<Aria2Settings> {
+        let normalized = settings.normalized()?;
+        self.set_setting("aria2_settings", &serde_json::to_string(&normalized)?)?;
+        Ok(normalized)
+    }
+
+    /// Read aria2 settings, returning safe defaults when not configured.
+    pub fn get_aria2_settings(&self) -> Result<Aria2Settings> {
+        let Some(value) = self.get_setting("aria2_settings")? else {
+            return Ok(Aria2Settings::default());
+        };
+        let settings: Aria2Settings = serde_json::from_str(&value)?;
+        settings.normalized()
     }
 
     pub fn set_poster_dirs(&self, poster: &Path, screenshot: &Path, gif: &Path) -> Result<()> {
