@@ -135,8 +135,7 @@ fn malformed_json_ld_returns_error() {
 fn remote_scraper_source_builds_encoded_url_and_uses_client() {
     let client = FakeHttpClient::ok(&movie_html("Remote Title"));
     let config =
-        RemoteScraperConfig::new("fixture", "https://example.test/search?q={code}", 0.81)
-            .unwrap();
+        RemoteScraperConfig::new("fixture", "https://example.test/search?q={code}", 0.81).unwrap();
     let source = RemoteScraperSource::new(config, client.clone());
 
     let metadata = source.lookup_remote("ABP 704").unwrap().unwrap();
@@ -148,16 +147,15 @@ fn remote_scraper_source_builds_encoded_url_and_uses_client() {
 
 #[test]
 fn remote_scraper_config_requires_code_placeholder() {
-    let error = RemoteScraperConfig::new("fixture", "https://example.test/search", 0.8)
-        .unwrap_err();
+    let error =
+        RemoteScraperConfig::new("fixture", "https://example.test/search", 0.8).unwrap_err();
 
     assert!(error.to_string().contains("{code}"));
 }
 
 #[test]
 fn remote_scraper_source_propagates_http_errors() {
-    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.8)
-        .unwrap();
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.8).unwrap();
     let source = RemoteScraperSource::new(config, FakeHttpClient::failing());
 
     let error = source.lookup_remote("ABP-705").unwrap_err();
@@ -168,8 +166,7 @@ fn remote_scraper_source_propagates_http_errors() {
 #[test]
 fn remote_scraper_source_implements_scraper_source() {
     let client = FakeHttpClient::ok(&movie_html("Pipeline Title"));
-    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.9)
-        .unwrap();
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.9).unwrap();
     let source = RemoteScraperSource::new(config, client);
 
     let metadata = ScraperSource::lookup(&source, "ABP-706").unwrap().unwrap();
@@ -184,8 +181,7 @@ fn remote_scraper_source_implements_scraper_source() {
 #[test]
 fn remote_scraper_source_implements_metadata_provider() {
     let client = FakeHttpClient::ok(&movie_html("Provider Title"));
-    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.83)
-        .unwrap();
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.83).unwrap();
     let source = RemoteScraperSource::new(config, client);
 
     let metadata = MetadataProvider::lookup(&source, "ABP-707", "ABP-707.mp4")

@@ -157,8 +157,8 @@ pub fn parse_json_ld_metadata(
     min_confidence: f32,
 ) -> Result<Option<RemoteMetadata>> {
     for raw_json in extract_json_ld_blocks(html) {
-        let value: Value = serde_json::from_str(&raw_json)
-            .map_err(|error| anyhow!("invalid JSON-LD: {error}"))?;
+        let value: Value =
+            serde_json::from_str(&raw_json).map_err(|error| anyhow!("invalid JSON-LD: {error}"))?;
         if let Some(object) = find_media_object(&value) {
             let Some(title) = string_field(object, "name") else {
                 return Ok(None);
@@ -208,9 +208,9 @@ fn find_media_object(value: &Value) -> Option<&serde_json::Map<String, Value>> {
 fn is_media_object(object: &serde_json::Map<String, Value>) -> bool {
     match object.get("@type") {
         Some(Value::String(kind)) => kind == "Movie" || kind == "VideoObject",
-        Some(Value::Array(kinds)) => kinds.iter().any(|kind| {
-            matches!(kind, Value::String(text) if text == "Movie" || text == "VideoObject")
-        }),
+        Some(Value::Array(kinds)) => kinds.iter().any(
+            |kind| matches!(kind, Value::String(text) if text == "Movie" || text == "VideoObject"),
+        ),
         _ => false,
     }
 }
