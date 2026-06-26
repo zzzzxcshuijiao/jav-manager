@@ -7,6 +7,14 @@ import {
 
 export type { ControlServiceDiscovery, DaemonControlChannel } from "./daemonClient";
 
+export interface ControlServiceHostStatus {
+  running: boolean;
+  host: string;
+  port?: number | null;
+  discovery_path: string;
+  last_error?: string | null;
+}
+
 export type IngestDecision = "AutoArchive" | "NeedsReview" | "DuplicateCandidate" | "Failed" | "Ignored";
 export type ReviewReason =
   | "MissingCode"
@@ -379,6 +387,9 @@ export const api = {
   },
   getControlServiceDiscovery() {
     return command<ControlServiceDiscovery | null>("get_control_service_discovery");
+  },
+  getControlServiceHostStatus() {
+    return command<ControlServiceHostStatus>("get_control_service_host_status");
   },
   getDaemonControlChannel(): DaemonControlChannel {
     return daemonClient.getChannel();
