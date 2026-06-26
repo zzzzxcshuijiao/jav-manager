@@ -1,7 +1,12 @@
 use crate::domain::{ProviderMetadata, ScrapedWorkMetadata};
 use anyhow::{anyhow, Result};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
+
+const DEFAULT_REMOTE_SCRAPER_TIMEOUT_MS: u64 = 8000;
+const DEFAULT_REMOTE_SCRAPER_USER_AGENT: &str = "media-manager/0.1 local scraper";
 
 /// Normalized metadata returned by a remote scraper before conversion to app DTOs.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +66,142 @@ impl RemoteMetadata {
 pub trait RemoteMetadataHttpClient: Send + Sync {
     /// Fetch a remote HTML document as UTF-8 text.
     fn get_text(&self, url: &str) -> Result<String>;
+}
+
+/// Persisted remote scraper settings used by the automatic pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteScraperSettings {
+    pub enabled: bool,
+    pub timeout_ms: u64,
+    pub user_agent: String,
+    pub proxy_url: Option<String>,
+    pub include_example_fallback: bool,
+    pub sources: Vec<RemoteScraperSourceSettings>,
+}
+
+impl Default for RemoteScraperSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_ms: DEFAULT_REMOTE_SCRAPER_TIMEOUT_MS,
+            user_agent: DEFAULT_REMOTE_SCRAPER_USER_AGENT.to_string(),
+            proxy_url: None,
+            include_example_fallback: true,
+            sources: default_remote_scraper_sources(),
+        }
+    }
+}
+
+impl RemoteScraperSettings {
+    /// Return a validated copy safe to persist and use for scraper construction.
+    pub fn normalized(&self) -> Result<Self> {
+        if self.timeout_ms == 0 {
+            return Err(anyhow!(
+                "remote scraper timeout_ms must be greater than zero"
+            ));
+        }
+        let user_agent = self.user_agent.trim().to_string();
+        if user_agent.is_empty() {
+            return Err(anyhow!("remote scraper user_agent is required"));
+        }
+        let proxy_url = self.proxy_url.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let mut seen = HashSet::new();
+        let mut sources = Vec::new();
+        for source in &self.sources {
+            let normalized = source.normalized()?;
+            if seen.insert(normalized.id.clone()) {
+                sources.push(normalized);
+            }
+        }
+        Ok(Self {
+            enabled: self.enabled,
+            timeout_ms: self.timeout_ms,
+            user_agent,
+            proxy_url,
+            include_example_fallback: self.include_example_fallback,
+            sources,
+        })
+    }
+
+    /// Return enabled sources only when the global remote scraper switch is on.
+    pub fn enabled_sources(&self) -> Result<Vec<RemoteScraperSourceSettings>> {
+        let normalized = self.normalized()?;
+        if !normalized.enabled {
+            return Ok(Vec::new());
+        }
+        Ok(normalized
+            .sources
+            .into_iter()
+            .filter(|source| source.enabled)
+            .collect())
+    }
+}
+
+/// Persisted configuration for one remote scraper source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemoteScraperSourceSettings {
+    pub id: String,
+    pub enabled: bool,
+    pub search_url_template: String,
+    pub min_confidence: f32,
+}
+
+impl RemoteScraperSourceSettings {
+    /// Return a trimmed source config and validate the URL template contract.
+    pub fn normalized(&self) -> Result<Self> {
+        let id = self.id.trim().to_ascii_lowercase();
+        if id.is_empty() {
+            return Err(anyhow!("remote scraper source id is required"));
+        }
+        if !(0.0..=1.0).contains(&self.min_confidence) {
+            return Err(anyhow!(
+                "remote scraper min_confidence must be between 0 and 1"
+            ));
+        }
+        let search_url_template = self.search_url_template.trim().to_string();
+        if self.enabled {
+            RemoteScraperConfig::new(&id, &search_url_template, self.min_confidence)?;
+        }
+        Ok(Self {
+            id,
+            enabled: self.enabled,
+            search_url_template,
+            min_confidence: self.min_confidence,
+        })
+    }
+}
+
+/// Return the built-in remote scraper presets, disabled by default.
+pub fn default_remote_scraper_sources() -> Vec<RemoteScraperSourceSettings> {
+    vec![
+        RemoteScraperSourceSettings {
+            id: "javdb".to_string(),
+            enabled: false,
+            search_url_template: "https://javdb.com/search?q={code}&f=all".to_string(),
+            min_confidence: 0.82,
+        },
+        RemoteScraperSourceSettings {
+            id: "javbus".to_string(),
+            enabled: false,
+            search_url_template: "https://www.javbus.com/search/{code}".to_string(),
+            min_confidence: 0.82,
+        },
+        RemoteScraperSourceSettings {
+            id: "fanza".to_string(),
+            enabled: false,
+            search_url_template:
+                "https://www.dmm.co.jp/digital/videoa/-/list/search/=/?searchstr={code}"
+                    .to_string(),
+            min_confidence: 0.82,
+        },
+    ]
 }
 
 /// Configuration for one remote metadata source.

@@ -1,5 +1,6 @@
 use media_manager::remote_scraper::{
-    parse_json_ld_metadata, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSource,
+    parse_json_ld_metadata, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSettings,
+    RemoteScraperSource, RemoteScraperSourceSettings,
 };
 use media_manager::{pipeline::ScraperSource, provider::MetadataProvider};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,66 @@ fn movie_html(title: &str) -> String {
         r#"<script type="application/ld+json">{{"@type":"Movie","name":"{}","actor":"Actor A"}}</script>"#,
         title
     )
+}
+
+#[test]
+fn remote_scraper_settings_defaults_are_safe_and_disabled() {
+    let settings = RemoteScraperSettings::default();
+
+    assert!(!settings.enabled);
+    assert_eq!(settings.timeout_ms, 8000);
+    assert!(settings.user_agent.contains("media-manager"));
+    assert!(settings.proxy_url.is_none());
+    assert!(settings.include_example_fallback);
+    assert_eq!(settings.sources.len(), 3);
+    assert!(settings.sources.iter().all(|source| !source.enabled));
+}
+
+#[test]
+fn remote_scraper_settings_normalize_sources_and_reject_invalid_enabled_source() {
+    let settings = RemoteScraperSettings {
+        enabled: true,
+        timeout_ms: 5000,
+        user_agent: " media-manager-test ".to_string(),
+        proxy_url: Some("   ".to_string()),
+        include_example_fallback: false,
+        sources: vec![
+            RemoteScraperSourceSettings {
+                id: " javdb ".to_string(),
+                enabled: true,
+                search_url_template: "https://example.test/search?q={code}".to_string(),
+                min_confidence: 0.91,
+            },
+            RemoteScraperSourceSettings {
+                id: "javdb".to_string(),
+                enabled: true,
+                search_url_template: "https://duplicate.test/{code}".to_string(),
+                min_confidence: 0.5,
+            },
+        ],
+    };
+
+    let normalized = settings.normalized().unwrap();
+
+    assert_eq!(normalized.user_agent, "media-manager-test");
+    assert_eq!(normalized.proxy_url, None);
+    assert_eq!(normalized.sources.len(), 1);
+    assert_eq!(normalized.sources[0].id, "javdb");
+    assert_eq!(normalized.sources[0].min_confidence, 0.91);
+
+    let invalid = RemoteScraperSettings {
+        enabled: true,
+        sources: vec![RemoteScraperSourceSettings {
+            id: "bad".to_string(),
+            enabled: true,
+            search_url_template: "https://example.test/search".to_string(),
+            min_confidence: 0.8,
+        }],
+        ..RemoteScraperSettings::default()
+    };
+
+    let error = invalid.normalized().unwrap_err();
+    assert!(error.to_string().contains("{code}"));
 }
 
 #[test]

@@ -16,6 +16,7 @@ use media_manager::identifier::{extract_code_from_text, normalize_code};
 use media_manager::ingest::IngestEngine;
 use media_manager::matcher::attach_version_to_work;
 use media_manager::provider::{DisabledProvider, ExampleProvider, MetadataProvider};
+use media_manager::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
 use media_manager::scanner::{is_video_file, parse_ffprobe_media_info, should_probe_media_file, Scanner};
 use media_manager::storage::Repository;
 use media_manager::thumbnail::{
@@ -1313,6 +1314,32 @@ fn repository_defaults_and_persists_aria2_settings() {
     assert_eq!(settings.timeout_ms, 7000);
     assert_eq!(settings.poll_interval_secs, 45);
     assert_eq!(settings.tracked_gids, vec!["gid-1", "gid-2"]);
+}
+
+#[test]
+fn repository_persists_remote_scraper_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::open(&temp.path().join("library.sqlite")).unwrap();
+    repo.migrate().unwrap();
+    let settings = RemoteScraperSettings {
+        enabled: true,
+        timeout_ms: 9000,
+        user_agent: "media-manager-test".to_string(),
+        proxy_url: Some("http://127.0.0.1:8888".to_string()),
+        include_example_fallback: false,
+        sources: vec![RemoteScraperSourceSettings {
+            id: "javdb".to_string(),
+            enabled: true,
+            search_url_template: "https://example.test/search?q={code}".to_string(),
+            min_confidence: 0.88,
+        }],
+    };
+
+    let saved = repo.set_remote_scraper_settings(&settings).unwrap();
+    let loaded = repo.get_remote_scraper_settings().unwrap();
+
+    assert_eq!(saved, loaded);
+    assert_eq!(loaded.sources[0].id, "javdb");
 }
 
 #[test]

@@ -10,6 +10,7 @@ use crate::domain::{
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
 use crate::provider::MetadataProvider;
+use crate::remote_scraper::RemoteScraperSettings;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeSet;
@@ -340,6 +341,28 @@ impl Repository {
             return Ok(Aria2Settings::default());
         };
         let settings: Aria2Settings = serde_json::from_str(&value)?;
+        settings.normalized()
+    }
+
+    /// Persist normalized remote scraper settings as one JSON app_settings value.
+    pub fn set_remote_scraper_settings(
+        &self,
+        settings: &RemoteScraperSettings,
+    ) -> Result<RemoteScraperSettings> {
+        let normalized = settings.normalized()?;
+        self.set_setting(
+            "remote_scraper_settings",
+            &serde_json::to_string(&normalized)?,
+        )?;
+        Ok(normalized)
+    }
+
+    /// Read remote scraper settings, returning safe disabled defaults when absent.
+    pub fn get_remote_scraper_settings(&self) -> Result<RemoteScraperSettings> {
+        let Some(value) = self.get_setting("remote_scraper_settings")? else {
+            return Ok(RemoteScraperSettings::default());
+        };
+        let settings: RemoteScraperSettings = serde_json::from_str(&value)?;
         settings.normalized()
     }
 
