@@ -18,6 +18,8 @@ import {
   findIngestItemForWork,
   formatDaemonChannel,
   formatDaemonState,
+  formatDiagnosticExportSummary,
+  formatDiagnosticLogLine,
   formatRemoteScraperSettingsSummary,
   formatBytes,
   formatCodeConflictEvidence,
@@ -524,6 +526,33 @@ describe("daemon view helpers", () => {
       include_example_fallback: false,
       sources: []
     })).toBe("已停用");
+  });
+});
+
+describe("diagnostics formatting", () => {
+  it("formats diagnostic log lines", () => {
+    expect(
+      formatDiagnosticLogLine({
+        timestamp: "2026-06-26T10:00:00Z",
+        level: "Error",
+        target: "daemon.run_once",
+        message: "run failed",
+        context: { error: "boom" }
+      })
+    ).toBe("2026-06-26T10:00:00Z · 错误 · daemon.run_once · run failed");
+  });
+
+  it("formats diagnostic export summaries", () => {
+    expect(
+      formatDiagnosticExportSummary({
+        path: "C:/Users/DELL/AppData/Roaming/local.media-manager/diagnostics/diagnostics-20260626-100000.json",
+        logs: 12,
+        pipeline_runs: 2,
+        scrape_jobs: 3,
+        open_exceptions: 1,
+        holding_items: 4
+      })
+    ).toContain("已导出诊断快照");
   });
 });
 

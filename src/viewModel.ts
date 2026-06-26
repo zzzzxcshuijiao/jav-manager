@@ -5,6 +5,8 @@ import type {
   DaemonControlChannel,
   DaemonRunOnceReport,
   DaemonState,
+  DiagnosticExportResult,
+  DiagnosticLogEntry,
   ExceptionKind,
   ExceptionStatus,
   FileVersion,
@@ -449,6 +451,26 @@ export function formatRemoteScraperSettingsSummary(settings: RemoteScraperSettin
     ? "保留示例 fallback"
     : "不使用示例 fallback";
   return `已启用 · ${enabledSources} 个远程源 · ${fallback}`;
+}
+
+/** Format a diagnostic severity for compact log rows. */
+export function formatDiagnosticLevel(level: DiagnosticLogEntry["level"]): string {
+  const labels: Record<DiagnosticLogEntry["level"], string> = {
+    Info: "信息",
+    Warn: "警告",
+    Error: "错误"
+  };
+  return labels[level] ?? level;
+}
+
+/** Format one diagnostic log entry for the settings diagnostics list. */
+export function formatDiagnosticLogLine(entry: DiagnosticLogEntry): string {
+  return `${entry.timestamp} · ${formatDiagnosticLevel(entry.level)} · ${entry.target} · ${entry.message}`;
+}
+
+/** Format the diagnostic export result for the global status line. */
+export function formatDiagnosticExportSummary(result: DiagnosticExportResult): string {
+  return `已导出诊断快照：${result.path}（日志 ${result.logs} 条，管线 ${result.pipeline_runs} 条，刮削 ${result.scrape_jobs} 条，异常 ${result.open_exceptions} 条，搁置 ${result.holding_items} 条）`;
 }
 
 export function formatHoldingReason(reason: HoldingReason): string {

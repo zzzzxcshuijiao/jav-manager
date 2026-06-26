@@ -640,7 +640,8 @@ h2 {
 }
 
 .aria2-settings,
-.remote-scraper-settings {
+.remote-scraper-settings,
+.diagnostics-panel {
   border: 1px solid #dfe7ec;
   border-radius: 6px;
   background: #fbfdfe;
@@ -833,6 +834,34 @@ h2 {
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 4px;
+}
+
+.diagnostic-log-list {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.diagnostic-log-row {
+  border: 1px solid #d8e1e7;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #25313c;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-log-row.warn {
+  border-color: rgba(217, 119, 6, 0.45);
+}
+
+.diagnostic-log-row.error {
+  border-color: rgba(190, 61, 47, 0.55);
+  color: #9f2f29;
 }
 
 .empty-text {

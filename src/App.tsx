@@ -31,6 +31,7 @@ import type {
   DaemonControlChannel,
   DaemonControlStatus,
   DaemonRunOnceReport,
+  DiagnosticLogEntry,
   ExceptionEntry,
   FileVersion,
   HoldingEntry,
@@ -69,6 +70,8 @@ import {
   findIngestItemForWork,
   formatDaemonChannel,
   formatDaemonState,
+  formatDiagnosticExportSummary,
+  formatDiagnosticLogLine,
   formatRuntime,
   libraryCardArtwork,
   libraryCardSubtitle,
@@ -220,6 +223,8 @@ export function App() {
   const [exceptionEntries, setExceptionEntries] = useState<ExceptionEntry[]>([]);
   const [pipelineRuns, setPipelineRuns] = useState<PipelineRun[]>([]);
   const [daemonBusy, setDaemonBusy] = useState<"refresh" | "run" | "pause" | "resume" | "resolve" | null>(null);
+  const [diagnosticLogs, setDiagnosticLogs] = useState<DiagnosticLogEntry[]>([]);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "export" | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
   const [aria2Busy, setAria2Busy] = useState(false);
@@ -720,14 +725,16 @@ export function App() {
       nextExceptions,
       nextRuns,
       nextAria2Settings,
-      nextRemoteScraperSettings
+      nextRemoteScraperSettings,
+      nextDiagnosticLogs
     ] = await Promise.all([
       api.getDaemonStatus(),
       api.listHoldingEntries(),
       api.listExceptionEntries(),
       api.listPipelineRuns(),
       api.getAria2Settings(),
-      api.getRemoteScraperSettings()
+      api.getRemoteScraperSettings(),
+      api.getDiagnosticLogTail(80)
     ]);
     setDaemonStatus(nextStatus);
     setHoldingEntries(nextHolding);
@@ -736,6 +743,7 @@ export function App() {
     setDaemonChannel(api.getDaemonControlChannel());
     applyAria2Settings(nextAria2Settings);
     applyRemoteScraperSettings(nextRemoteScraperSettings);
+    setDiagnosticLogs(nextDiagnosticLogs);
     return nextStatus;
   }
 
@@ -811,6 +819,37 @@ export function App() {
       setStatus(`保存远程刮削器配置失败：${String(error)}`);
     } finally {
       setRemoteScraperBusy(false);
+    }
+  }
+
+  async function refreshDiagnosticLogs() {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy("refresh");
+    setStatus("正在刷新诊断日志...");
+    try {
+      const logs = await api.getDiagnosticLogTail(80);
+      setDiagnosticLogs(logs);
+      setStatus(`已刷新诊断日志：${logs.length} 条。`);
+    } catch (error) {
+      setStatus(`刷新诊断日志失败：${String(error)}`);
+    } finally {
+      setDiagnosticsBusy(null);
+    }
+  }
+
+  async function exportDiagnosticsSnapshot() {
+    if (diagnosticsBusy) return;
+    setDiagnosticsBusy("export");
+    setStatus("正在导出诊断快照...");
+    try {
+      const result = await api.exportDiagnosticsSnapshot();
+      setStatus(formatDiagnosticExportSummary(result));
+      const logs = await api.getDiagnosticLogTail(80);
+      setDiagnosticLogs(logs);
+    } catch (error) {
+      setStatus(`导出诊断快照失败：${String(error)}`);
+    } finally {
+      setDiagnosticsBusy(null);
     }
   }
 
@@ -1926,6 +1965,32 @@ export function App() {
                       </div>
                     ))
                   )}
+                </div>
+
+                <div className="diagnostics-panel">
+                  <div className="daemon-list-head">
+                    <strong>诊断日志</strong>
+                    <span>{diagnosticLogs.length} 条</span>
+                  </div>
+                  <div className="daemon-actions">
+                    <button type="button" onClick={refreshDiagnosticLogs} disabled={diagnosticsBusy !== null || !hasBackend}>
+                      <RefreshCw size={16} /> {diagnosticsBusy === "refresh" ? "刷新中" : "刷新日志"}
+                    </button>
+                    <button type="button" onClick={exportDiagnosticsSnapshot} disabled={diagnosticsBusy !== null || !hasBackend}>
+                      <Settings size={16} /> {diagnosticsBusy === "export" ? "导出中" : "导出诊断"}
+                    </button>
+                  </div>
+                  <div className="diagnostic-log-list">
+                    {diagnosticLogs.length === 0 ? (
+                      <span className="empty-text">暂无诊断日志</span>
+                    ) : (
+                      diagnosticLogs.slice(-20).map((entry, index) => (
+                        <div className={`diagnostic-log-row ${entry.level.toLowerCase()}`} key={`${entry.timestamp}-${entry.target}-${index}`}>
+                          {formatDiagnosticLogLine(entry)}
+                        </div>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
             ) : null}

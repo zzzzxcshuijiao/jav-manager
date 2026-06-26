@@ -227,6 +227,25 @@ export interface PipelineRun {
   error?: string | null;
 }
 
+export type DiagnosticLevel = "Info" | "Warn" | "Error";
+
+export interface DiagnosticLogEntry {
+  timestamp: string;
+  level: DiagnosticLevel;
+  target: string;
+  message: string;
+  context: unknown;
+}
+
+export interface DiagnosticExportResult {
+  path: string;
+  logs: number;
+  pipeline_runs: number;
+  scrape_jobs: number;
+  open_exceptions: number;
+  holding_items: number;
+}
+
 export interface WorkDetail {
   work: Work;
   actors: Actor[];
@@ -446,6 +465,12 @@ export const api = {
   },
   getDaemonStatus() {
     return daemonClient.getStatus();
+  },
+  getDiagnosticLogTail(limit = 80) {
+    return command<DiagnosticLogEntry[]>("get_diagnostic_log_tail", { limit });
+  },
+  exportDiagnosticsSnapshot() {
+    return command<DiagnosticExportResult>("export_diagnostics_snapshot_command");
   },
   pauseDaemon() {
     return daemonClient.pause();
