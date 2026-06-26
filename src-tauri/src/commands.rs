@@ -15,6 +15,10 @@ use crate::daemon_control::{
     resolve_exception_entry as resolve_exception_in_repo, run_daemon_once, DaemonControlRuntime,
     DaemonControlStatus,
 };
+use crate::diagnostics::{
+    build_diagnostic_snapshot, export_diagnostic_snapshot, DiagnosticExportResult, DiagnosticLevel,
+    DiagnosticLogEntry, DiagnosticSnapshotInput, DiagnosticsWriter,
+};
 use crate::domain::{
     Actor, ArchiveAction, ArchiveActionLog, ArchivePlan, DimensionCount, Exception,
     ExceptionStatus, FileVersion, HoldingEntry, IngestDecision, IngestItem, IngestItemFilters,
@@ -27,11 +31,13 @@ use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
 use crate::storage::Repository;
 use crate::thumbnail::{
-    clear_thumbnail_cache as clear_thumbnail_cache_dir, get_or_create_thumbnail as create_thumbnail,
+    clear_thumbnail_cache as clear_thumbnail_cache_dir,
+    get_or_create_thumbnail as create_thumbnail,
     thumbnail_cache_summary as read_thumbnail_cache_summary, ThumbnailCacheSummary,
     DEFAULT_THUMBNAIL_CACHE_LIMIT_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,6 +57,7 @@ pub struct AppState {
     pub remote_scraper_settings: Mutex<RemoteScraperSettings>,
     pub control_service: Mutex<Option<ControlServiceHandle>>,
     pub control_service_error: Mutex<Option<String>>,
+    pub diagnostics: Mutex<Option<DiagnosticsWriter>>,
     pub next_job_id: Mutex<i64>,
     pub next_item_id: Mutex<i64>,
     pub next_plan_id: Mutex<i64>,
@@ -71,6 +78,7 @@ impl Default for AppState {
             remote_scraper_settings: Mutex::new(RemoteScraperSettings::default()),
             control_service: Mutex::new(None),
             control_service_error: Mutex::new(None),
+            diagnostics: Mutex::new(None),
             next_job_id: Mutex::new(1),
             next_item_id: Mutex::new(1),
             next_plan_id: Mutex::new(1),
@@ -122,7 +130,10 @@ pub fn configure_source_roots(
         repo.set_source_roots(&path_bufs)
             .map_err(|error| error.to_string())?;
     }
-    *state.source_roots.lock().map_err(|error| error.to_string())? = paths.clone();
+    *state
+        .source_roots
+        .lock()
+        .map_err(|error| error.to_string())? = paths.clone();
     Ok(CommandResult { data: paths })
 }
 
@@ -140,7 +151,10 @@ pub fn configure_archive_root(
         repo.set_archive_root(Path::new(&path))
             .map_err(|error| error.to_string())?;
     }
-    *state.archive_root.lock().map_err(|error| error.to_string())? = Some(path.clone());
+    *state
+        .archive_root
+        .lock()
+        .map_err(|error| error.to_string())? = Some(path.clone());
     Ok(CommandResult { data: path })
 }
 
@@ -155,7 +169,9 @@ pub fn get_source_roots(state: State<'_, AppState>) -> Result<CommandResult<Vec<
 }
 
 #[tauri::command]
-pub fn get_archive_root(state: State<'_, AppState>) -> Result<CommandResult<Option<String>>, String> {
+pub fn get_archive_root(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Option<String>>, String> {
     let path = state
         .archive_root
         .lock()
@@ -218,6 +234,20 @@ pub fn configure_aria2_settings(
         .aria2_settings
         .lock()
         .map_err(|error| error.to_string())? = normalized.clone();
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "settings.aria2",
+        "aria2 settings saved",
+        json!({
+            "enabled": normalized.enabled,
+            "host": normalized.host,
+            "port": normalized.port,
+            "path": normalized.path,
+            "secret_configured": normalized.secret.is_some(),
+            "tracked_gids": normalized.tracked_gids.len(),
+        }),
+    );
     Ok(CommandResult { data: normalized })
 }
 
@@ -254,6 +284,19 @@ fn configure_remote_scraper_settings_in_state(
         .remote_scraper_settings
         .lock()
         .map_err(|error| error.to_string())? = normalized.clone();
+    log_diagnostic_event(
+        state,
+        DiagnosticLevel::Info,
+        "settings.remote_scraper",
+        "remote scraper settings saved",
+        json!({
+            "enabled": normalized.enabled,
+            "sources": normalized.sources.len(),
+            "enabled_sources": normalized.sources.iter().filter(|source| source.enabled).count(),
+            "proxy_configured": normalized.proxy_url.is_some(),
+            "include_example_fallback": normalized.include_example_fallback,
+        }),
+    );
     Ok(CommandResult { data: normalized })
 }
 
@@ -285,7 +328,10 @@ pub fn get_remote_scraper_settings(
 pub fn get_control_service_discovery(
     app: tauri::AppHandle,
 ) -> Result<CommandResult<Option<ControlServiceDiscovery>>, String> {
-    let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     let discovery_path = control_service_discovery_path(&app_data);
     Ok(CommandResult {
         data: read_control_service_discovery(&discovery_path).map_err(|error| error.to_string())?,
@@ -298,7 +344,10 @@ pub fn get_control_service_host_status(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<ControlServiceHostStatus>, String> {
-    let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
     let last_error = state
         .control_service_error
         .lock()
@@ -319,6 +368,80 @@ pub fn get_daemon_status(
     })
 }
 
+/// Return the most recent structured diagnostic log entries.
+#[tauri::command]
+pub fn get_diagnostic_log_tail(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<Vec<DiagnosticLogEntry>>, String> {
+    let guard = state
+        .diagnostics
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let logs = match guard.as_ref() {
+        Some(writer) => writer
+            .tail(limit.unwrap_or(80))
+            .map_err(|error| error.to_string())?,
+        None => Vec::new(),
+    };
+    Ok(CommandResult { data: logs })
+}
+
+/// Export a redacted diagnostic snapshot under the app data diagnostics dir.
+#[tauri::command]
+pub fn export_diagnostics_snapshot_command(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<DiagnosticExportResult>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let recent_logs = {
+        let guard = state
+            .diagnostics
+            .lock()
+            .map_err(|error| error.to_string())?;
+        match guard.as_ref() {
+            Some(writer) => writer.tail(200).map_err(|error| error.to_string())?,
+            None => Vec::new(),
+        }
+    };
+    let daemon = read_daemon_status(&state).ok();
+    let last_error = state
+        .control_service_error
+        .lock()
+        .ok()
+        .and_then(|error| error.clone());
+    let control_service = Some(state.control_service_host_status(&app_data, last_error));
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let snapshot = build_diagnostic_snapshot(DiagnosticSnapshotInput {
+        app_data_dir: &app_data,
+        repository: repo_guard.as_ref(),
+        control_service,
+        daemon,
+        recent_logs,
+    })
+    .map_err(|error| error.to_string())?;
+    let result =
+        export_diagnostic_snapshot(&app_data, &snapshot).map_err(|error| error.to_string())?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "diagnostics.export",
+        "diagnostic snapshot exported",
+        json!({
+            "path": result.path.clone(),
+            "logs": result.logs,
+            "pipeline_runs": result.pipeline_runs,
+            "scrape_jobs": result.scrape_jobs,
+            "open_exceptions": result.open_exceptions,
+            "holding_items": result.holding_items,
+        }),
+    );
+    Ok(CommandResult { data: result })
+}
+
 /// Pause future synchronous daemon runs without interrupting a running file operation.
 #[tauri::command]
 pub fn pause_daemon(
@@ -331,9 +454,15 @@ pub fn pause_daemon(
             .map_err(|error| error.to_string())?;
         runtime.paused = true;
     }
-    Ok(CommandResult {
-        data: read_daemon_status(&state)?,
-    })
+    let status = read_daemon_status(&state)?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.control",
+        "daemon paused",
+        json!({ "state": status.state }),
+    );
+    Ok(CommandResult { data: status })
 }
 
 /// Resume future synchronous daemon runs and return the refreshed status.
@@ -348,9 +477,15 @@ pub fn resume_daemon(
             .map_err(|error| error.to_string())?;
         runtime.paused = false;
     }
-    Ok(CommandResult {
-        data: read_daemon_status(&state)?,
-    })
+    let status = read_daemon_status(&state)?;
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.control",
+        "daemon resumed",
+        json!({ "state": status.state }),
+    );
+    Ok(CommandResult { data: status })
 }
 
 /// Run one Stage 4 daemon pass through the headless core.
@@ -358,6 +493,13 @@ pub fn resume_daemon(
 pub fn run_daemon_once_command(
     state: State<'_, AppState>,
 ) -> Result<CommandResult<RunOnceReport>, String> {
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "daemon.run_once",
+        "run started",
+        json!({}),
+    );
     let metadata_enabled = configured_metadata_provider_enabled(&state)?;
     let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
@@ -368,9 +510,37 @@ pub fn run_daemon_once_command(
         .lock()
         .map_err(|error| error.to_string())?;
     match run_daemon_once(repo, &mut runtime, metadata_enabled) {
-        Ok(report) => Ok(CommandResult { data: report }),
+        Ok(report) => {
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Info,
+                "daemon.run_once",
+                "run completed",
+                json!({
+                    "scan_scanned_files": report.scan.scanned_files,
+                    "scan_queued_files": report.scan.queued_files,
+                    "scan_skipped_files": report.scan.skipped_files,
+                    "aria2_enabled": report.aria2.enabled,
+                    "aria2_completed_gids": report.aria2.completed_gids,
+                    "aria2_failed_gids": report.aria2.failed_gids,
+                    "processed": report.process.processed,
+                    "archived": report.process.archived,
+                    "holding": report.process.holding,
+                    "exceptions": report.process.exceptions,
+                    "failed": report.process.failed,
+                }),
+            );
+            Ok(CommandResult { data: report })
+        }
         Err(error) => {
             runtime.last_error = Some(error.to_string());
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Error,
+                "daemon.run_once",
+                "run failed",
+                json!({ "error": error.to_string() }),
+            );
             Err(error.to_string())
         }
     }
@@ -627,10 +797,7 @@ pub fn list_file_versions_for_work(
     if work_id <= 0 {
         return Err("work_id must be positive".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -865,8 +1032,8 @@ pub fn resolve_match(
         .find(|item| item.id == Some(item_id))
         .ok_or_else(|| format!("ingest item {item_id} was not found"))?;
     if let Some(code) = normalized_code {
-        let normalized = normalize_code(&code)
-            .ok_or_else(|| format!("invalid normalized_code: {code}"))?;
+        let normalized =
+            normalize_code(&code).ok_or_else(|| format!("invalid normalized_code: {code}"))?;
         item.normalized_code = Some(normalized);
     }
     item.review_reasons.retain(|reason| {
@@ -892,10 +1059,7 @@ pub fn merge_versions(
     if file_version_ids.is_empty() {
         return Err("file_version_ids cannot be empty".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -967,10 +1131,7 @@ pub fn revalidate_move_failed_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -997,10 +1158,7 @@ pub fn ignore_duplicate_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -1022,16 +1180,12 @@ pub fn ignore_duplicate_items(
     Ok(CommandResult { data: updated })
 }
 
-
 #[tauri::command]
 pub fn delete_items(
     item_ids: Vec<i64>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<Vec<IngestItem>>, String> {
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -1061,10 +1215,7 @@ pub fn list_work_actors(
     if work_id <= 0 {
         return Err("work_id must be positive".to_string());
     }
-    let repo_guard = state
-        .repository
-        .lock()
-        .map_err(|error| error.to_string())?;
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
@@ -1203,9 +1354,8 @@ pub fn rebuild_library_from_nfo(
     let roots: Vec<PathBuf> = source_roots.into_iter().map(PathBuf::from).collect();
     // Build the external image index from configured poster/screenshot/gif dirs
     // so rebuild backfills covers and previews for works without NFO artwork.
-    let (poster_dir, screenshot_dir, gif_dir) = repo
-        .get_poster_dirs()
-        .map_err(|error| error.to_string())?;
+    let (poster_dir, screenshot_dir, gif_dir) =
+        repo.get_poster_dirs().map_err(|error| error.to_string())?;
     let empty = std::path::PathBuf::new();
     let poster_index = crate::poster_index::PosterIndex::scan(
         poster_dir.as_deref().unwrap_or(&empty),
@@ -1247,16 +1397,12 @@ pub struct PosterDirs {
 }
 
 #[tauri::command]
-pub fn get_poster_dirs(
-    state: State<'_, AppState>,
-) -> Result<CommandResult<PosterDirs>, String> {
+pub fn get_poster_dirs(state: State<'_, AppState>) -> Result<CommandResult<PosterDirs>, String> {
     let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
     let Some(repo) = repo_guard.as_ref() else {
         return Err("repository is not available".to_string());
     };
-    let (poster, screenshot, gif) = repo
-        .get_poster_dirs()
-        .map_err(|error| error.to_string())?;
+    let (poster, screenshot, gif) = repo.get_poster_dirs().map_err(|error| error.to_string())?;
     Ok(CommandResult {
         data: PosterDirs {
             poster_dir: poster.map(|p| p.to_string_lossy().to_string()),
@@ -1367,8 +1513,7 @@ pub fn plan_centralized_migration(
 pub fn execute_centralized_migration(
     plan: crate::domain::MigrationPlan,
 ) -> Result<CommandResult<usize>, String> {
-    let migrated = crate::migration::execute_migration(&plan)
-        .map_err(|error| error.to_string())?;
+    let migrated = crate::migration::execute_migration(&plan).map_err(|error| error.to_string())?;
     Ok(CommandResult { data: migrated })
 }
 
@@ -1398,7 +1543,10 @@ pub fn get_resource_pool_dirs(
     let dirs = repo
         .get_resource_pool_dirs()
         .map_err(|error| error.to_string())?;
-    let strings: Vec<String> = dirs.into_iter().map(|p| p.to_string_lossy().to_string()).collect();
+    let strings: Vec<String> = dirs
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     Ok(CommandResult { data: strings })
 }
 
@@ -1561,6 +1709,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_control_service_discovery,
             get_control_service_host_status,
             get_daemon_status,
+            get_diagnostic_log_tail,
+            export_diagnostics_snapshot_command,
             pause_daemon,
             resume_daemon,
             run_daemon_once_command,
@@ -1619,9 +1769,22 @@ pub fn build_app() -> Builder<tauri::Wry> {
                 .app_data_dir()
                 .map_err(|error| error.to_string())?;
             fs::create_dir_all(&app_data).map_err(|error| error.to_string())?;
+            let state = app.state::<AppState>();
+            if let Ok(diagnostics) = DiagnosticsWriter::new(app_data.join("logs")) {
+                *state
+                    .diagnostics
+                    .lock()
+                    .map_err(|error| error.to_string())? = Some(diagnostics);
+            }
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Info,
+                "app.setup",
+                "app data initialized",
+                json!({ "app_data_dir": app_data.to_string_lossy() }),
+            );
             let repo = open_repository(&app_data.join("library.sqlite"))
                 .map_err(|error| error.to_string())?;
-            let state = app.state::<AppState>();
             let source_roots: Vec<String> = repo
                 .get_source_roots()
                 .map_err(|error| error.to_string())?
@@ -1641,8 +1804,14 @@ pub fn build_app() -> Builder<tauri::Wry> {
             let remote_scraper_settings = repo
                 .get_remote_scraper_settings()
                 .map_err(|error| error.to_string())?;
-            *state.source_roots.lock().map_err(|error| error.to_string())? = source_roots;
-            *state.archive_root.lock().map_err(|error| error.to_string())? = archive_root;
+            *state
+                .source_roots
+                .lock()
+                .map_err(|error| error.to_string())? = source_roots;
+            *state
+                .archive_root
+                .lock()
+                .map_err(|error| error.to_string())? = archive_root;
             *state
                 .metadata_provider_enabled
                 .lock()
@@ -1658,6 +1827,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             *state.repository.lock().map_err(|error| error.to_string())? = Some(repo);
             match start_control_service_host(&app_data) {
                 Ok(handle) => {
+                    let port = handle.port();
                     *state
                         .control_service
                         .lock()
@@ -1666,12 +1836,26 @@ pub fn build_app() -> Builder<tauri::Wry> {
                         .control_service_error
                         .lock()
                         .map_err(|error| error.to_string())? = None;
+                    log_diagnostic_event(
+                        &state,
+                        DiagnosticLevel::Info,
+                        "app.setup",
+                        "control service started",
+                        json!({ "port": port }),
+                    );
                 }
                 Err(error) => {
                     *state
                         .control_service_error
                         .lock()
                         .map_err(|lock_error| lock_error.to_string())? = Some(error.to_string());
+                    log_diagnostic_event(
+                        &state,
+                        DiagnosticLevel::Warn,
+                        "app.setup",
+                        "control service failed to start",
+                        json!({ "error": error.to_string() }),
+                    );
                 }
             }
             Ok(())
@@ -1908,7 +2092,9 @@ fn nearest_existing_parent(path: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::{DiagnosticLevel, DiagnosticsWriter};
     use crate::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
+    use serde_json::json;
 
     #[test]
     fn command_watch_status_parser_accepts_stage1_statuses() {
@@ -1972,4 +2158,56 @@ mod tests {
             "media-manager-test"
         );
     }
+
+    #[test]
+    fn app_state_diagnostic_logging_is_optional() {
+        let state = AppState::default();
+
+        log_diagnostic_event(
+            &state,
+            DiagnosticLevel::Info,
+            "test.optional",
+            "no writer",
+            json!({ "ok": true }),
+        );
+
+        assert!(state.diagnostics.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn app_state_diagnostic_logging_writes_when_initialized() {
+        let state = AppState::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = DiagnosticsWriter::new(tmp.path().join("logs")).unwrap();
+        *state.diagnostics.lock().unwrap() = Some(writer.clone());
+
+        log_diagnostic_event(
+            &state,
+            DiagnosticLevel::Error,
+            "test.initialized",
+            "failed",
+            json!({ "token": "secret-token" }),
+        );
+
+        let tail = writer.tail(10).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].target, "test.initialized");
+        assert_eq!(tail[0].context["token"], "***");
+    }
+}
+
+fn log_diagnostic_event(
+    state: &AppState,
+    level: DiagnosticLevel,
+    target: &str,
+    message: impl Into<String>,
+    context: serde_json::Value,
+) {
+    let Ok(guard) = state.diagnostics.lock() else {
+        return;
+    };
+    let Some(writer) = guard.as_ref() else {
+        return;
+    };
+    let _ = writer.append(level, target, message, context);
 }

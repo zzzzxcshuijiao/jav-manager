@@ -192,12 +192,9 @@ impl DiagnosticsWriter {
 pub fn redact_diagnostic_value(value: Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(redact_map(map)),
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(redact_diagnostic_value)
-                .collect(),
-        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_diagnostic_value).collect())
+        }
         other => other,
     }
 }
@@ -240,30 +237,25 @@ pub fn redact_proxy_url(value: &str) -> String {
 
 /// Build one in-memory diagnostic snapshot from repository summaries and recent logs.
 pub fn build_diagnostic_snapshot(input: DiagnosticSnapshotInput<'_>) -> Result<DiagnosticSnapshot> {
-    let (
-        settings,
-        recent_pipeline_runs,
-        recent_scrape_jobs,
-        open_exceptions,
-        holding_items,
-    ) = if let Some(repo) = input.repository {
-        let settings = Some(build_settings_summary(repo)?);
-        let mut pipeline_runs = repo.list_pipeline_runs()?;
-        pipeline_runs.truncate(SNAPSHOT_PIPELINE_LIMIT);
-        let mut scrape_jobs = repo.list_scrape_jobs()?;
-        scrape_jobs.truncate(SNAPSHOT_SCRAPE_LIMIT);
-        let mut exceptions: Vec<Exception> = repo
-            .list_exceptions()?
-            .into_iter()
-            .filter(|entry| entry.status == ExceptionStatus::Open)
-            .collect();
-        exceptions.truncate(SNAPSHOT_EXCEPTION_LIMIT);
-        let mut holding = repo.list_holding()?;
-        holding.truncate(SNAPSHOT_HOLDING_LIMIT);
-        (settings, pipeline_runs, scrape_jobs, exceptions, holding)
-    } else {
-        (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
-    };
+    let (settings, recent_pipeline_runs, recent_scrape_jobs, open_exceptions, holding_items) =
+        if let Some(repo) = input.repository {
+            let settings = Some(build_settings_summary(repo)?);
+            let mut pipeline_runs = repo.list_pipeline_runs()?;
+            pipeline_runs.truncate(SNAPSHOT_PIPELINE_LIMIT);
+            let mut scrape_jobs = repo.list_scrape_jobs()?;
+            scrape_jobs.truncate(SNAPSHOT_SCRAPE_LIMIT);
+            let mut exceptions: Vec<Exception> = repo
+                .list_exceptions()?
+                .into_iter()
+                .filter(|entry| entry.status == ExceptionStatus::Open)
+                .collect();
+            exceptions.truncate(SNAPSHOT_EXCEPTION_LIMIT);
+            let mut holding = repo.list_holding()?;
+            holding.truncate(SNAPSHOT_HOLDING_LIMIT);
+            (settings, pipeline_runs, scrape_jobs, exceptions, holding)
+        } else {
+            (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
 
     Ok(DiagnosticSnapshot {
         generated_at: Utc::now().to_rfc3339(),
@@ -318,9 +310,6 @@ fn build_settings_summary(repo: &Repository) -> Result<DiagnosticSettingsSummary
         aria2_tracked_gids: aria2.tracked_gids.len(),
         remote_scraper_enabled: remote_scraper.enabled,
         remote_scraper_sources: remote_scraper.sources.len(),
-        remote_scraper_proxy_url: remote_scraper
-            .proxy_url
-            .as_deref()
-            .map(redact_proxy_url),
+        remote_scraper_proxy_url: remote_scraper.proxy_url.as_deref().map(redact_proxy_url),
     })
 }

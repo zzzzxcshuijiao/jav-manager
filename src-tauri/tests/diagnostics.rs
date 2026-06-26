@@ -21,8 +21,7 @@ fn open_temp_repo(path: &Path) -> Repository {
 #[test]
 fn diagnostics_writer_appends_jsonl_and_reads_tail() {
     let tmp = tempfile::tempdir().unwrap();
-    let writer =
-        DiagnosticsWriter::new_with_limits(tmp.path().join("logs"), 64 * 1024, 2).unwrap();
+    let writer = DiagnosticsWriter::new_with_limits(tmp.path().join("logs"), 64 * 1024, 2).unwrap();
 
     writer
         .append(
@@ -54,8 +53,7 @@ fn diagnostics_writer_appends_jsonl_and_reads_tail() {
 #[test]
 fn diagnostics_tail_limit_is_bounded_and_ordered_oldest_to_newest() {
     let tmp = tempfile::tempdir().unwrap();
-    let writer =
-        DiagnosticsWriter::new_with_limits(tmp.path().join("logs"), 64 * 1024, 2).unwrap();
+    let writer = DiagnosticsWriter::new_with_limits(tmp.path().join("logs"), 64 * 1024, 2).unwrap();
 
     for index in 0..120 {
         writer
@@ -95,8 +93,16 @@ fn diagnostics_writer_rotates_when_file_exceeds_limit() {
     }
 
     assert!(writer.log_path().exists());
-    assert!(tmp.path().join("logs").join("media-manager.jsonl.1").exists());
-    assert!(!tmp.path().join("logs").join("media-manager.jsonl.3").exists());
+    assert!(tmp
+        .path()
+        .join("logs")
+        .join("media-manager.jsonl.1")
+        .exists());
+    assert!(!tmp
+        .path()
+        .join("logs")
+        .join("media-manager.jsonl.3")
+        .exists());
 }
 
 #[test]
