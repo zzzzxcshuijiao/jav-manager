@@ -1,3 +1,4 @@
+use crate::aria2::{Aria2Transport, HttpAria2Transport};
 use crate::daemon::{CompletionPolicy, DaemonConfig, HeadlessDaemon, RunOnceReport};
 use crate::domain::{Exception, ExceptionStatus, HoldingEntry, PipelineRun, ScrapedWorkMetadata};
 use crate::pipeline::{ScrapeCoordinator, ScraperSource};
@@ -126,6 +127,17 @@ pub fn run_daemon_once(
     runtime: &mut DaemonControlRuntime,
     metadata_enabled: bool,
 ) -> Result<RunOnceReport> {
+    run_daemon_once_with_aria2_transport(repo, runtime, metadata_enabled, HttpAria2Transport)
+}
+
+/// Run one daemon pass with an injectable aria2 transport so tests do not need
+/// a real aria2 process.
+pub fn run_daemon_once_with_aria2_transport<T: Aria2Transport>(
+    repo: &Repository,
+    runtime: &mut DaemonControlRuntime,
+    metadata_enabled: bool,
+    aria2_transport: T,
+) -> Result<RunOnceReport> {
     if runtime.paused {
         return Ok(RunOnceReport::default());
     }
@@ -145,9 +157,12 @@ pub fn run_daemon_once(
             sample_delay: Duration::ZERO,
         },
     );
+    let aria2_settings = repo.get_aria2_settings()?;
+    let aria2 = daemon.poll_aria2_once(&aria2_settings, aria2_transport)?;
 
     match daemon.run_once() {
-        Ok(report) => {
+        Ok(mut report) => {
+            report.aria2 = aria2;
             runtime.processed += report.process.processed;
             runtime.last_error = daemon.status().last_error;
             Ok(report)

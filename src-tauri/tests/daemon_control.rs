@@ -1,7 +1,8 @@
+use media_manager::aria2::{Aria2RpcEndpoint, Aria2Settings, Aria2Transport};
 use media_manager::daemon_control::{
     build_daemon_status, list_exception_entries, list_holding_entries, list_recent_pipeline_runs,
-    resolve_exception_entry, run_daemon_once, DaemonControlRuntime, ExamplePipelineScraper,
-    MetadataSource,
+    resolve_exception_entry, run_daemon_once, run_daemon_once_with_aria2_transport,
+    DaemonControlRuntime, ExamplePipelineScraper, MetadataSource,
 };
 use media_manager::domain::{
     Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
@@ -9,6 +10,17 @@ use media_manager::domain::{
 use media_manager::pipeline::ScraperSource;
 use media_manager::storage::Repository;
 use std::path::{Path, PathBuf};
+
+#[derive(Clone)]
+struct CommandAria2Transport {
+    response: String,
+}
+
+impl Aria2Transport for CommandAria2Transport {
+    fn post_json(&self, _endpoint: &Aria2RpcEndpoint, _body: &str) -> anyhow::Result<String> {
+        Ok(self.response.clone())
+    }
+}
 
 fn open_repo(path: &Path) -> Repository {
     let repo = Repository::open(path).unwrap();
@@ -126,6 +138,54 @@ fn run_once_archives_with_example_scraper_when_enabled() {
     assert_eq!(runtime.processed, 1);
     assert!(archive.join("ABP-404").join("ABP-404.mp4").exists());
     assert_eq!(repo.list_pipeline_runs().unwrap()[0].status, "archived");
+}
+
+#[test]
+fn run_once_polls_configured_aria2_gid_before_directory_scan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (repo, inbox, archive, _assets) = configured_repo(&tmp);
+    let video = inbox.join("ABP-404.mp4");
+    std::fs::write(&video, b"stable video bytes").unwrap();
+    repo.set_aria2_settings(&Aria2Settings {
+        enabled: true,
+        host: "127.0.0.1".to_string(),
+        port: 6800,
+        path: "/jsonrpc".to_string(),
+        secret: None,
+        timeout_ms: 5000,
+        poll_interval_secs: 30,
+        tracked_gids: vec!["gid-404".to_string()],
+    })
+    .unwrap();
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "media-manager-tell-status",
+        "result": {
+            "gid": "gid-404",
+            "status": "complete",
+            "totalLength": "18",
+            "completedLength": "18",
+            "files": [
+                {"path": video.to_string_lossy().to_string(), "length": "18", "completedLength": "18", "selected": "true"}
+            ]
+        }
+    })
+    .to_string();
+    let mut runtime = DaemonControlRuntime::default();
+
+    let report = run_daemon_once_with_aria2_transport(
+        &repo,
+        &mut runtime,
+        true,
+        CommandAria2Transport { response },
+    )
+    .unwrap();
+
+    assert_eq!(report.aria2.enabled, true);
+    assert_eq!(report.aria2.attempted_gids, 1);
+    assert_eq!(report.aria2.queued_files, 1);
+    assert_eq!(report.process.archived, 1);
+    assert!(archive.join("ABP-404").join("ABP-404.mp4").exists());
 }
 
 #[test]
