@@ -98,7 +98,7 @@ impl ConfiguredPipelineScrapers {
         C: RemoteMetadataHttpClient + Clone + 'static,
     {
         if !metadata_enabled {
-            bail!("示例元数据源未开启，阶段 4 不会用空 scraper 处理真实文件");
+            bail!("元数据源未开启，自动管线不会用空 scraper 处理真实文件");
         }
         let normalized = settings.normalized()?;
         let mut sources = build_remote_scraper_sources(&normalized, remote_client)?;
@@ -114,11 +114,7 @@ impl ConfiguredPipelineScrapers {
     /// Borrow scraper sources for the pipeline coordinator.
     pub fn coordinator(&self) -> ScrapeCoordinator<'_> {
         ScrapeCoordinator {
-            sources: self
-                .sources
-                .iter()
-                .map(|source| source.as_ref())
-                .collect(),
+            sources: self.sources.iter().map(|source| source.as_ref()).collect(),
         }
     }
 }
@@ -172,8 +168,8 @@ pub fn build_daemon_status(
 }
 
 /// Run one synchronous daemon pass through the Stage 3 core. The command layer
-/// refuses to process files while the example metadata source is disabled so a
-/// real library is not accidentally routed into scrape-failure exceptions.
+/// refuses to process files while metadata sources are disabled so a real
+/// library is not accidentally routed into scrape-failure exceptions.
 pub fn run_daemon_once(
     repo: &Repository,
     runtime: &mut DaemonControlRuntime,
@@ -218,8 +214,11 @@ where
     }
 
     let remote_settings = repo.get_remote_scraper_settings()?;
-    let scrapers =
-        ConfiguredPipelineScrapers::with_remote_client(&remote_settings, metadata_enabled, remote_client)?;
+    let scrapers = ConfiguredPipelineScrapers::with_remote_client(
+        &remote_settings,
+        metadata_enabled,
+        remote_client,
+    )?;
     let config = DaemonConfig::load(repo)?;
     let coordinator = scrapers.coordinator();
     let mut daemon = HeadlessDaemon::with_completion_policy(

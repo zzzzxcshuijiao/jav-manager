@@ -112,8 +112,14 @@ fn daemon_status_reports_configuration_and_queue_counts() {
 
     assert!(status.configured);
     assert_eq!(status.state, "Idle");
-    assert_eq!(status.archive_root, Some(archive.to_string_lossy().to_string()));
-    assert_eq!(status.asset_roots, vec![assets.to_string_lossy().to_string()]);
+    assert_eq!(
+        status.archive_root,
+        Some(archive.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        status.asset_roots,
+        vec![assets.to_string_lossy().to_string()]
+    );
     assert_eq!(status.processed, 7);
     assert_eq!(status.open_exceptions, 1);
     assert_eq!(status.holding_items, 1);
@@ -132,7 +138,7 @@ fn run_once_requires_example_metadata_source_before_touching_files() {
 
     let error = run_daemon_once(&repo, &mut runtime, false).unwrap_err();
 
-    assert!(error.to_string().contains("示例元数据源未开启"));
+    assert!(error.to_string().contains("元数据源未开启"));
     assert!(video.exists());
     assert_eq!(repo.list_pipeline_runs().unwrap().len(), 0);
 }
