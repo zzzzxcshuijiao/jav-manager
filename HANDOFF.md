@@ -37,6 +37,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 6C（aria2 配置与轮询入口）已实现并验证。**
 阶段 6C 新增持久化 aria2 RPC settings、tracked GIDs、run-once 前置 aria2 轮询、poll report 聚合、Tauri 设置命令、前端“自动管线”里的 aria2 配置表单，以及 run-once 摘要里的 aria2 统计。验证仍使用 fake transport、临时 TCP server、临时媒体文件和纯前端 fixture，不依赖真实 aria2 进程、真实下载任务或真实媒体盘。阶段 6C 仍不做 aria2 进程管理、下载任务创建/暂停/恢复、常驻后台轮询、WebSocket/callback 或真实网络 scraper。
 
+**阶段 6D（真实 scraper adapter 可验证接入）已实现并验证。**
+阶段 6D 新增远程 scraper settings、真实 HTTPS-capable HTTP client、javdb/javbus/fanza adapter registry、checked-in HTML fixtures、run-once 远程 source 接入、Tauri 设置命令、前端“自动管线”里的远程刮削器配置表单。验证使用 fake client、本地 TCP server、临时 SQLite 和 fixture HTML，不访问真实 scraper 站点，不处理登录/cookie/验证码/反爬，也不下载封面。默认远程 scraper disabled，example fallback 默认保留；用户显式启用远程 source 后，run-once 会优先尝试远程 metadata，再按配置 fallback。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -103,6 +106,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 18. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6b-aria2-rpc.md`** — 阶段 6B plan（已完成，含 TDD 步骤与验收）。
 19. **`docs/superpowers/specs/2026-06-26-media-manager-stage6c-aria2-config-polling-design.md`** — 阶段 6C aria2 配置与轮询入口设计（已完成）。
 20. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6c-aria2-config-polling.md`** — 阶段 6C plan（已完成，含 TDD 步骤与验收）。
+21. **`docs/superpowers/specs/2026-06-26-media-manager-stage6d-real-scraper-adapter-design.md`** — 阶段 6D 真实 scraper adapter 可验证接入设计（已完成）。
+22. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6d-real-scraper-adapter.md`** — 阶段 6D plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -202,6 +207,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - `summarizeRunOnceReport` 会在 run-once 摘要前置 aria2 统计。
 - 新增/更新测试：`aria2_rpc`、`core_behaviour`、`daemon`、`daemon_control`、`commands` unit、`daemonClient.test.ts`、`viewModel.test.ts`。
 
+## 阶段 6D 交付物
+
+- 新增 `RemoteScraperSettings` / `RemoteScraperSourceSettings`：默认 disabled、timeout、User-Agent、proxy URL、example fallback、内置 javdb/javbus/fanza source；配置作为 `app_settings.remote_scraper_settings` JSON 持久化。
+- 新增 `HttpRemoteMetadataClient`，用 `ureq` 支持真实 HTTP/HTTPS GET、User-Agent、timeout、可选 proxy、HTTP status / network / transport 错误分类；404/410 会转为 scraper miss，其他错误记录为 scrape job 失败原因。
+- 新增 source parser dispatch：`parse_javdb_metadata`、`parse_javbus_metadata`、`parse_fanza_metadata` 暂复用 JSON-LD fixture parser，后续站点结构变化可只改对应 adapter。
+- 新增 `src-tauri/tests/fixtures/remote_scraper/*.html`，所有 parser/HTTP 测试使用 fake client、本地 TCP server 和 checked-in fixture，不访问真实站点。
+- 新增 `build_remote_scraper_sources` 与 `ConfiguredPipelineScrapers`；run-once 会按 SQLite settings 构建远程 source，远程 source enabled 时排在 example fallback 前面。
+- `commands.rs` 新增并注册 `configure_remote_scraper_settings` / `get_remote_scraper_settings`，Tauri setup 会把 SQLite settings 预载入 `AppState`。
+- `src/api.ts` 新增远程 scraper DTO 和 command wrapper；`src/viewModel.ts` 新增 `formatRemoteScraperSettingsSummary`。
+- 设置页“自动管线”新增远程刮削器配置块：总开关、User-Agent、timeout、proxy URL、example fallback、source enable/template/confidence，保存按钮有 loading/disabled/status 反馈。
+- 新增/更新测试：`remote_scraper`、`core_behaviour`、`daemon_control`、`commands` unit、`viewModel.test.ts`；完整 gate 通过 `cargo test`、`npm test`、`npx tsc --noEmit`、`npm run build`。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -216,16 +233,17 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 - `src-tauri/src/commands.rs` 前端命令路径的 `parse_watch_status` 新变体缺失已在阶段 4 修复，并有 `commands::tests::command_watch_status_parser_accepts_stage1_statuses` 回归测试。
 - 几处 `created_at` 只写未读 / `parse_*` 回退不可区分 → 非阻塞清理项，后续碰到相关命令/UI 时再处理。
-- 真实网络 scraper（FANZA/JavBus/JavDB 等）尚未接入；阶段 6A 只提供远程 adapter 骨架和 JSON-LD fixture parser，不访问真实站点。
-- 真实 HTTP client、站点特定 parser、代理/cookie/登录/重试、封面下载、scraper UI 设置和多源排序仍是后续阶段工作。
+- 真实站点 live HTML 兼容性仍需用户在实际环境验证；Codex 测试只证明 adapter / HTTP / fixture / run-once 边界，不证明当前 javdb/javbus/fanza 页面一定可解析。
+- 登录、cookie、验证码、反爬绕过、真实用户会话复用仍不做，也不应在 Codex 测试中加入。
+- 封面下载、远程 metadata 缓存、批量重试、精细多源排序/权重仍是后续阶段工作。
 - aria2 进程管理、下载任务创建/暂停/恢复、自动发现所有 aria2 任务、常驻后台轮询、WebSocket/callback 通知仍是后续阶段工作。
 - WebSocket、托盘、自启、常驻后台线程仍是后续阶段工作。
 
 ## 下一步
 
-如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，以及新增 aria2 配置块保存后，`run-once` 摘要是否出现 aria2 GID 尝试/完成/入队/失败统计。真实环境里需要用户自己启动/配置 aria2，并填入要跟踪的 GID；当前阶段不会创建下载任务，也不会常驻后台轮询。
+如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，以及远程刮削器配置保存后，启用的 source 是否在 `run-once` 中优先写入远程 metadata。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
 
-如果继续做 Codex 可编码工作，建议下一步做 **阶段 6D 真实 scraper 站点 adapter**（在 6A 骨架上补具体站点 parser、真实 HTTP client、代理/登录/重试策略和封面下载，仍不要让测试依赖 live site）。另一条可选路线是 aria2 后续增强：下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，建议下一步二选一：一是 **阶段 6E metadata 真实环境反馈闭环**（基于用户实际验证结果补 parser fallback、错误可视化、scrape job 面板、metadata retry），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 

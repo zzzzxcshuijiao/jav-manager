@@ -356,7 +356,7 @@ fn run_once_without_metadata_source_returns_error_and_keeps_file() {
     let response = authorized_post(handle.port(), "/v1/run-once");
 
     assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
-    assert!(response.contains("示例元数据源未开启"));
+    assert!(response.contains("元数据源未开启"));
     assert!(video.exists());
 
     handle.shutdown().unwrap();
