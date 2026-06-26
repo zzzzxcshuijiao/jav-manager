@@ -1,7 +1,10 @@
-use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport};
+use media_manager::aria2::{Aria2Client, Aria2RpcEndpoint, Aria2Transport, HttpAria2Transport};
 use media_manager::pipeline::Aria2TaskSnapshot;
 use serde_json::{json, Value};
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 #[derive(Clone)]
 struct RecordingTransport {
@@ -147,4 +150,71 @@ fn completed_selection_is_empty_for_unfinished_task() {
     assert_eq!(selection.scanned_files, 0);
     assert_eq!(selection.skipped_files, 0);
     assert!(selection.files.is_empty());
+}
+
+#[test]
+fn http_transport_posts_jsonrpc_body_to_endpoint_path() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured = Arc::new(Mutex::new(String::new()));
+    let captured_for_thread = captured.clone();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        *captured_for_thread.lock().unwrap() = request.clone();
+        let body = r#"{"jsonrpc":"2.0","id":"media-manager-tell-status","result":{"gid":"abc","status":"complete","totalLength":"1","completedLength":"1","files":[]}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    let endpoint = Aria2RpcEndpoint {
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/jsonrpc".to_string(),
+        secret: None,
+        timeout_ms: 1_000,
+    };
+    let client = Aria2Client::new(endpoint, HttpAria2Transport);
+
+    let status = client.tell_status("abc").unwrap();
+    server.join().unwrap();
+
+    assert!(status.is_complete().unwrap());
+    let request = captured.lock().unwrap().clone();
+    assert!(request.starts_with("POST /jsonrpc HTTP/1.1"));
+    assert!(request.contains("Content-Type: application/json"));
+    assert!(request.contains(r#""method":"aria2.tellStatus""#));
+    assert!(request.contains(r#""params":["abc","#));
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut raw = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        if let Some(total) = expected_http_request_len(&raw) {
+            if raw.len() >= total {
+                break;
+            }
+        }
+    }
+    String::from_utf8(raw).unwrap()
+}
+
+fn expected_http_request_len(raw: &[u8]) -> Option<usize> {
+    let text = String::from_utf8_lossy(raw);
+    let header_end = text.find("\r\n\r\n")? + 4;
+    let content_length = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Some(header_end + content_length)
 }

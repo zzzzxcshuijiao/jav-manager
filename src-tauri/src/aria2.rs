@@ -4,7 +4,10 @@ use crate::scanner::is_video_file;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const TELL_STATUS_ID: &str = "media-manager-tell-status";
 const TELL_STATUS_KEYS: [&str; 5] = [
@@ -42,6 +45,40 @@ impl Aria2RpcEndpoint {
 pub trait Aria2Transport {
     /// Send one JSON body to the configured endpoint and return the response body.
     fn post_json(&self, endpoint: &Aria2RpcEndpoint, body: &str) -> Result<String>;
+}
+
+/// Standard-library HTTP transport for aria2 JSON-RPC POST requests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpAria2Transport;
+
+impl Aria2Transport for HttpAria2Transport {
+    /// POST one JSON-RPC body and return the HTTP response body.
+    fn post_json(&self, endpoint: &Aria2RpcEndpoint, body: &str) -> Result<String> {
+        let mut stream = TcpStream::connect((endpoint.host.as_str(), endpoint.port))?;
+        let timeout = Duration::from_millis(endpoint.timeout_ms);
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+
+        let path = if endpoint.path.starts_with('/') {
+            endpoint.path.clone()
+        } else {
+            format!("/{}", endpoint.path)
+        };
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {}:{}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            endpoint.host,
+            endpoint.port,
+            body.len(),
+            body
+        );
+
+        stream.write_all(request.as_bytes())?;
+        stream.flush()?;
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        parse_http_response_body(&response)
+    }
 }
 
 /// JSON-RPC client for aria2 methods needed by the automatic pipeline.
@@ -210,4 +247,23 @@ fn parse_u64_field(name: &str, value: &str) -> Result<u64> {
     value
         .parse::<u64>()
         .map_err(|error| anyhow!("invalid aria2 {name}: {value}: {error}"))
+}
+
+fn parse_http_response_body(response: &str) -> Result<String> {
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow!("aria2 HTTP response missing header terminator"))?;
+    let status_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("aria2 HTTP response missing status line"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("aria2 HTTP response missing status code"))?
+        .parse::<u16>()?;
+    if !(200..=299).contains(&status) {
+        return Err(anyhow!("aria2 HTTP request failed with status {status}"));
+    }
+    Ok(body.to_string())
 }
