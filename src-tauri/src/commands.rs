@@ -29,6 +29,7 @@ use crate::ingest::IngestEngine;
 use crate::provider::{DisabledProvider, ExampleProvider};
 use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
+use crate::self_check::{run_pipeline_self_check, SelfCheckReport};
 use crate::storage::Repository;
 use crate::thumbnail::{
     clear_thumbnail_cache as clear_thumbnail_cache_dir,
@@ -440,6 +441,97 @@ pub fn export_diagnostics_snapshot_command(
         }),
     );
     Ok(CommandResult { data: result })
+}
+
+/// Run self-check from a plain `AppState` so the Tauri command and unit tests share behavior.
+fn run_pipeline_self_check_in_state(
+    app_data: &Path,
+    state: &AppState,
+) -> Result<CommandResult<SelfCheckReport>, String> {
+    let daemon = read_daemon_status_from_app_state(state);
+    let last_error = state
+        .control_service_error
+        .lock()
+        .ok()
+        .and_then(|error| error.clone());
+    let control_service = Some(state.control_service_host_status(app_data, last_error));
+    let diagnostics_available = state
+        .diagnostics
+        .lock()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    let repo_guard = state.repository.lock().map_err(|error| error.to_string())?;
+    let Some(repo) = repo_guard.as_ref() else {
+        return Err("repository is not available".to_string());
+    };
+    let report = run_pipeline_self_check(
+        app_data,
+        repo,
+        control_service,
+        daemon,
+        diagnostics_available,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: report })
+}
+
+/// Build daemon status from plain `AppState` for non-Tauri unit tests and helpers.
+fn read_daemon_status_from_app_state(state: &AppState) -> Option<DaemonControlStatus> {
+    let metadata_enabled = state
+        .metadata_provider_enabled
+        .lock()
+        .ok()
+        .map(|value| *value)
+        .unwrap_or(false);
+    let repo_guard = state.repository.lock().ok()?;
+    let repo = repo_guard.as_ref()?;
+    let runtime = state.daemon_runtime.lock().ok()?;
+    build_daemon_status(repo, &runtime, metadata_enabled).ok()
+}
+
+/// Run a local sandbox archive pass and configuration health checks for support diagnostics.
+#[tauri::command]
+pub fn run_pipeline_self_check_command(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<SelfCheckReport>, String> {
+    log_diagnostic_event(
+        &state,
+        DiagnosticLevel::Info,
+        "self_check.run",
+        "self-check started",
+        json!({}),
+    );
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    match run_pipeline_self_check_in_state(&app_data, &state) {
+        Ok(response) => {
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Info,
+                "self_check.run",
+                "self-check completed",
+                json!({
+                    "overall": response.data.overall,
+                    "checks": response.data.checks.len(),
+                    "sandbox": response.data.sandbox.is_some(),
+                }),
+            );
+            Ok(response)
+        }
+        Err(error) => {
+            log_diagnostic_event(
+                &state,
+                DiagnosticLevel::Error,
+                "self_check.run",
+                "self-check failed",
+                json!({ "error": error.clone() }),
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Pause future synchronous daemon runs without interrupting a running file operation.
@@ -1711,6 +1803,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_daemon_status,
             get_diagnostic_log_tail,
             export_diagnostics_snapshot_command,
+            run_pipeline_self_check_command,
             pause_daemon,
             resume_daemon,
             run_daemon_once_command,
@@ -2094,6 +2187,7 @@ mod tests {
     use super::*;
     use crate::diagnostics::{DiagnosticLevel, DiagnosticsWriter};
     use crate::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
+    use crate::self_check::SelfCheckOverall;
     use serde_json::json;
 
     #[test]
@@ -2193,6 +2287,31 @@ mod tests {
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].target, "test.initialized");
         assert_eq!(tail[0].context["token"], "***");
+    }
+
+    #[test]
+    fn pipeline_self_check_command_returns_report_with_sandbox_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let repo = Repository::open(&tmp.path().join("library.sqlite")).unwrap();
+        repo.migrate().unwrap();
+        repo.set_remote_scraper_settings(&RemoteScraperSettings {
+            enabled: false,
+            include_example_fallback: true,
+            ..RemoteScraperSettings::default()
+        })
+        .unwrap();
+        *state.repository.lock().unwrap() = Some(repo);
+
+        let response = run_pipeline_self_check_in_state(tmp.path(), &state).unwrap();
+
+        assert_eq!(response.data.overall, SelfCheckOverall::Warn);
+        assert!(response
+            .data
+            .checks
+            .iter()
+            .any(|item| item.id == "sandbox_archive"));
+        assert!(response.data.sandbox.is_some());
     }
 }
 
