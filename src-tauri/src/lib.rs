@@ -15,6 +15,7 @@ pub mod nfo;
 pub mod pipeline;
 pub mod provider;
 pub mod resource_pool;
+pub mod remote_scraper;
 pub mod scanner;
 pub mod storage;
 pub mod thumbnail;
