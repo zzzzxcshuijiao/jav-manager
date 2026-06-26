@@ -34,6 +34,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 6B（aria2 RPC 集成骨架）已实现并验证。**
 阶段 6B 新增纯 Rust aria2 JSON-RPC client、fake transport 测试、标准库 HTTP POST transport、完成任务 selected 视频文件提取，以及 daemon `scan_aria2_gid` 显式入口。验证使用 fake transport、临时 TCP server 和临时媒体文件，不依赖真实 aria2 进程、真实下载任务或真实媒体盘。阶段 6B 仍不做 aria2 配置 UI、持久化 endpoint、GID 来源、常驻轮询、WebSocket 通知、下载任务管理或真实网络 scraper。
 
+**阶段 6C（aria2 配置与轮询入口）已实现并验证。**
+阶段 6C 新增持久化 aria2 RPC settings、tracked GIDs、run-once 前置 aria2 轮询、poll report 聚合、Tauri 设置命令、前端“自动管线”里的 aria2 配置表单，以及 run-once 摘要里的 aria2 统计。验证仍使用 fake transport、临时 TCP server、临时媒体文件和纯前端 fixture，不依赖真实 aria2 进程、真实下载任务或真实媒体盘。阶段 6C 仍不做 aria2 进程管理、下载任务创建/暂停/恢复、常驻后台轮询、WebSocket/callback 或真实网络 scraper。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -51,7 +54,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1`
 
-说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 2 新增失败。
+说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。阶段 6C 收尾时默认 `src-tauri/target` 出现过 rlib mmap/metadata 异常，完整 gate 使用 `$env:CARGO_TARGET_DIR='src-tauri/target/stage6c'` 通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 6C 新增失败。
 
 ## 接手步骤（新电脑）
 
@@ -98,6 +101,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 16. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6a-remote-scraper-adapter.md`** — 阶段 6A plan（已完成，含 TDD 步骤与验收）。
 17. **`docs/superpowers/specs/2026-06-26-media-manager-stage6b-aria2-rpc-design.md`** — 阶段 6B aria2 RPC 集成骨架设计（已完成）。
 18. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6b-aria2-rpc.md`** — 阶段 6B plan（已完成，含 TDD 步骤与验收）。
+19. **`docs/superpowers/specs/2026-06-26-media-manager-stage6c-aria2-config-polling-design.md`** — 阶段 6C aria2 配置与轮询入口设计（已完成）。
+20. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6c-aria2-config-polling.md`** — 阶段 6C plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -184,6 +189,19 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 新增 `src-tauri/tests/aria2_rpc.rs`，覆盖 secret 参数、字符串字段解析、JSON-RPC error、完成文件筛选和 HTTP transport。
 - `src-tauri/tests/daemon.rs` 新增 aria2 GID 扫描回归，覆盖完成入队、重复不重复、未完成不报错。
 
+## 阶段 6C 交付物
+
+- 新增 `Aria2Settings`：默认 loopback endpoint、enabled、secret、timeout、poll interval、tracked GIDs，归一化会 trim、补 `/jsonrpc` 路径前缀、去空 secret、去空/去重 GID。
+- `Repository::set_aria2_settings` / `get_aria2_settings` 把 aria2 设置作为 `app_settings.aria2_settings` JSON 持久化；未配置时返回安全默认值。
+- 新增 `Aria2PollReport`，记录 enabled、attempted/completed GIDs、queued/skipped files、failed GIDs 和逐 GID error。
+- `HeadlessDaemon::poll_aria2_once` 会在单次 run-once 范围内轮询配置的 GID，复用 `Aria2Status::completed_selection` 和现有 daemon queue / known key 去重；单个 GID 失败会记录 report error 并继续处理其他 GID。
+- `run_daemon_once` 在目录扫描前读取 SQLite aria2 settings 并调用 `poll_aria2_once`；测试通过 injectable transport 覆盖，不需要真实 aria2 进程。
+- `commands.rs` 新增并注册 `configure_aria2_settings` / `get_aria2_settings`，Tauri setup 会把 SQLite settings 预载入 `AppState`。
+- `src/api.ts` 新增 `Aria2Settings` / `Aria2PollReport` / `DaemonRunOnceReport.aria2`，并暴露 get/save aria2 settings command wrapper。
+- 设置页“自动管线”新增 aria2 配置块：启用、host、port、RPC path、secret、timeout、poll interval、tracked GIDs，保存按钮有 loading/disabled/status 反馈。
+- `summarizeRunOnceReport` 会在 run-once 摘要前置 aria2 统计。
+- 新增/更新测试：`aria2_rpc`、`core_behaviour`、`daemon`、`daemon_control`、`commands` unit、`daemonClient.test.ts`、`viewModel.test.ts`。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -200,12 +218,14 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 几处 `created_at` 只写未读 / `parse_*` 回退不可区分 → 非阻塞清理项，后续碰到相关命令/UI 时再处理。
 - 真实网络 scraper（FANZA/JavBus/JavDB 等）尚未接入；阶段 6A 只提供远程 adapter 骨架和 JSON-LD fixture parser，不访问真实站点。
 - 真实 HTTP client、站点特定 parser、代理/cookie/登录/重试、封面下载、scraper UI 设置和多源排序仍是后续阶段工作。
-- aria2 配置 UI、持久化 endpoint、GID 来源、常驻轮询、WebSocket 通知、下载任务管理仍是后续阶段工作。
+- aria2 进程管理、下载任务创建/暂停/恢复、自动发现所有 aria2 任务、常驻后台轮询、WebSocket/callback 通知仍是后续阶段工作。
 - WebSocket、托盘、自启、常驻后台线程仍是后续阶段工作。
 
 ## 下一步
 
-如果继续做 Codex 可编码工作，建议下一步优先做 **阶段 6C aria2 配置与轮询入口**（持久化 aria2 endpoint / secret、GID 来源、轮询任务到 `scan_aria2_gid`，仍用 fake transport 和临时目录测试）。另一条可选路线是 **阶段 6D 真实 scraper 站点 adapter**（在 6A 骨架上补具体站点 parser、真实 HTTP client、代理/登录/重试策略和封面下载，仍不要让测试依赖 live site）。如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”，以及 app data 下是否生成 `control-service.json`；aria2 真实联动还需要后续 6C 才有配置入口。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，以及新增 aria2 配置块保存后，`run-once` 摘要是否出现 aria2 GID 尝试/完成/入队/失败统计。真实环境里需要用户自己启动/配置 aria2，并填入要跟踪的 GID；当前阶段不会创建下载任务，也不会常驻后台轮询。
+
+如果继续做 Codex 可编码工作，建议下一步做 **阶段 6D 真实 scraper 站点 adapter**（在 6A 骨架上补具体站点 parser、真实 HTTP client、代理/登录/重试策略和封面下载，仍不要让测试依赖 live site）。另一条可选路线是 aria2 后续增强：下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
