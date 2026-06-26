@@ -270,6 +270,7 @@ fn service_reads_metadata_provider_setting_after_startup() {
 fn run_once_and_queue_routes_use_existing_daemon_control_helpers() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = configured_repo(&tmp);
+    repo.set_metadata_provider_enabled(true).unwrap();
     let inbox = tmp.path().join("inbox");
     std::fs::write(inbox.join("ABP-501.mp4"), b"stable video bytes").unwrap();
     let exception_id = repo
