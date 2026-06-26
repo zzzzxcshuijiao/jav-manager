@@ -42,6 +42,7 @@ import type {
   PooledWork,
   ResourcePool,
   ReviewReason,
+  RemoteScraperSettings,
   ThumbnailCacheSummary,
   RebuildReport,
   Tag,
@@ -85,6 +86,7 @@ import {
   formatHoldingReason,
   formatMediaInfo,
   formatPipelineStatus,
+  formatRemoteScraperSettingsSummary,
   formatRebuildReport,
   formatWorkOption,
   ignorableDuplicateItems,
@@ -145,6 +147,34 @@ const defaultAria2Settings: Aria2Settings = {
   tracked_gids: []
 };
 
+const defaultRemoteScraperSettings: RemoteScraperSettings = {
+  enabled: false,
+  timeout_ms: 8000,
+  user_agent: "media-manager/0.1 local scraper",
+  proxy_url: "",
+  include_example_fallback: true,
+  sources: [
+    {
+      id: "javdb",
+      enabled: false,
+      search_url_template: "https://javdb.com/search?q={code}&f=all",
+      min_confidence: 0.82
+    },
+    {
+      id: "javbus",
+      enabled: false,
+      search_url_template: "https://www.javbus.com/search/{code}",
+      min_confidence: 0.82
+    },
+    {
+      id: "fanza",
+      enabled: false,
+      search_url_template: "https://www.dmm.co.jp/digital/videoa/-/list/search/=/?searchstr={code}",
+      min_confidence: 0.82
+    }
+  ]
+};
+
 export function App() {
   const [sourceRoots, setSourceRoots] = useState("H:/Downloads/A\nH:/Downloads/B\nH:/Inbox");
   const [archiveRoot, setArchiveRoot] = useState("H:/Archive");
@@ -193,6 +223,8 @@ export function App() {
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
   const [aria2Busy, setAria2Busy] = useState(false);
+  const [remoteScraperSettings, setRemoteScraperSettings] = useState<RemoteScraperSettings>(defaultRemoteScraperSettings);
+  const [remoteScraperBusy, setRemoteScraperBusy] = useState(false);
   const [libraryWorkDetail, setLibraryWorkDetail] = useState<WorkDetail | null>(null);
   const [nonStandardCollapsed, setNonStandardCollapsed] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -677,13 +709,25 @@ export function App() {
     setAria2GidsText(settings.tracked_gids.join("\n"));
   }
 
+  function applyRemoteScraperSettings(settings: RemoteScraperSettings) {
+    setRemoteScraperSettings({ ...settings, proxy_url: settings.proxy_url ?? "" });
+  }
+
   async function loadDaemonPanelData() {
-    const [nextStatus, nextHolding, nextExceptions, nextRuns, nextAria2Settings] = await Promise.all([
+    const [
+      nextStatus,
+      nextHolding,
+      nextExceptions,
+      nextRuns,
+      nextAria2Settings,
+      nextRemoteScraperSettings
+    ] = await Promise.all([
       api.getDaemonStatus(),
       api.listHoldingEntries(),
       api.listExceptionEntries(),
       api.listPipelineRuns(),
-      api.getAria2Settings()
+      api.getAria2Settings(),
+      api.getRemoteScraperSettings()
     ]);
     setDaemonStatus(nextStatus);
     setHoldingEntries(nextHolding);
@@ -691,6 +735,7 @@ export function App() {
     setPipelineRuns(nextRuns);
     setDaemonChannel(api.getDaemonControlChannel());
     applyAria2Settings(nextAria2Settings);
+    applyRemoteScraperSettings(nextRemoteScraperSettings);
     return nextStatus;
   }
 
@@ -748,6 +793,24 @@ export function App() {
       setStatus(`保存 aria2 配置失败：${String(error)}`);
     } finally {
       setAria2Busy(false);
+    }
+  }
+
+  async function saveRemoteScraperSettings() {
+    if (remoteScraperBusy) return;
+    setRemoteScraperBusy(true);
+    setStatus("正在保存远程刮削器配置...");
+    try {
+      const saved = await api.configureRemoteScraperSettings({
+        ...remoteScraperSettings,
+        proxy_url: remoteScraperSettings.proxy_url?.trim() ? remoteScraperSettings.proxy_url : null
+      });
+      applyRemoteScraperSettings(saved);
+      setStatus(`远程刮削器配置已保存：${formatRemoteScraperSettingsSummary(saved)}。`);
+    } catch (error) {
+      setStatus(`保存远程刮削器配置失败：${String(error)}`);
+    } finally {
+      setRemoteScraperBusy(false);
     }
   }
 
@@ -1675,6 +1738,96 @@ export function App() {
                       onChange={(event) => setAria2GidsText(event.target.value)}
                     />
                   </label>
+                </div>
+
+                <div className="remote-scraper-settings">
+                  <div className="remote-scraper-settings-head">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={remoteScraperSettings.enabled}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, enabled: event.target.checked })}
+                      />
+                      远程刮削器
+                    </label>
+                    <button type="button" onClick={saveRemoteScraperSettings} disabled={remoteScraperBusy || !hasBackend}>
+                      <Settings size={16} /> {remoteScraperBusy ? "保存中" : "保存刮削器"}
+                    </button>
+                  </div>
+                  <div className="remote-scraper-settings-grid">
+                    <label>
+                      User-Agent
+                      <input
+                        value={remoteScraperSettings.user_agent}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, user_agent: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      超时 ms
+                      <input
+                        type="number"
+                        min={1}
+                        value={remoteScraperSettings.timeout_ms}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, timeout_ms: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label>
+                      代理 URL
+                      <input
+                        value={remoteScraperSettings.proxy_url ?? ""}
+                        onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, proxy_url: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                  <label className="remote-scraper-fallback">
+                    <input
+                      type="checkbox"
+                      checked={remoteScraperSettings.include_example_fallback}
+                      onChange={(event) => setRemoteScraperSettings({ ...remoteScraperSettings, include_example_fallback: event.target.checked })}
+                    />
+                    保留示例 fallback
+                  </label>
+                  <div className="remote-scraper-source-list">
+                    {remoteScraperSettings.sources.map((source, index) => (
+                      <div className="remote-scraper-source-row" key={source.id}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={source.enabled}
+                            onChange={(event) => {
+                              const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                                sourceIndex === index ? { ...candidate, enabled: event.target.checked } : candidate
+                              );
+                              setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                            }}
+                          />
+                          {source.id}
+                        </label>
+                        <input
+                          value={source.search_url_template}
+                          onChange={(event) => {
+                            const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                              sourceIndex === index ? { ...candidate, search_url_template: event.target.value } : candidate
+                            );
+                            setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                          }}
+                        />
+                        <input
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={source.min_confidence}
+                          onChange={(event) => {
+                            const sources = remoteScraperSettings.sources.map((candidate, sourceIndex) =>
+                              sourceIndex === index ? { ...candidate, min_confidence: Number(event.target.value) } : candidate
+                            );
+                            setRemoteScraperSettings({ ...remoteScraperSettings, sources });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 {daemonStatus ? (

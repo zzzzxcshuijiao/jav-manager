@@ -23,6 +23,7 @@ use crate::domain::{
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
 use crate::provider::{DisabledProvider, ExampleProvider};
+use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
 use crate::storage::Repository;
 use crate::thumbnail::{
@@ -47,6 +48,7 @@ pub struct AppState {
     pub archive_logs: Mutex<Vec<ArchiveActionLog>>,
     pub daemon_runtime: Mutex<DaemonControlRuntime>,
     pub aria2_settings: Mutex<Aria2Settings>,
+    pub remote_scraper_settings: Mutex<RemoteScraperSettings>,
     pub control_service: Mutex<Option<ControlServiceHandle>>,
     pub control_service_error: Mutex<Option<String>>,
     pub next_job_id: Mutex<i64>,
@@ -66,6 +68,7 @@ impl Default for AppState {
             archive_logs: Mutex::new(Vec::new()),
             daemon_runtime: Mutex::new(DaemonControlRuntime::default()),
             aria2_settings: Mutex::new(Aria2Settings::default()),
+            remote_scraper_settings: Mutex::new(RemoteScraperSettings::default()),
             control_service: Mutex::new(None),
             control_service_error: Mutex::new(None),
             next_job_id: Mutex::new(1),
@@ -226,6 +229,51 @@ pub fn get_aria2_settings(
     Ok(CommandResult {
         data: state
             .aria2_settings
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+    })
+}
+
+fn configure_remote_scraper_settings_in_state(
+    settings: RemoteScraperSettings,
+    state: &AppState,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    let normalized = if let Some(repo) = state
+        .repository
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+    {
+        repo.set_remote_scraper_settings(&settings)
+            .map_err(|error| error.to_string())?
+    } else {
+        settings.normalized().map_err(|error| error.to_string())?
+    };
+    *state
+        .remote_scraper_settings
+        .lock()
+        .map_err(|error| error.to_string())? = normalized.clone();
+    Ok(CommandResult { data: normalized })
+}
+
+/// Persist remote scraper settings used by the automatic pipeline.
+#[tauri::command]
+pub fn configure_remote_scraper_settings(
+    settings: RemoteScraperSettings,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    configure_remote_scraper_settings_in_state(settings, &state)
+}
+
+/// Return the current remote scraper settings for the settings page.
+#[tauri::command]
+pub fn get_remote_scraper_settings(
+    state: State<'_, AppState>,
+) -> Result<CommandResult<RemoteScraperSettings>, String> {
+    Ok(CommandResult {
+        data: state
+            .remote_scraper_settings
             .lock()
             .map_err(|error| error.to_string())?
             .clone(),
@@ -1508,6 +1556,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_metadata_provider_enabled,
             configure_aria2_settings,
             get_aria2_settings,
+            configure_remote_scraper_settings,
+            get_remote_scraper_settings,
             get_control_service_discovery,
             get_control_service_host_status,
             get_daemon_status,
@@ -1588,6 +1638,9 @@ pub fn build_app() -> Builder<tauri::Wry> {
             let aria2_settings = repo
                 .get_aria2_settings()
                 .map_err(|error| error.to_string())?;
+            let remote_scraper_settings = repo
+                .get_remote_scraper_settings()
+                .map_err(|error| error.to_string())?;
             *state.source_roots.lock().map_err(|error| error.to_string())? = source_roots;
             *state.archive_root.lock().map_err(|error| error.to_string())? = archive_root;
             *state
@@ -1598,6 +1651,10 @@ pub fn build_app() -> Builder<tauri::Wry> {
                 .aria2_settings
                 .lock()
                 .map_err(|error| error.to_string())? = aria2_settings;
+            *state
+                .remote_scraper_settings
+                .lock()
+                .map_err(|error| error.to_string())? = remote_scraper_settings;
             *state.repository.lock().map_err(|error| error.to_string())? = Some(repo);
             match start_control_service_host(&app_data) {
                 Ok(handle) => {
@@ -1851,6 +1908,7 @@ fn nearest_existing_parent(path: &std::path::Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote_scraper::{RemoteScraperSettings, RemoteScraperSourceSettings};
 
     #[test]
     fn command_watch_status_parser_accepts_stage1_statuses() {
@@ -1886,5 +1944,32 @@ mod tests {
         assert_eq!(settings.host, "127.0.0.1");
         assert_eq!(settings.port, 6800);
         assert_eq!(settings.path, "/jsonrpc");
+    }
+
+    #[test]
+    fn remote_scraper_settings_command_normalizes_without_repository() {
+        let state = AppState::default();
+        let response = configure_remote_scraper_settings_in_state(
+            RemoteScraperSettings {
+                enabled: true,
+                user_agent: " media-manager-test ".to_string(),
+                sources: vec![RemoteScraperSourceSettings {
+                    id: "javdb".to_string(),
+                    enabled: true,
+                    search_url_template: "https://example.test/{code}".to_string(),
+                    min_confidence: 0.8,
+                }],
+                ..RemoteScraperSettings::default()
+            },
+            &state,
+        )
+        .unwrap();
+
+        assert!(response.data.enabled);
+        assert_eq!(response.data.user_agent, "media-manager-test");
+        assert_eq!(
+            state.remote_scraper_settings.lock().unwrap().user_agent,
+            "media-manager-test"
+        );
     }
 }

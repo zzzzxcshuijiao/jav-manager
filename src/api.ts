@@ -171,6 +171,22 @@ export interface Aria2PollReport {
   errors: string[];
 }
 
+export interface RemoteScraperSourceSettings {
+  id: string;
+  enabled: boolean;
+  search_url_template: string;
+  min_confidence: number;
+}
+
+export interface RemoteScraperSettings {
+  enabled: boolean;
+  timeout_ms: number;
+  user_agent: string;
+  proxy_url?: string | null;
+  include_example_fallback: boolean;
+  sources: RemoteScraperSourceSettings[];
+}
+
 export interface DaemonRunOnceReport {
   scan: DaemonScanReport;
   aria2?: Aria2PollReport;
@@ -412,6 +428,12 @@ export const api = {
   },
   getAria2Settings() {
     return command<Aria2Settings>("get_aria2_settings");
+  },
+  configureRemoteScraperSettings(settings: RemoteScraperSettings) {
+    return command<RemoteScraperSettings>("configure_remote_scraper_settings", { settings });
+  },
+  getRemoteScraperSettings() {
+    return command<RemoteScraperSettings>("get_remote_scraper_settings");
   },
   getControlServiceDiscovery() {
     return command<ControlServiceDiscovery | null>("get_control_service_discovery");

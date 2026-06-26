@@ -639,7 +639,8 @@ h2 {
   flex-wrap: wrap;
 }
 
-.aria2-settings {
+.aria2-settings,
+.remote-scraper-settings {
   border: 1px solid #dfe7ec;
   border-radius: 6px;
   background: #fbfdfe;
@@ -648,14 +649,17 @@ h2 {
   gap: 10px;
 }
 
-.aria2-settings-head {
+.aria2-settings-head,
+.remote-scraper-settings-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 10px;
 }
 
-.aria2-settings-head label {
+.aria2-settings-head label,
+.remote-scraper-settings-head label,
+.remote-scraper-fallback {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -663,18 +667,22 @@ h2 {
   color: #25313c;
 }
 
-.aria2-settings-head input {
+.aria2-settings-head input,
+.remote-scraper-settings-head input,
+.remote-scraper-fallback input {
   width: 16px;
   height: 16px;
 }
 
-.aria2-settings-grid {
+.aria2-settings-grid,
+.remote-scraper-settings-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
 .aria2-settings-grid label,
+.remote-scraper-settings-grid label,
 .aria2-gids-field {
   display: grid;
   gap: 4px;
@@ -683,6 +691,8 @@ h2 {
 }
 
 .aria2-settings-grid input,
+.remote-scraper-settings-grid input,
+.remote-scraper-source-row input,
 .aria2-gids-field textarea {
   min-height: 34px;
   border: 1px solid #d8e1e7;
@@ -697,9 +707,36 @@ h2 {
   resize: vertical;
 }
 
+.remote-scraper-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.remote-scraper-source-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) 90px;
+  gap: 8px;
+  align-items: center;
+}
+
+.remote-scraper-source-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #25313c;
+  font-weight: 700;
+}
+
+.remote-scraper-source-row label input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+}
+
 .daemon-actions button,
 .daemon-row-actions button,
-.aria2-settings-head button {
+.aria2-settings-head button,
+.remote-scraper-settings-head button {
   min-height: 34px;
   border-radius: 6px;
   display: inline-flex;
@@ -715,6 +752,7 @@ h2 {
 .daemon-actions button:disabled,
 .daemon-row-actions button:disabled,
 .aria2-settings-head button:disabled,
+.remote-scraper-settings-head button:disabled,
 .rebuild-tools button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -1481,6 +1519,8 @@ h2 {
   .stats-grid,
   .content-grid,
   .aria2-settings-grid,
+  .remote-scraper-settings-grid,
+  .remote-scraper-source-row,
   .daemon-grid,
   .review-reason-grid {
     grid-template-columns: 1fr;

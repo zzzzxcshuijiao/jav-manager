@@ -18,6 +18,7 @@ import {
   findIngestItemForWork,
   formatDaemonChannel,
   formatDaemonState,
+  formatRemoteScraperSettingsSummary,
   formatBytes,
   formatCodeConflictEvidence,
   formatDuration,
@@ -500,6 +501,29 @@ describe("daemon view helpers", () => {
 
     expect(shortEvidence("{\"source\":\"example\",\"message\":\"not found\"}", 24)).toBe("{\"source\":\"example\",\"...");
     expect(shortEvidence("", 24)).toBe("无证据");
+  });
+
+  it("formats remote scraper settings summary", () => {
+    expect(formatRemoteScraperSettingsSummary({
+      enabled: true,
+      timeout_ms: 8000,
+      user_agent: "media-manager-test",
+      proxy_url: null,
+      include_example_fallback: true,
+      sources: [
+        { id: "javdb", enabled: true, search_url_template: "https://example.test/{code}", min_confidence: 0.82 },
+        { id: "javbus", enabled: false, search_url_template: "https://example.test/{code}", min_confidence: 0.82 }
+      ]
+    })).toBe("已启用 · 1 个远程源 · 保留示例 fallback");
+
+    expect(formatRemoteScraperSettingsSummary({
+      enabled: false,
+      timeout_ms: 8000,
+      user_agent: "media-manager-test",
+      proxy_url: null,
+      include_example_fallback: false,
+      sources: []
+    })).toBe("已停用");
   });
 });
 

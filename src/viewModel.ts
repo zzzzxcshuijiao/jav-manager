@@ -13,6 +13,7 @@ import type {
   IngestItem,
   IngestItemFilters,
   RebuildReport,
+  RemoteScraperSettings,
   ReviewReason,
   Work
 } from "./api";
@@ -436,6 +437,18 @@ export function formatDaemonChannel(channel: DaemonControlChannel): string {
     none: "未连接"
   };
   return labels[channel];
+}
+
+/** Format remote scraper settings for compact settings-page feedback. */
+export function formatRemoteScraperSettingsSummary(settings: RemoteScraperSettings): string {
+  if (!settings.enabled) {
+    return "已停用";
+  }
+  const enabledSources = settings.sources.filter((source) => source.enabled).length;
+  const fallback = settings.include_example_fallback
+    ? "保留示例 fallback"
+    : "不使用示例 fallback";
+  return `已启用 · ${enabledSources} 个远程源 · ${fallback}`;
 }
 
 export function formatHoldingReason(reason: HoldingReason): string {
