@@ -1,6 +1,7 @@
 use media_manager::remote_scraper::{
-    parse_json_ld_metadata, HttpRemoteMetadataClient, RemoteMetadataHttpClient,
-    RemoteScraperConfig, RemoteScraperSettings, RemoteScraperSource, RemoteScraperSourceSettings,
+    parse_fanza_metadata, parse_javbus_metadata, parse_javdb_metadata, parse_json_ld_metadata,
+    HttpRemoteMetadataClient, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSettings,
+    RemoteScraperSource, RemoteScraperSourceSettings,
 };
 use media_manager::{pipeline::ScraperSource, provider::MetadataProvider};
 use std::io::{Read, Write};
@@ -208,6 +209,42 @@ fn http_remote_metadata_client_classifies_non_success_status() {
     let error = client.get_text(&server.url("/limited")).unwrap_err();
 
     assert!(error.to_string().contains("HTTP status 429"));
+}
+
+#[test]
+fn source_specific_parsers_read_checked_in_fixtures() {
+    let javdb = include_str!("fixtures/remote_scraper/javdb_movie.html");
+    let javbus = include_str!("fixtures/remote_scraper/javbus_movie.html");
+    let fanza = include_str!("fixtures/remote_scraper/fanza_movie.html");
+
+    let javdb_metadata = parse_javdb_metadata("ABP-600", javdb, 0.86)
+        .unwrap()
+        .unwrap();
+    let javbus_metadata = parse_javbus_metadata("ABP-601", javbus, 0.87)
+        .unwrap()
+        .unwrap();
+    let fanza_metadata = parse_fanza_metadata("ABP-602", fanza, 0.88)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(javdb_metadata.provider, "javdb");
+    assert_eq!(javdb_metadata.title, "JavDB Fixture ABP-600");
+    assert_eq!(javbus_metadata.provider, "javbus");
+    assert_eq!(javbus_metadata.director, Some("Director B".to_string()));
+    assert_eq!(fanza_metadata.provider, "fanza");
+    assert_eq!(fanza_metadata.studio, Some("Studio F".to_string()));
+}
+
+#[test]
+fn remote_scraper_source_dispatches_parser_by_source_id() {
+    let client = FakeHttpClient::ok(include_str!("fixtures/remote_scraper/javdb_movie.html"));
+    let config = RemoteScraperConfig::new("javdb", "https://example.test/{code}", 0.86).unwrap();
+    let source = RemoteScraperSource::new(config, client);
+
+    let metadata = source.lookup_remote("ABP-600").unwrap().unwrap();
+
+    assert_eq!(metadata.provider, "javdb");
+    assert_eq!(metadata.title, "JavDB Fixture ABP-600");
 }
 
 #[test]

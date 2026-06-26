@@ -363,7 +363,7 @@ impl<C: RemoteMetadataHttpClient> RemoteScraperSource<C> {
                 return Err(error);
             }
         };
-        parse_json_ld_metadata(
+        parse_remote_source_metadata(
             &self.config.source_name,
             normalized_code,
             &html,
@@ -398,6 +398,48 @@ impl<C: RemoteMetadataHttpClient> crate::pipeline::ScraperSource for RemoteScrap
             .lookup_remote(normalized_code)?
             .map(|metadata| metadata.to_scraped_work_metadata()))
     }
+}
+
+/// Parse one remote page using the parser associated with the source id.
+pub fn parse_remote_source_metadata(
+    source_name: &str,
+    normalized_code: &str,
+    html: &str,
+    min_confidence: f32,
+) -> Result<Option<RemoteMetadata>> {
+    match source_name.trim().to_ascii_lowercase().as_str() {
+        "javdb" => parse_javdb_metadata(normalized_code, html, min_confidence),
+        "javbus" => parse_javbus_metadata(normalized_code, html, min_confidence),
+        "fanza" => parse_fanza_metadata(normalized_code, html, min_confidence),
+        other => parse_json_ld_metadata(other, normalized_code, html, min_confidence),
+    }
+}
+
+/// Parse a JavDB page fixture into normalized remote metadata.
+pub fn parse_javdb_metadata(
+    normalized_code: &str,
+    html: &str,
+    min_confidence: f32,
+) -> Result<Option<RemoteMetadata>> {
+    parse_json_ld_metadata("javdb", normalized_code, html, min_confidence)
+}
+
+/// Parse a JavBus page fixture into normalized remote metadata.
+pub fn parse_javbus_metadata(
+    normalized_code: &str,
+    html: &str,
+    min_confidence: f32,
+) -> Result<Option<RemoteMetadata>> {
+    parse_json_ld_metadata("javbus", normalized_code, html, min_confidence)
+}
+
+/// Parse a FANZA page fixture into normalized remote metadata.
+pub fn parse_fanza_metadata(
+    normalized_code: &str,
+    html: &str,
+    min_confidence: f32,
+) -> Result<Option<RemoteMetadata>> {
+    parse_json_ld_metadata("fanza", normalized_code, html, min_confidence)
 }
 
 /// Parse the first Movie or VideoObject JSON-LD block from a remote HTML page.
