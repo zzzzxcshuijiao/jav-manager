@@ -18,6 +18,7 @@ pub mod provider;
 pub mod remote_scraper;
 pub mod resource_pool;
 pub mod scanner;
+pub mod self_check;
 pub mod storage;
 pub mod thumbnail;
 
