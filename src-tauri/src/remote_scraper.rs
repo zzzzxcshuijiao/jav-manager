@@ -1,3 +1,4 @@
+use crate::domain::{ProviderMetadata, ScrapedWorkMetadata};
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde_json::Value;
@@ -17,6 +18,43 @@ pub struct RemoteMetadata {
     pub release_date: Option<String>,
     pub cover_url: Option<String>,
     pub confidence: f32,
+}
+
+impl RemoteMetadata {
+    /// Convert remote metadata to the ingest provider DTO.
+    pub fn to_provider_metadata(&self) -> ProviderMetadata {
+        ProviderMetadata {
+            provider: self.provider.clone(),
+            title_zh: Some(self.title.clone()),
+            original_title: self.original_title.clone(),
+            aliases: vec![self.normalized_code.clone()],
+            summary: self.summary.clone(),
+            cover_url: self.cover_url.clone(),
+            release_date: self.release_date.clone(),
+            confidence: self.confidence,
+            actors: self.actors.clone(),
+            genres: self.genres.clone(),
+            studio: self.studio.clone(),
+            director: self.director.clone(),
+        }
+    }
+
+    /// Convert remote metadata to the automatic pipeline DTO.
+    pub fn to_scraped_work_metadata(&self) -> ScrapedWorkMetadata {
+        ScrapedWorkMetadata {
+            source: self.provider.clone(),
+            normalized_code: self.normalized_code.clone(),
+            title: self.title.clone(),
+            original_title: self.original_title.clone(),
+            summary: self.summary.clone(),
+            actors: self.actors.clone(),
+            genres: self.genres.clone(),
+            studio: self.studio.clone(),
+            director: self.director.clone(),
+            release_date: self.release_date.clone(),
+            cover_path: None,
+        }
+    }
 }
 
 /// HTTP boundary used by remote scraper adapters.
@@ -80,6 +118,34 @@ impl<C: RemoteMetadataHttpClient> RemoteScraperSource<C> {
             &html,
             self.config.min_confidence,
         )
+    }
+}
+
+impl<C: RemoteMetadataHttpClient> crate::provider::MetadataProvider for RemoteScraperSource<C> {
+    fn name(&self) -> &str {
+        &self.config.source_name
+    }
+
+    fn lookup(
+        &self,
+        normalized_code: &str,
+        _original_file_name: &str,
+    ) -> Result<Option<ProviderMetadata>> {
+        Ok(self
+            .lookup_remote(normalized_code)?
+            .map(|metadata| metadata.to_provider_metadata()))
+    }
+}
+
+impl<C: RemoteMetadataHttpClient> crate::pipeline::ScraperSource for RemoteScraperSource<C> {
+    fn name(&self) -> &str {
+        &self.config.source_name
+    }
+
+    fn lookup(&self, normalized_code: &str) -> Result<Option<ScrapedWorkMetadata>> {
+        Ok(self
+            .lookup_remote(normalized_code)?
+            .map(|metadata| metadata.to_scraped_work_metadata()))
     }
 }
 

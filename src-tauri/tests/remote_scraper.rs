@@ -1,6 +1,7 @@
 use media_manager::remote_scraper::{
     parse_json_ld_metadata, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSource,
 };
+use media_manager::{pipeline::ScraperSource, provider::MetadataProvider};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -162,4 +163,37 @@ fn remote_scraper_source_propagates_http_errors() {
     let error = source.lookup_remote("ABP-705").unwrap_err();
 
     assert!(error.to_string().contains("network down"));
+}
+
+#[test]
+fn remote_scraper_source_implements_scraper_source() {
+    let client = FakeHttpClient::ok(&movie_html("Pipeline Title"));
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.9)
+        .unwrap();
+    let source = RemoteScraperSource::new(config, client);
+
+    let metadata = ScraperSource::lookup(&source, "ABP-706").unwrap().unwrap();
+
+    assert_eq!(metadata.source, "fixture");
+    assert_eq!(metadata.normalized_code, "ABP-706");
+    assert_eq!(metadata.title, "Pipeline Title");
+    assert_eq!(metadata.actors, vec!["Actor A"]);
+    assert_eq!(metadata.cover_path, None);
+}
+
+#[test]
+fn remote_scraper_source_implements_metadata_provider() {
+    let client = FakeHttpClient::ok(&movie_html("Provider Title"));
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.83)
+        .unwrap();
+    let source = RemoteScraperSource::new(config, client);
+
+    let metadata = MetadataProvider::lookup(&source, "ABP-707", "ABP-707.mp4")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(metadata.provider, "fixture");
+    assert_eq!(metadata.title_zh, Some("Provider Title".to_string()));
+    assert_eq!(metadata.confidence, 0.83);
+    assert_eq!(metadata.actors, vec!["Actor A"]);
 }
