@@ -19,6 +19,70 @@ pub struct RemoteMetadata {
     pub confidence: f32,
 }
 
+/// HTTP boundary used by remote scraper adapters.
+pub trait RemoteMetadataHttpClient: Send + Sync {
+    /// Fetch a remote HTML document as UTF-8 text.
+    fn get_text(&self, url: &str) -> Result<String>;
+}
+
+/// Configuration for one remote metadata source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteScraperConfig {
+    pub source_name: String,
+    pub search_url_template: String,
+    pub min_confidence: f32,
+}
+
+impl RemoteScraperConfig {
+    /// Create a config and require a `{code}` placeholder so lookups stay explicit.
+    pub fn new(source_name: &str, search_url_template: &str, min_confidence: f32) -> Result<Self> {
+        if !search_url_template.contains("{code}") {
+            return Err(anyhow!("remote scraper URL template must contain {{code}}"));
+        }
+        Ok(Self {
+            source_name: source_name.to_string(),
+            search_url_template: search_url_template.to_string(),
+            min_confidence,
+        })
+    }
+
+    /// Build a lookup URL for a normalized code.
+    pub fn build_url(&self, normalized_code: &str) -> Result<String> {
+        if normalized_code.trim().is_empty() {
+            return Err(anyhow!("normalized_code is required"));
+        }
+        Ok(self
+            .search_url_template
+            .replace("{code}", &percent_encode(normalized_code)))
+    }
+}
+
+/// Remote scraper implementation shared by ingest and auto-pipeline paths.
+#[derive(Debug, Clone)]
+pub struct RemoteScraperSource<C> {
+    config: RemoteScraperConfig,
+    client: C,
+}
+
+impl<C: RemoteMetadataHttpClient> RemoteScraperSource<C> {
+    /// Create a scraper source from config and an injected HTTP client.
+    pub fn new(config: RemoteScraperConfig, client: C) -> Self {
+        Self { config, client }
+    }
+
+    /// Fetch and parse remote metadata for one normalized code.
+    pub fn lookup_remote(&self, normalized_code: &str) -> Result<Option<RemoteMetadata>> {
+        let url = self.config.build_url(normalized_code)?;
+        let html = self.client.get_text(&url)?;
+        parse_json_ld_metadata(
+            &self.config.source_name,
+            normalized_code,
+            &html,
+            self.config.min_confidence,
+        )
+    }
+}
+
 /// Parse the first Movie or VideoObject JSON-LD block from a remote HTML page.
 pub fn parse_json_ld_metadata(
     source_name: &str,
@@ -131,4 +195,16 @@ fn image_url(value: Option<&Value>) -> Option<String> {
         Some(Value::Object(object)) => string_field(object, "url"),
         _ => None,
     }
+}
+
+fn percent_encode(input: &str) -> String {
+    input
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }

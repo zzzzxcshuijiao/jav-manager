@@ -1,4 +1,50 @@
-use media_manager::remote_scraper::parse_json_ld_metadata;
+use media_manager::remote_scraper::{
+    parse_json_ld_metadata, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSource,
+};
+use std::sync::{Arc, Mutex};
+
+#[derive(Clone)]
+struct FakeHttpClient {
+    response: Result<String, String>,
+    urls: Arc<Mutex<Vec<String>>>,
+}
+
+impl FakeHttpClient {
+    fn ok(response: &str) -> Self {
+        Self {
+            response: Ok(response.to_string()),
+            urls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn failing() -> Self {
+        Self {
+            response: Err("network down".to_string()),
+            urls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn last_url(&self) -> String {
+        self.urls.lock().unwrap().last().unwrap().clone()
+    }
+}
+
+impl RemoteMetadataHttpClient for FakeHttpClient {
+    fn get_text(&self, url: &str) -> anyhow::Result<String> {
+        self.urls.lock().unwrap().push(url.to_string());
+        match &self.response {
+            Ok(response) => Ok(response.clone()),
+            Err(error) => Err(anyhow::anyhow!(error.clone())),
+        }
+    }
+}
+
+fn movie_html(title: &str) -> String {
+    format!(
+        r#"<script type="application/ld+json">{{"@type":"Movie","name":"{}","actor":"Actor A"}}</script>"#,
+        title
+    )
+}
 
 #[test]
 fn json_ld_movie_fixture_parses_remote_metadata() {
@@ -82,4 +128,38 @@ fn malformed_json_ld_returns_error() {
     let error = parse_json_ld_metadata("fixture", "ABP-703", html, 0.8).unwrap_err();
 
     assert!(error.to_string().contains("invalid JSON-LD"));
+}
+
+#[test]
+fn remote_scraper_source_builds_encoded_url_and_uses_client() {
+    let client = FakeHttpClient::ok(&movie_html("Remote Title"));
+    let config =
+        RemoteScraperConfig::new("fixture", "https://example.test/search?q={code}", 0.81)
+            .unwrap();
+    let source = RemoteScraperSource::new(config, client.clone());
+
+    let metadata = source.lookup_remote("ABP 704").unwrap().unwrap();
+
+    assert_eq!(client.last_url(), "https://example.test/search?q=ABP%20704");
+    assert_eq!(metadata.title, "Remote Title");
+    assert_eq!(metadata.actors, vec!["Actor A"]);
+}
+
+#[test]
+fn remote_scraper_config_requires_code_placeholder() {
+    let error = RemoteScraperConfig::new("fixture", "https://example.test/search", 0.8)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("{code}"));
+}
+
+#[test]
+fn remote_scraper_source_propagates_http_errors() {
+    let config = RemoteScraperConfig::new("fixture", "https://example.test/{code}", 0.8)
+        .unwrap();
+    let source = RemoteScraperSource::new(config, FakeHttpClient::failing());
+
+    let error = source.lookup_remote("ABP-705").unwrap_err();
+
+    assert!(error.to_string().contains("network down"));
 }
