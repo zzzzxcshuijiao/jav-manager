@@ -1,9 +1,13 @@
 use media_manager::remote_scraper::{
-    parse_json_ld_metadata, RemoteMetadataHttpClient, RemoteScraperConfig, RemoteScraperSettings,
-    RemoteScraperSource, RemoteScraperSourceSettings,
+    parse_json_ld_metadata, HttpRemoteMetadataClient, RemoteMetadataHttpClient,
+    RemoteScraperConfig, RemoteScraperSettings, RemoteScraperSource, RemoteScraperSourceSettings,
 };
 use media_manager::{pipeline::ScraperSource, provider::MetadataProvider};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 struct FakeHttpClient {
@@ -37,6 +41,71 @@ impl RemoteMetadataHttpClient for FakeHttpClient {
         match &self.response {
             Ok(response) => Ok(response.clone()),
             Err(error) => Err(anyhow::anyhow!(error.clone())),
+        }
+    }
+}
+
+struct LocalHttpServer {
+    address: SocketAddr,
+    request: Arc<Mutex<Option<String>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl LocalHttpServer {
+    fn ok(body: &str) -> Self {
+        Self::new("HTTP/1.1 200 OK", body)
+    }
+
+    fn status(status_line: &str) -> Self {
+        Self::new(status_line, "")
+    }
+
+    fn new(status_line: &str, body: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let request = Arc::new(Mutex::new(None));
+        let request_clone = Arc::clone(&request);
+        let response = format!(
+            "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.as_bytes().len()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0_u8; 4096];
+            let size = stream.read(&mut buffer).unwrap();
+            *request_clone.lock().unwrap() =
+                Some(String::from_utf8_lossy(&buffer[..size]).to_string());
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        Self {
+            address,
+            request,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.address, path)
+    }
+
+    fn request(&self) -> String {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(request) = self.request.lock().unwrap().clone() {
+                return request;
+            }
+            if Instant::now() >= deadline {
+                return String::new();
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for LocalHttpServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -106,6 +175,39 @@ fn remote_scraper_settings_normalize_sources_and_reject_invalid_enabled_source()
 
     let error = invalid.normalized().unwrap_err();
     assert!(error.to_string().contains("{code}"));
+}
+
+#[test]
+fn http_remote_metadata_client_sends_user_agent_and_reads_body() {
+    let server = LocalHttpServer::ok("<html><body>fixture response from local server</body></html>");
+    let client = HttpRemoteMetadataClient::new(
+        Duration::from_millis(1000),
+        "media-manager-test".to_string(),
+        None,
+    )
+    .unwrap();
+
+    let body = client.get_text(&server.url("/sample?q=ABP-001")).unwrap();
+
+    assert!(body.contains("fixture response"));
+    let request = server.request();
+    assert!(request.starts_with("GET /sample?q=ABP-001 HTTP/1.1"));
+    assert!(request.contains("User-Agent: media-manager-test"));
+}
+
+#[test]
+fn http_remote_metadata_client_classifies_non_success_status() {
+    let server = LocalHttpServer::status("HTTP/1.1 429 Too Many Requests");
+    let client = HttpRemoteMetadataClient::new(
+        Duration::from_millis(1000),
+        "media-manager-test".to_string(),
+        None,
+    )
+    .unwrap();
+
+    let error = client.get_text(&server.url("/limited")).unwrap_err();
+
+    assert!(error.to_string().contains("HTTP status 429"));
 }
 
 #[test]

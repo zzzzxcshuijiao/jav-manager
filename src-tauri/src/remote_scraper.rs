@@ -4,6 +4,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::time::Duration;
+use thiserror::Error;
 
 const DEFAULT_REMOTE_SCRAPER_TIMEOUT_MS: u64 = 8000;
 const DEFAULT_REMOTE_SCRAPER_USER_AGENT: &str = "media-manager/0.1 local scraper";
@@ -66,6 +68,103 @@ impl RemoteMetadata {
 pub trait RemoteMetadataHttpClient: Send + Sync {
     /// Fetch a remote HTML document as UTF-8 text.
     fn get_text(&self, url: &str) -> Result<String>;
+}
+
+/// Error categories surfaced by real remote scraper transports and parsers.
+#[derive(Debug, Error)]
+pub enum RemoteScraperError {
+    #[error("remote scraper not found: HTTP status {status}")]
+    NotFound { status: u16 },
+    #[error("remote scraper HTTP status {status}")]
+    HttpStatus { status: u16 },
+    #[error("remote scraper network error: {message}")]
+    Network { message: String },
+    #[error("remote scraper transport error: {message}")]
+    Transport { message: String },
+    #[error("remote scraper parser error: {message}")]
+    Parser { message: String },
+}
+
+/// Synchronous HTTP client used by production remote scraper sources.
+#[derive(Debug, Clone)]
+pub struct HttpRemoteMetadataClient {
+    timeout: Duration,
+    user_agent: String,
+    proxy_url: Option<String>,
+}
+
+impl HttpRemoteMetadataClient {
+    /// Create a real HTTP client for remote metadata pages.
+    pub fn new(timeout: Duration, user_agent: String, proxy_url: Option<String>) -> Result<Self> {
+        if timeout.is_zero() {
+            return Err(anyhow!("remote scraper timeout must be greater than zero"));
+        }
+        let user_agent = user_agent.trim().to_string();
+        if user_agent.is_empty() {
+            return Err(anyhow!("remote scraper user_agent is required"));
+        }
+        let proxy_url = proxy_url.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        });
+        Ok(Self {
+            timeout,
+            user_agent,
+            proxy_url,
+        })
+    }
+
+    /// Build the production client from persisted remote scraper settings.
+    pub fn from_settings(settings: &RemoteScraperSettings) -> Result<Self> {
+        let normalized = settings.normalized()?;
+        Self::new(
+            Duration::from_millis(normalized.timeout_ms),
+            normalized.user_agent,
+            normalized.proxy_url,
+        )
+    }
+
+    fn agent(&self) -> Result<ureq::Agent> {
+        let mut builder = ureq::AgentBuilder::new().timeout(self.timeout);
+        if let Some(proxy_url) = &self.proxy_url {
+            builder = builder.proxy(ureq::Proxy::new(proxy_url)?);
+        }
+        Ok(builder.build())
+    }
+}
+
+impl RemoteMetadataHttpClient for HttpRemoteMetadataClient {
+    fn get_text(&self, url: &str) -> Result<String> {
+        let response = self
+            .agent()?
+            .get(url)
+            .set("User-Agent", &self.user_agent)
+            .call()
+            .map_err(classify_ureq_error)?;
+        response.into_string().map_err(|error| {
+            RemoteScraperError::Transport {
+                message: error.to_string(),
+            }
+            .into()
+        })
+    }
+}
+
+fn classify_ureq_error(error: ureq::Error) -> anyhow::Error {
+    match error {
+        ureq::Error::Status(status, _) if status == 404 || status == 410 => {
+            RemoteScraperError::NotFound { status }.into()
+        }
+        ureq::Error::Status(status, _) => RemoteScraperError::HttpStatus { status }.into(),
+        ureq::Error::Transport(error) => RemoteScraperError::Network {
+            message: error.to_string(),
+        }
+        .into(),
+    }
 }
 
 /// Persisted remote scraper settings used by the automatic pipeline.
@@ -252,7 +351,18 @@ impl<C: RemoteMetadataHttpClient> RemoteScraperSource<C> {
     /// Fetch and parse remote metadata for one normalized code.
     pub fn lookup_remote(&self, normalized_code: &str) -> Result<Option<RemoteMetadata>> {
         let url = self.config.build_url(normalized_code)?;
-        let html = self.client.get_text(&url)?;
+        let html = match self.client.get_text(&url) {
+            Ok(html) => html,
+            Err(error) => {
+                if matches!(
+                    error.downcast_ref::<RemoteScraperError>(),
+                    Some(RemoteScraperError::NotFound { .. })
+                ) {
+                    return Ok(None);
+                }
+                return Err(error);
+            }
+        };
         parse_json_ld_metadata(
             &self.config.source_name,
             normalized_code,

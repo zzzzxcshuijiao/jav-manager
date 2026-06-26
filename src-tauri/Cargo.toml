@@ -27,6 +27,7 @@ sha2 = "0.10"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.7.1"
 thiserror = "1"
+ureq = "2"
 walkdir = "2"
 
 [dev-dependencies]
