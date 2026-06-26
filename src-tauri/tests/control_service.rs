@@ -5,6 +5,7 @@ use media_manager::control_service::{
 use media_manager::domain::{
     Exception, ExceptionKind, ExceptionStatus, HoldingEntry, HoldingReason, PipelineRun,
 };
+use media_manager::remote_scraper::RemoteScraperSettings;
 use media_manager::storage::Repository;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -338,6 +339,12 @@ fn run_once_and_queue_routes_use_existing_daemon_control_helpers() {
 fn run_once_without_metadata_source_returns_error_and_keeps_file() {
     let tmp = tempfile::tempdir().unwrap();
     let repo = configured_repo(&tmp);
+    repo.set_remote_scraper_settings(&RemoteScraperSettings {
+        enabled: false,
+        include_example_fallback: false,
+        ..RemoteScraperSettings::default()
+    })
+    .unwrap();
     let inbox = tmp.path().join("inbox");
     let video = inbox.join("ABP-599.mp4");
     std::fs::write(&video, b"stable video bytes").unwrap();
