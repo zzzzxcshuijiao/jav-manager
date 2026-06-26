@@ -1,3 +1,7 @@
+use crate::control_service_host::ControlServiceHostStatus;
+use crate::daemon_control::DaemonControlStatus;
+use crate::domain::{Exception, ExceptionStatus, HoldingEntry, PipelineRun, ScrapeJob};
+use crate::storage::Repository;
 use anyhow::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -10,6 +14,10 @@ use std::path::{Path, PathBuf};
 const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_MAX_FILES: usize = 3;
 const MAX_TAIL_LIMIT: usize = 200;
+const SNAPSHOT_PIPELINE_LIMIT: usize = 10;
+const SNAPSHOT_SCRAPE_LIMIT: usize = 20;
+const SNAPSHOT_EXCEPTION_LIMIT: usize = 20;
+const SNAPSHOT_HOLDING_LIMIT: usize = 20;
 
 /// Severity for one structured diagnostic event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +35,57 @@ pub struct DiagnosticLogEntry {
     pub target: String,
     pub message: String,
     pub context: Value,
+}
+
+/// Redacted settings summary included in a diagnostic export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticSettingsSummary {
+    pub source_root_count: usize,
+    pub archive_root_configured: bool,
+    pub metadata_provider_enabled: bool,
+    pub aria2_enabled: bool,
+    pub aria2_host: String,
+    pub aria2_port: u16,
+    pub aria2_secret_configured: bool,
+    pub aria2_tracked_gids: usize,
+    pub remote_scraper_enabled: bool,
+    pub remote_scraper_sources: usize,
+    pub remote_scraper_proxy_url: Option<String>,
+}
+
+/// Serializable support snapshot exported for local troubleshooting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticSnapshot {
+    pub generated_at: String,
+    pub app_data_dir: String,
+    pub control_service: Option<ControlServiceHostStatus>,
+    pub daemon: Option<DaemonControlStatus>,
+    pub settings: Option<DiagnosticSettingsSummary>,
+    pub recent_pipeline_runs: Vec<PipelineRun>,
+    pub recent_scrape_jobs: Vec<ScrapeJob>,
+    pub open_exceptions: Vec<Exception>,
+    pub holding_items: Vec<HoldingEntry>,
+    pub recent_logs: Vec<DiagnosticLogEntry>,
+}
+
+/// Inputs needed to assemble a diagnostic snapshot without coupling to Tauri.
+pub struct DiagnosticSnapshotInput<'a> {
+    pub app_data_dir: &'a Path,
+    pub repository: Option<&'a Repository>,
+    pub control_service: Option<ControlServiceHostStatus>,
+    pub daemon: Option<DaemonControlStatus>,
+    pub recent_logs: Vec<DiagnosticLogEntry>,
+}
+
+/// Summary returned to the UI after a diagnostic snapshot is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticExportResult {
+    pub path: String,
+    pub logs: usize,
+    pub pipeline_runs: usize,
+    pub scrape_jobs: usize,
+    pub open_exceptions: usize,
+    pub holding_items: usize,
 }
 
 /// App-data backed JSONL writer for local diagnostic events.
@@ -177,4 +236,91 @@ pub fn redact_proxy_url(value: &str) -> String {
         return value.to_string();
     };
     format!("{scheme}://***@{host}")
+}
+
+/// Build one in-memory diagnostic snapshot from repository summaries and recent logs.
+pub fn build_diagnostic_snapshot(input: DiagnosticSnapshotInput<'_>) -> Result<DiagnosticSnapshot> {
+    let (
+        settings,
+        recent_pipeline_runs,
+        recent_scrape_jobs,
+        open_exceptions,
+        holding_items,
+    ) = if let Some(repo) = input.repository {
+        let settings = Some(build_settings_summary(repo)?);
+        let mut pipeline_runs = repo.list_pipeline_runs()?;
+        pipeline_runs.truncate(SNAPSHOT_PIPELINE_LIMIT);
+        let mut scrape_jobs = repo.list_scrape_jobs()?;
+        scrape_jobs.truncate(SNAPSHOT_SCRAPE_LIMIT);
+        let mut exceptions: Vec<Exception> = repo
+            .list_exceptions()?
+            .into_iter()
+            .filter(|entry| entry.status == ExceptionStatus::Open)
+            .collect();
+        exceptions.truncate(SNAPSHOT_EXCEPTION_LIMIT);
+        let mut holding = repo.list_holding()?;
+        holding.truncate(SNAPSHOT_HOLDING_LIMIT);
+        (settings, pipeline_runs, scrape_jobs, exceptions, holding)
+    } else {
+        (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
+
+    Ok(DiagnosticSnapshot {
+        generated_at: Utc::now().to_rfc3339(),
+        app_data_dir: input.app_data_dir.to_string_lossy().to_string(),
+        control_service: input.control_service,
+        daemon: input.daemon,
+        settings,
+        recent_pipeline_runs,
+        recent_scrape_jobs,
+        open_exceptions,
+        holding_items,
+        recent_logs: input.recent_logs,
+    })
+}
+
+/// Write a diagnostic snapshot JSON file under `<app_data_dir>/diagnostics`.
+pub fn export_diagnostic_snapshot(
+    app_data_dir: &Path,
+    snapshot: &DiagnosticSnapshot,
+) -> Result<DiagnosticExportResult> {
+    let output_dir = app_data_dir.join("diagnostics");
+    fs::create_dir_all(&output_dir)?;
+    let path = output_dir.join(format!(
+        "diagnostics-{}.json",
+        Utc::now().format("%Y%m%d-%H%M%S")
+    ));
+    fs::write(&path, serde_json::to_string_pretty(snapshot)?)?;
+    Ok(DiagnosticExportResult {
+        path: path.to_string_lossy().to_string(),
+        logs: snapshot.recent_logs.len(),
+        pipeline_runs: snapshot.recent_pipeline_runs.len(),
+        scrape_jobs: snapshot.recent_scrape_jobs.len(),
+        open_exceptions: snapshot.open_exceptions.len(),
+        holding_items: snapshot.holding_items.len(),
+    })
+}
+
+fn build_settings_summary(repo: &Repository) -> Result<DiagnosticSettingsSummary> {
+    let source_roots = repo.get_source_roots()?;
+    let archive_root = repo.get_archive_root()?;
+    let metadata_provider_enabled = repo.get_metadata_provider_enabled()?;
+    let aria2 = repo.get_aria2_settings()?;
+    let remote_scraper = repo.get_remote_scraper_settings()?;
+    Ok(DiagnosticSettingsSummary {
+        source_root_count: source_roots.len(),
+        archive_root_configured: archive_root.is_some(),
+        metadata_provider_enabled,
+        aria2_enabled: aria2.enabled,
+        aria2_host: aria2.host,
+        aria2_port: aria2.port,
+        aria2_secret_configured: aria2.secret.is_some(),
+        aria2_tracked_gids: aria2.tracked_gids.len(),
+        remote_scraper_enabled: remote_scraper.enabled,
+        remote_scraper_sources: remote_scraper.sources.len(),
+        remote_scraper_proxy_url: remote_scraper
+            .proxy_url
+            .as_deref()
+            .map(redact_proxy_url),
+    })
 }
