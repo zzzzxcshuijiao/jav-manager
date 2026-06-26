@@ -25,6 +25,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 5B（前端服务客户端迁移）已实现并验证。**
 阶段 5B 新增 discovery Tauri command 与纯 TypeScript daemon client。设置页“自动管线”优先通过 app-data discovery + loopback REST 调用阶段 5A 服务；服务缺失、不可达、鉴权失败或响应形状异常时回退阶段 4 Tauri command bridge。服务返回业务错误时不回退，避免重复执行或掩盖真实服务错误。UI 会显示控制通道，并在暂停状态禁用“运行一轮”。阶段 5B 仍不启动服务进程、不做托盘/自启/WebSocket、不接真实网络 scraper。
 
+**阶段 5C（控制服务宿主与生命周期）已实现并验证。**
+阶段 5C 新增 app-owned control service host。Tauri setup 在 app data / SQLite 初始化后会尝试启动 loopback REST 服务，写入 `control-service.json`，并把 handle 存进 `AppState`；启动失败不阻断应用，前端仍可 fallback 到 command bridge。`AppState` 释放时会 shutdown 服务并删除 discovery。控制服务的 metadata provider 开关改为按请求读取 SQLite 当前值，避免启动快照过期。阶段 5C 仍不做托盘/自启/WebSocket/真实网络 scraper。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -32,6 +35,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo test --manifest-path src-tauri/Cargo.toml --test daemon -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test daemon_control -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test control_service -j 1`
+- `cargo test --manifest-path src-tauri/Cargo.toml --test control_service_host -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`
 - `npm test`
 - `npx tsc --noEmit`
@@ -80,6 +84,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 10. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage5a-local-control-service.md`** — 阶段 5A plan（已完成，含 TDD 步骤与验收）。
 11. **`docs/superpowers/specs/2026-06-26-media-manager-stage5b-frontend-service-client-design.md`** — 阶段 5B 前端服务客户端迁移设计（已完成）。
 12. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage5b-frontend-service-client.md`** — 阶段 5B plan（已完成，含 TDD 步骤与验收）。
+13. **`docs/superpowers/specs/2026-06-26-media-manager-stage5c-control-service-host-design.md`** — 阶段 5C 控制服务宿主与生命周期设计（已完成）。
+14. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage5c-control-service-host.md`** — 阶段 5C plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -142,6 +148,19 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - `src/viewModel.ts` 新增 `formatDaemonChannel`，`src/App.tsx` 设置页显示“控制通道 本地服务/命令桥/未连接”。
 - `src/App.tsx` 在 daemon 状态为 `Paused` 时禁用“运行一轮”，避免 UI 允许触发一个会被暂停态拒绝的操作。
 
+## 阶段 5C 交付物
+
+- 新增 `src-tauri/src/control_service_host.rs`：`ControlServiceHostStatus`、`build_control_service_config`、`start_control_service_host`、`control_service_host_status`，负责从 app data 启动 app-owned loopback 服务。
+- `src-tauri/src/lib.rs` 导出 `control_service_host`。
+- `ControlServiceHandle` 现在记录 discovery path，提供 `host()` / `discovery_path()` accessor，`shutdown()` 会删除 discovery 文件。
+- `ControlServiceRuntime` 在 `/v1/status` 和 `/v1/run-once` 时动态读取 SQLite 中的 `metadata_provider_enabled`，读失败才回退启动默认值。
+- `AppState` 新增 `control_service` 和 `control_service_error`，Tauri setup 成功打开 app data SQLite 后尝试启动服务；启动失败只记录错误，不阻断应用启动。
+- `AppState::drop` 会 shutdown 控制服务，释放 listener 并清理 discovery。
+- `commands.rs` 新增并注册 `get_control_service_host_status`，用于诊断宿主是否运行、端口、discovery 路径和最近启动错误。
+- `src/api.ts` 新增 `ControlServiceHostStatus` 和 `getControlServiceHostStatus()`。
+- 新增 `src-tauri/tests/control_service_host.rs`，覆盖 host config、启动、health、status、shutdown 清理 discovery。
+- `src-tauri/tests/control_service.rs` 新增动态 metadata provider 回归，并修正 run-once fixture 以 SQLite 设置为准。
+
 ## 留给后续阶段的项（review 时判定 DEFER，不是缺陷）
 
 - `src-tauri/src/commands.rs` 前端命令路径的 `parse_watch_status` 新变体缺失已在阶段 4 修复，并有 `commands::tests::command_watch_status_parser_accepts_stage1_statuses` 回归测试。
@@ -151,7 +170,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-建议进入**阶段 5C（控制服务宿主与生命周期）**：让阶段 5A 的 loopback 服务在真实应用生命周期中可启动/停止，并和阶段 5B 前端客户端形成真实服务路径。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，建议下一步在两条路线中选一条：**阶段 6A 真实 scraper adapter 骨架**（先做 provider trait 的 HTTP client 注入、HTML/JSON 解析单测、失败语义，不依赖真实网络）或 **阶段 6B aria2 RPC 集成骨架**（先做 RPC DTO、轮询/完成事件转换、假 HTTP 测试）。如果先做实际环境验证，重点检查设置页“自动管线”的控制通道是否变为“本地服务”，以及 app data 下是否生成 `control-service.json`。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
