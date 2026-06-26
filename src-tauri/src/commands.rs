@@ -1,6 +1,11 @@
 use crate::archive::ArchivePlanner;
 use crate::control_service::{
     control_service_discovery_path, read_control_service_discovery, ControlServiceDiscovery,
+    ControlServiceHandle,
+};
+use crate::control_service_host::{
+    control_service_host_status as build_control_service_host_status, start_control_service_host,
+    ControlServiceHostStatus,
 };
 use crate::daemon::RunOnceReport;
 use crate::daemon_control::{
@@ -40,6 +45,8 @@ pub struct AppState {
     pub archive_plans: Mutex<Vec<ArchivePlan>>,
     pub archive_logs: Mutex<Vec<ArchiveActionLog>>,
     pub daemon_runtime: Mutex<DaemonControlRuntime>,
+    pub control_service: Mutex<Option<ControlServiceHandle>>,
+    pub control_service_error: Mutex<Option<String>>,
     pub next_job_id: Mutex<i64>,
     pub next_item_id: Mutex<i64>,
     pub next_plan_id: Mutex<i64>,
@@ -56,9 +63,35 @@ impl Default for AppState {
             archive_plans: Mutex::new(Vec::new()),
             archive_logs: Mutex::new(Vec::new()),
             daemon_runtime: Mutex::new(DaemonControlRuntime::default()),
+            control_service: Mutex::new(None),
+            control_service_error: Mutex::new(None),
             next_job_id: Mutex::new(1),
             next_item_id: Mutex::new(1),
             next_plan_id: Mutex::new(1),
+        }
+    }
+}
+
+impl AppState {
+    /// Return a serializable snapshot of the app-owned control service host.
+    pub fn control_service_host_status(
+        &self,
+        app_data_dir: &Path,
+        last_error: Option<String>,
+    ) -> ControlServiceHostStatus {
+        let handle_guard = self.control_service.lock().ok();
+        let handle = handle_guard.as_ref().and_then(|guard| guard.as_ref());
+        build_control_service_host_status(app_data_dir, handle, last_error)
+    }
+}
+
+impl Drop for AppState {
+    /// Shut down the hosted loopback control service when Tauri releases app state.
+    fn drop(&mut self) {
+        if let Ok(slot) = self.control_service.get_mut() {
+            if let Some(handle) = slot.take() {
+                let _ = handle.shutdown();
+            }
         }
     }
 }
@@ -167,6 +200,23 @@ pub fn get_control_service_discovery(
     let discovery_path = control_service_discovery_path(&app_data);
     Ok(CommandResult {
         data: read_control_service_discovery(&discovery_path).map_err(|error| error.to_string())?,
+    })
+}
+
+/// Return the app-owned control service host status for diagnostics.
+#[tauri::command]
+pub fn get_control_service_host_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<ControlServiceHostStatus>, String> {
+    let app_data = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let last_error = state
+        .control_service_error
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    Ok(CommandResult {
+        data: state.control_service_host_status(&app_data, last_error),
     })
 }
 
@@ -1416,6 +1466,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             configure_metadata_provider_enabled,
             get_metadata_provider_enabled,
             get_control_service_discovery,
+            get_control_service_host_status,
             get_daemon_status,
             pause_daemon,
             resume_daemon,
@@ -1498,6 +1549,24 @@ pub fn build_app() -> Builder<tauri::Wry> {
                 .lock()
                 .map_err(|error| error.to_string())? = metadata_provider_enabled;
             *state.repository.lock().map_err(|error| error.to_string())? = Some(repo);
+            match start_control_service_host(&app_data) {
+                Ok(handle) => {
+                    *state
+                        .control_service
+                        .lock()
+                        .map_err(|error| error.to_string())? = Some(handle);
+                    *state
+                        .control_service_error
+                        .lock()
+                        .map_err(|error| error.to_string())? = None;
+                }
+                Err(error) => {
+                    *state
+                        .control_service_error
+                        .lock()
+                        .map_err(|lock_error| lock_error.to_string())? = Some(error.to_string());
+                }
+            }
             Ok(())
         })
 }
@@ -1741,5 +1810,19 @@ mod tests {
         assert_eq!(parse_watch_status("watched"), WatchStatus::Watched);
         assert_eq!(parse_watch_status("favorite"), WatchStatus::Favorite);
         assert_eq!(parse_watch_status("unknown"), WatchStatus::Unwatched);
+    }
+
+    #[test]
+    fn default_app_state_reports_no_control_service_handle() {
+        let state = AppState::default();
+        let error = Some("startup failed".to_string());
+        let tmp = tempfile::tempdir().unwrap();
+
+        let status = state.control_service_host_status(tmp.path(), error.clone());
+
+        assert!(!status.running);
+        assert_eq!(status.port, None);
+        assert_eq!(status.last_error, error);
+        assert!(status.discovery_path.ends_with("control-service.json"));
     }
 }
