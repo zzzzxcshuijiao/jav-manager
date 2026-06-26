@@ -22,6 +22,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 5A（本地控制服务基座）已实现。**
 阶段 5A 新增纯 Rust loopback REST 控制服务基座：发现文件、Bearer token、Origin 校验、health、status、pause/resume、run-once、holding、exceptions、resolve exception、runs。服务测试使用随机本地端口、临时 SQLite、临时媒体目录和假文件，不依赖真实资源。阶段 5A 仍不做 WebSocket、托盘、自启、真实网络 scraper 或前端 HTTP client 迁移。
 
+**阶段 5B（前端服务客户端迁移）已实现并验证。**
+阶段 5B 新增 discovery Tauri command 与纯 TypeScript daemon client。设置页“自动管线”优先通过 app-data discovery + loopback REST 调用阶段 5A 服务；服务缺失、不可达、鉴权失败或响应形状异常时回退阶段 4 Tauri command bridge。服务返回业务错误时不回退，避免重复执行或掩盖真实服务错误。UI 会显示控制通道，并在暂停状态禁用“运行一轮”。阶段 5B 仍不启动服务进程、不做托盘/自启/WebSocket、不接真实网络 scraper。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
@@ -75,6 +78,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 8. **`docs/superpowers/plans/2026-06-25-media-manager-refactor-stage4-control-ui.md`** — 阶段 4 plan（已完成，含 TDD 步骤与验收）。
 9. **`docs/superpowers/specs/2026-06-26-media-manager-stage5a-local-control-service-design.md`** — 阶段 5A 本地控制服务基座设计（已完成）。
 10. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage5a-local-control-service.md`** — 阶段 5A plan（已完成，含 TDD 步骤与验收）。
+11. **`docs/superpowers/specs/2026-06-26-media-manager-stage5b-frontend-service-client-design.md`** — 阶段 5B 前端服务客户端迁移设计（已完成）。
+12. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage5b-frontend-service-client.md`** — 阶段 5B plan（已完成，含 TDD 步骤与验收）。
 
 ## 阶段 1 交付物
 
@@ -127,17 +132,26 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - `daemon_control::resolve_exception_entry` 现在返回更新后的 `Exception`，Tauri command 仍可忽略该返回值，REST endpoint 用它回传 resolved 状态。
 - 新增 `src-tauri/tests/control_service.rs`：覆盖 loopback 拒绝、discovery、health、token/Origin、status/pause/resume、run-once、队列 API、元数据关闭保护、404 和非法异常 id 400。
 
+## 阶段 5B 交付物
+
+- `control_service.rs` 新增 `CONTROL_SERVICE_DISCOVERY_FILE`、`control_service_discovery_path`、`read_control_service_discovery`，固定 app data 下的 `control-service.json` 发现文件路径。
+- `commands.rs` 新增并注册 `get_control_service_discovery`，前端通过 Tauri command 读取 discovery，不直接读文件系统。
+- 新增 `src/daemonClient.ts`：服务优先、命令桥兜底的自动管线客户端，覆盖 status、pause/resume、run-once、holding、exceptions、resolve、runs。
+- 新增 `src/daemonClient.test.ts`：覆盖 discovery 缺失 fallback、REST 成功、业务错误不 fallback、服务不可达 fallback、异常解决 REST 路由和 fallback command 名称。
+- `src/api.ts` 保持原自动管线 API 名称，内部迁移到 `daemonClient`，并暴露 `getControlServiceDiscovery` / `getDaemonControlChannel`。
+- `src/viewModel.ts` 新增 `formatDaemonChannel`，`src/App.tsx` 设置页显示“控制通道 本地服务/命令桥/未连接”。
+- `src/App.tsx` 在 daemon 状态为 `Paused` 时禁用“运行一轮”，避免 UI 允许触发一个会被暂停态拒绝的操作。
+
 ## 留给后续阶段的项（review 时判定 DEFER，不是缺陷）
 
 - `src-tauri/src/commands.rs` 前端命令路径的 `parse_watch_status` 新变体缺失已在阶段 4 修复，并有 `commands::tests::command_watch_status_parser_accepts_stage1_statuses` 回归测试。
 - 几处 `created_at` 只写未读 / `parse_*` 回退不可区分 → 非阻塞清理项，后续碰到相关命令/UI 时再处理。
 - 真实网络 scraper（FANZA/JavBus/JavDB 等）尚未接入；阶段 4 只提供无网络 `ExamplePipelineScraper`，用于验证管线串联。
 - WebSocket、托盘、自启、常驻后台线程仍是后续阶段工作。
-- 前端从 Tauri command bridge 迁移到本地 REST client 仍是阶段 5B 工作。
 
 ## 下一步
 
-进入**阶段 5B（前端 HTTP client 迁移与服务发现）**：保留阶段 4 设置页体验，把自动管线面板从 Tauri command bridge 切到阶段 5A 的 discovery + REST client，并保留命令桥作为过渡 fallback。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的桌面环境运行。
+建议进入**阶段 5C（控制服务宿主与生命周期）**：让阶段 5A 的 loopback 服务在真实应用生命周期中可启动/停止，并和阶段 5B 前端客户端形成真实服务路径。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
