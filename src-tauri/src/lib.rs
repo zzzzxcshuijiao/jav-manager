@@ -1,4 +1,5 @@
 pub mod acceptance;
+pub mod aria2;
 pub mod archive;
 pub mod commands;
 pub mod control_service;
