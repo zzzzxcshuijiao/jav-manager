@@ -6,6 +6,7 @@ pub mod control_service;
 pub mod control_service_host;
 pub mod daemon;
 pub mod daemon_control;
+pub mod diagnostics;
 pub mod domain;
 pub mod identifier;
 pub mod ingest;
