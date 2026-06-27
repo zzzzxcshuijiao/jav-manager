@@ -192,7 +192,11 @@ const inventoryStatusFilters: Array<InventoryStatus | "all"> = [
   "missing_nfo",
   "missing_video",
   "multi_video",
-  "code_conflict"
+  "multi_nfo",
+  "code_conflict",
+  "duplicate_candidate",
+  "nfo_parse_error",
+  "orphan"
 ];
 
 export function App() {
@@ -2096,6 +2100,10 @@ export function App() {
                         <div>
                           <span>缺视频</span>
                           <strong>{inventoryReport.summary.missing_video}</strong>
+                        </div>
+                        <div>
+                          <span>多版本</span>
+                          <strong>{inventoryReport.summary.multi_video}</strong>
                         </div>
                         <div>
                           <span>冲突</span>
