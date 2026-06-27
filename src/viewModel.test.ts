@@ -507,6 +507,10 @@ describe("inventory preview formatting", () => {
 
   it("formats inventory action targets", () => {
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: null })).toBe("H:/AV/IPX-001/IPX-001.mp4");
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "target_exists" })).toBe("H:/AV/IPX-001/IPX-001.mp4（目标已存在）");
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "target_duplicate" })).toBe("H:/AV/IPX-001/IPX-001.mp4（目标重复）");
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "target_exists,target_duplicate" })).toBe("H:/AV/IPX-001/IPX-001.mp4（目标已存在，目标重复）");
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "unexpected_token" })).toBe("H:/AV/IPX-001/IPX-001.mp4（存在冲突：unexpected_token）");
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: null, kind: "video", conflict: null })).toBe("未配置归档根目录");
   });
 });

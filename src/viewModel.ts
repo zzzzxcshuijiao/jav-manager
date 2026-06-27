@@ -449,15 +449,24 @@ export function formatInventorySummary(report: InventoryPreviewReport): string {
   return `识别 ${s.works} 部作品：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
 }
 
-/** Format the planned target path for one inventory preview action. */
+/** Format the planned target path and comma-separated conflict tokens for one inventory preview action. */
 export function formatInventoryActionTarget(action: InventoryPreviewAction): string {
   if (!action.to_path) {
     return "未配置归档根目录";
   }
-  if (action.conflict === "target_exists") {
-    return `${action.to_path}（目标已存在）`;
+  const conflictLabels: Record<string, string> = {
+    target_exists: "目标已存在",
+    target_duplicate: "目标重复"
+  };
+  const conflicts = action.conflict
+    ?.split(",")
+    .map((token) => token.trim())
+    .filter(Boolean) ?? [];
+  if (conflicts.length === 0) {
+    return action.to_path;
   }
-  return action.to_path;
+  const details = conflicts.map((token) => conflictLabels[token] ?? `存在冲突：${token}`);
+  return `${action.to_path}（${details.join("，")}）`;
 }
 
 export function formatDaemonState(state: DaemonState): string {
