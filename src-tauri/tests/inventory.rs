@@ -378,6 +378,36 @@ fn inventory_preview_marks_duplicate_generated_targets() {
 }
 
 #[test]
+fn inventory_preview_marks_case_insensitive_duplicate_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-205-cover.JPG"), b"cover");
+    write_file(&root.join("IPX-205-poster.jpg"), b"poster");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-205")
+        .unwrap();
+    let duplicate_posters: Vec<_> = work
+        .actions
+        .iter()
+        .filter(|action| action.kind == InventoryResourceKind::Poster)
+        .collect();
+    assert_eq!(duplicate_posters.len(), 2);
+    assert!(duplicate_posters.iter().all(|action| {
+        action
+            .conflict
+            .as_deref()
+            .unwrap_or_default()
+            .contains("target_duplicate")
+    }));
+}
+
+#[test]
 fn inventory_preview_combines_existing_and_duplicate_target_conflicts() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");

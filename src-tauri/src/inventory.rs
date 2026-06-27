@@ -369,11 +369,11 @@ fn explicit_video_part_index(stem: &str) -> Option<usize> {
 
 // Mark generated target collisions inside one preview batch without hiding pre-existing disk conflicts.
 fn mark_duplicate_action_targets(actions: &mut [InventoryPreviewAction]) {
-    let mut indexes_by_target: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    let mut indexes_by_target: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, action) in actions.iter().enumerate() {
         if let Some(to_path) = &action.to_path {
             indexes_by_target
-                .entry(to_path.clone())
+                .entry(duplicate_target_key(to_path))
                 .or_default()
                 .push(index);
         }
@@ -386,6 +386,16 @@ fn mark_duplicate_action_targets(actions: &mut [InventoryPreviewAction]) {
         for index in indexes {
             append_conflict(&mut actions[*index].conflict, "target_duplicate");
         }
+    }
+}
+
+// Build the comparison key used for detecting same-batch target collisions.
+fn duplicate_target_key(path: &Path) -> String {
+    let key = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        key.to_ascii_lowercase()
+    } else {
+        key
     }
 }
 
