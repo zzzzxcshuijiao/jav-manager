@@ -384,9 +384,21 @@ fn mark_duplicate_action_targets(actions: &mut [InventoryPreviewAction]) {
             continue;
         }
         for index in indexes {
-            if actions[*index].conflict.is_none() {
-                actions[*index].conflict = Some("target_duplicate".to_string());
-            }
+            append_conflict(&mut actions[*index].conflict, "target_duplicate");
+        }
+    }
+}
+
+// Append one conflict token while preserving deterministic comma-separated order.
+fn append_conflict(conflict: &mut Option<String>, token: &str) {
+    match conflict {
+        Some(existing) if existing.split(',').any(|part| part == token) => {}
+        Some(existing) if !existing.is_empty() => {
+            existing.push(',');
+            existing.push_str(token);
+        }
+        _ => {
+            *conflict = Some(token.to_string());
         }
     }
 }
@@ -493,17 +505,21 @@ fn preview_action(
 ) -> InventoryPreviewAction {
     let to_path =
         target_dir.map(|target_dir| target_dir.join(target_relative_path(code, resource, index)));
-    let conflict = to_path
-        .as_ref()
-        .filter(|path| path.exists())
-        .map(|_| "target_exists".to_string());
-
-    InventoryPreviewAction {
+    let mut action = InventoryPreviewAction {
         from_path: resource.path.clone(),
         to_path,
         kind: resource.kind.clone(),
-        conflict,
+        conflict: None,
+    };
+    if action
+        .to_path
+        .as_ref()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
+        append_conflict(&mut action.conflict, "target_exists");
     }
+    action
 }
 
 // Choose the stable archive-relative name for one resource kind.
