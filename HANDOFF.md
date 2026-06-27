@@ -46,8 +46,13 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 6F（一键测试与配置自检）已实现并验证。**
 阶段 6F 新增本地一键自检：后端 `self_check` 模块会在 app data 下创建隔离 `self-check/<timestamp>/` 沙盒、独立 SQLite、假视频和临时归档目录，运行自动管线核心确认 `MMT-001.mp4` 可归档；同时输出控制服务、真实目录、元数据源、aria2、远程 scraper、诊断系统的 pass/warn/fail 配置健康检查。前端“自动管线”页新增“一键自检”按钮和结果面板，所有操作有 loading/disabled/status 反馈。自检不连接真实 aria2，不访问真实 scraper 站点，不创建下载任务，不写真实媒体库。
 
+**阶段 7A（存量资源盘点与整理预览）已实现并验证。**
+阶段 7A 从下载入口转向用户当前真实痛点：已有视频、NFO、图片、GIF 和信息文件散乱在多个目录/盘。新增 `inventory` 只读扫描器，可扫描多个根目录，按番号聚合视频/NFO/poster/fanart/thumb/screenshot/GIF/其他资源，生成 `archive_root/CODE/` 目标路径预览，标记缺 NFO、缺视频、多视频、多 NFO、番号冲突、NFO 解析失败、目标已存在和目标重复等风险。前端“自动管线”页新增“存量整理预览”面板，支持多根目录输入、全状态过滤、summary、资源证据、warnings 和 action target 预览。阶段 7A 不写 SQLite、不创建归档目录、不移动/复制/删除真实资源。
+
 验证已通过：
 
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::tests::inventory_preview -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test data_model`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test aria2_rpc -j 1`
 - `cargo test --manifest-path src-tauri/Cargo.toml --test auto_pipeline`
@@ -120,6 +125,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 24. **`docs/superpowers/plans/2026-06-26-media-manager-refactor-stage6e-logging-diagnostics.md`** — 阶段 6E plan（已完成，含 TDD 步骤与验收）。
 25. **`docs/superpowers/specs/2026-06-27-media-manager-stage6f-self-check-design.md`** — 阶段 6F 一键测试与配置自检设计（已完成）。
 26. **`docs/superpowers/plans/2026-06-27-media-manager-stage6f-self-check.md`** — 阶段 6F plan（已完成，含 TDD 步骤与验收）。
+27. **`docs/superpowers/specs/2026-06-27-media-manager-stage7a-inventory-preview-design.md`** — 阶段 7A 存量资源盘点与整理预览设计（已完成）。
+28. **`docs/superpowers/plans/2026-06-27-media-manager-stage7a-inventory-preview.md`** — 阶段 7A plan（已完成，含 TDD 步骤、评审记录和验收）。
 
 ## 阶段 1 交付物
 
@@ -256,6 +263,18 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 新增/更新测试：`src-tauri/tests/self_check.rs`、`src-tauri/tests/daemon_control.rs`、`src-tauri/tests/control_service.rs`、`commands` unit、`src/viewModel.test.ts`。
 - 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
 
+## 阶段 7A 交付物
+
+- 新增 `src-tauri/src/inventory.rs`：Inventory DTO、只读多根目录扫描、资源类型识别、番号 evidence、按番号聚合、状态标签、目标路径 preview、summary 和 truncation。
+- `inventory` 识别视频、NFO、poster、fanart、thumb、screenshot、GIF、其他图片/文件；NFO parse/read 失败不会中断扫描，会保留资源并标记 `nfo_parse_error`。
+- 目标路径只做预览：主视频 `CODE.ext`、多视频 `CODE-vN.ext`、NFO `CODE.nfo`、poster/fanart/thumb 固定名、screenshots/gifs/images 子目录；不会创建目录或移动文件。
+- 目标冲突会标记 `target_exists` 和 `target_duplicate`，组合冲突不会互相覆盖；Windows 下 `.JPG/.jpg` 这类大小写冲突也会被识别。
+- `commands.rs` 新增并注册 `preview_inventory`，递归扫描通过 `spawn_blocking` 执行；命令参数和 state archive root 都会 trim/空白归一化，空 roots 返回中文错误。
+- `src/api.ts` 新增 inventory DTO 与 `previewInventory()`；`src/viewModel.ts` 新增 inventory 状态、summary、action target 格式化，并按 token 处理组合 conflict。
+- `src/App.tsx` 设置页“自动管线”新增“存量整理预览”面板：多根目录输入、生成预览按钮、summary、全状态过滤、作品列表、详情资源、evidence、warnings 和 action target。
+- `src/styles.css` 新增 inventory panel / summary / filter / list / detail / action / responsive 样式。
+- 新增 `src-tauri/tests/inventory.rs`，并扩展 `commands` unit 与 `src/viewModel.test.ts`；完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -278,9 +297,15 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点先点设置页“自动管线”的“一键自检”：期望看到沙盒归档通过；真实目录、aria2、远程 scraper 等未配置项以 warning/fail 分项展示，但不会污染真实媒体库。然后再检查控制通道是否变为“本地服务”、app data 下是否生成 `control-service.json`，aria2 配置块保存后 `run-once` 摘要是否出现 aria2 统计，远程刮削器配置保存后启用的 source 是否在 `run-once` 中优先写入远程 metadata，以及“诊断日志/导出诊断”是否生成 `logs/media-manager.jsonl` 和 `diagnostics/diagnostics-*.json`。真实环境里需要用户自己配置 aria2 GID 和远程 scraper URL template；当前阶段不会创建下载任务，不会常驻后台轮询，也不会处理登录/cookie/验证码。
+如果先做实际环境验证，重点测阶段 7A 的“存量整理预览”：
 
-如果继续做 Codex 可编码工作，建议下一步二选一：一是 **真实环境反馈闭环**（基于用户实际自检和 run-once 结果补 parser fallback、错误可视化、scrape job 面板、metadata retry、诊断导出可读性），二是 aria2 后续增强（下载任务创建/暂停/恢复、GID 自动来源、常驻轮询、WebSocket/callback 通知）。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+1. 用户在自己的交互桌面终端运行 `npm run dev`，用浏览器打开 `http://localhost:1420`；Codex 不启动 WebView2/Tauri GUI。
+2. 设置页 → 自动管线 → 先确认 archive root 已配置；也可先跑“一键自检”确认基础链路。
+3. 在“存量整理预览”里每行填一个真实存量根目录，例如下载目录、NFO 输出目录、图片目录。
+4. 点击“生成整理预览”；期望只生成汇总、状态过滤、作品列表、资源证据、warnings 和目标路径预览，不移动、不复制、不删除任何文件。
+5. 重点看缺 NFO、缺视频、多视频、多 NFO、番号冲突、NFO 解析失败、目标已存在/目标重复是否符合真实目录情况。
+
+如果继续做 Codex 可编码工作，下一阶段建议是 **7B：配对规则与冲突处理**。范围包括多 NFO 主从选择、多视频版本/分集判断、手动合并/拆分、duplicate candidate 规则和冲突可解释 UI。7C 才做真实整理执行（移动/复制策略、二次确认、日志、失败回滚），7D 再做整理后的浏览库体验。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7B 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
