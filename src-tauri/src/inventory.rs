@@ -61,6 +61,7 @@ pub enum InventoryStatus {
     CodeConflict,
     DuplicateCandidate,
     NfoParseError,
+    AssetOnly,
     Orphan,
 }
 
@@ -88,6 +89,7 @@ pub struct InventoryWorkPreview {
 pub struct InventorySummary {
     pub total_files: usize,
     pub works: usize,
+    pub asset_candidates: usize,
     pub ready: usize,
     pub missing_nfo: usize,
     pub missing_video: usize,
@@ -106,6 +108,7 @@ pub struct InventoryPreviewReport {
     pub archive_root: Option<PathBuf>,
     pub summary: InventorySummary,
     pub works: Vec<InventoryWorkPreview>,
+    pub asset_candidates: Vec<InventoryWorkPreview>,
     pub orphans: Vec<InventoryResource>,
     pub warnings: Vec<String>,
     pub truncated: bool,
@@ -271,14 +274,22 @@ fn build_report(
         }
     }
 
-    let mut works: Vec<InventoryWorkPreview> = grouped
+    let previews: Vec<InventoryWorkPreview> = grouped
         .into_iter()
         .map(|(code, resources)| build_work_preview(code, resources, archive_root))
         .collect();
-    let summary = summarize_works(&works, &orphans, total_files);
-    let truncated = works.len() > INVENTORY_DETAIL_LIMIT || orphans.len() > INVENTORY_DETAIL_LIMIT;
+    let (mut asset_candidates, mut works): (Vec<_>, Vec<_>) = previews
+        .into_iter()
+        .partition(|work| work.statuses.contains(&InventoryStatus::AssetOnly));
+    let summary = summarize_works(&works, &asset_candidates, &orphans, total_files);
+    let truncated = works.len() > INVENTORY_DETAIL_LIMIT
+        || asset_candidates.len() > INVENTORY_DETAIL_LIMIT
+        || orphans.len() > INVENTORY_DETAIL_LIMIT;
     if works.len() > INVENTORY_DETAIL_LIMIT {
         works.truncate(INVENTORY_DETAIL_LIMIT);
+    }
+    if asset_candidates.len() > INVENTORY_DETAIL_LIMIT {
+        asset_candidates.truncate(INVENTORY_DETAIL_LIMIT);
     }
     if orphans.len() > INVENTORY_DETAIL_LIMIT {
         orphans.truncate(INVENTORY_DETAIL_LIMIT);
@@ -290,6 +301,7 @@ fn build_report(
         archive_root: archive_root.map(Path::to_path_buf),
         summary,
         works,
+        asset_candidates,
         orphans,
         warnings,
         truncated,
@@ -436,12 +448,14 @@ fn append_conflict(conflict: &mut Option<String>, token: &str) {
 // Summarize work statuses while keeping the report total independent of truncation.
 fn summarize_works(
     works: &[InventoryWorkPreview],
+    asset_candidates: &[InventoryWorkPreview],
     orphans: &[InventoryResource],
     total_files: usize,
 ) -> InventorySummary {
     let mut summary = InventorySummary {
         total_files,
         works: works.len(),
+        asset_candidates: asset_candidates.len(),
         orphans: orphans.len(),
         ..InventorySummary::default()
     };
@@ -483,15 +497,19 @@ fn work_statuses(resources: &[InventoryResource]) -> Vec<InventoryStatus> {
         .iter()
         .filter(|resource| resource.kind == InventoryResourceKind::Nfo)
         .count();
+    let has_work_anchor = video_count > 0 || nfo_count > 0;
 
     let mut statuses = BTreeSet::new();
+    if !has_work_anchor {
+        statuses.insert(InventoryStatus::AssetOnly);
+    }
     if video_count > 0 && nfo_count > 0 {
         statuses.insert(InventoryStatus::Ready);
     }
     if video_count > 0 && nfo_count == 0 {
         statuses.insert(InventoryStatus::MissingNfo);
     }
-    if video_count == 0 {
+    if video_count == 0 && nfo_count > 0 {
         statuses.insert(InventoryStatus::MissingVideo);
     }
     if video_count > 1 {

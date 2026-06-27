@@ -351,6 +351,7 @@ export type InventoryStatus =
   | "code_conflict"
   | "duplicate_candidate"
   | "nfo_parse_error"
+  | "asset_only"
   | "orphan";
 
 export interface InventoryCodeEvidence {
@@ -387,6 +388,7 @@ export interface InventoryWorkPreview {
 export interface InventorySummary {
   total_files: number;
   works: number;
+  asset_candidates: number;
   ready: number;
   missing_nfo: number;
   missing_video: number;
@@ -403,6 +405,7 @@ export interface InventoryPreviewReport {
   archive_root?: string | null;
   summary: InventorySummary;
   works: InventoryWorkPreview[];
+  asset_candidates: InventoryWorkPreview[];
   orphans: InventoryResource[];
   warnings: string[];
   truncated: boolean;

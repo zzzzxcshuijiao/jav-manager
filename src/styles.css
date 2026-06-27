@@ -633,6 +633,15 @@ h2 {
   gap: 12px;
 }
 
+.inventory-page {
+  display: grid;
+  gap: 12px;
+}
+
+.inventory-panel-large {
+  align-self: start;
+}
+
 .daemon-actions {
   display: flex;
   gap: 8px;
@@ -754,7 +763,7 @@ h2 {
 
 .inventory-summary {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 8px;
 }
 

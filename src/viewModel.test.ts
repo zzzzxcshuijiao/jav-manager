@@ -39,6 +39,7 @@ import {
   formatWorkOption,
   mergeVersionTargetWorks,
   normalizeManualCodeInput,
+  parseInventoryRootsInput,
   mergeableWorksForItem,
   parseDelimitedListInput,
   parseProfileRatingInput,
@@ -146,6 +147,7 @@ describe("workbench view helpers", () => {
     expect(workbenchViewTitle("ingest")).toBe("入库队列");
     expect(workbenchViewTitle("review")).toBe("待处理队列");
     expect(workbenchViewTitle("archive")).toBe("迁移计划");
+    expect(workbenchViewTitle("inventory")).toBe("一键盘点");
     expect(workbenchViewTitle("settings")).toBe("设置");
     expect(workbenchViewTitle("library")).toBe("作品库");
   });
@@ -478,14 +480,19 @@ describe("formatRebuildReport", () => {
 });
 
 describe("inventory preview formatting", () => {
+  it("parses one-click inventory roots from pasted or picked directories", () => {
+    expect(parseInventoryRootsInput(" H:/video \n\nH:/AV\nH:/video ")).toEqual(["H:/video", "H:/AV"]);
+  });
+
   it("formats inventory statuses and summaries", () => {
     const report = {
       generated_at: "2026-06-27T12:00:00Z",
       roots: ["H:/downloads"],
       archive_root: "H:/AV",
       summary: {
-        total_files: 8,
+        total_files: 10,
         works: 3,
+        asset_candidates: 2,
         ready: 1,
         missing_nfo: 1,
         missing_video: 1,
@@ -496,6 +503,7 @@ describe("inventory preview formatting", () => {
         orphans: 2
       },
       works: [],
+      asset_candidates: [],
       orphans: [],
       warnings: [],
       truncated: false
@@ -503,9 +511,10 @@ describe("inventory preview formatting", () => {
 
     expect(formatInventoryStatus("ready")).toBe("可整理");
     expect(formatInventoryStatus("missing_nfo")).toBe("缺 NFO");
-    expect(formatInventorySummary(report)).toBe("识别 3 部作品：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
+    expect(formatInventoryStatus("asset_only")).toBe("素材候选");
+    expect(formatInventorySummary(report)).toBe("识别 3 部作品，素材候选 2 组：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
     expect(formatInventorySummary({ ...report, truncated: true })).toBe(
-      "识别 3 部作品：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。 结果过多，作品和孤儿资源明细各最多展示 1000 项。"
+      "识别 3 部作品，素材候选 2 组：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。 结果过多，作品、素材候选和孤儿资源明细各最多展示 1000 项。"
     );
   });
 
@@ -518,7 +527,7 @@ describe("inventory preview formatting", () => {
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: null, kind: "video", conflict: null })).toBe("未配置归档根目录");
   });
 
-  it("keeps orphan resources visible for all and orphan filters", () => {
+  it("keeps orphan resources visible only for orphan filters", () => {
     const orphan = {
       path: "H:/loose/readme.txt",
       file_name: "readme.txt",
@@ -535,6 +544,7 @@ describe("inventory preview formatting", () => {
       summary: {
         total_files: 1,
         works: 0,
+        asset_candidates: 0,
         ready: 0,
         missing_nfo: 0,
         missing_video: 0,
@@ -545,12 +555,13 @@ describe("inventory preview formatting", () => {
         orphans: 1
       },
       works: [],
+      asset_candidates: [],
       orphans: [orphan],
       warnings: [],
       truncated: false
     };
 
-    expect(inventoryOrphansForFilter(report, "all")).toEqual([orphan]);
+    expect(inventoryOrphansForFilter(report, "all")).toEqual([]);
     expect(inventoryOrphansForFilter(report, "orphan")).toEqual([orphan]);
     expect(inventoryOrphansForFilter(report, "ready")).toEqual([]);
   });
