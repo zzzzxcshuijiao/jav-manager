@@ -285,20 +285,16 @@ fn build_work_preview(
     resources.sort_by(|left, right| left.path.cmp(&right.path));
     let target_dir = archive_root.map(|root| root.join(&code));
     let statuses = work_statuses(&resources);
-    let mut video_index = 0usize;
-    let actions = resources
+    let video_indexes = video_action_indexes(&code, &resources);
+    let mut actions: Vec<InventoryPreviewAction> = resources
         .iter()
         .map(|resource| {
-            let action_index = if resource.kind == InventoryResourceKind::Video {
-                let current_index = video_index;
-                video_index += 1;
-                current_index
-            } else {
-                0
-            };
+            let action_index = video_indexes.get(&resource.path).copied().unwrap_or(0);
             preview_action(&code, resource, action_index, target_dir.as_deref())
         })
         .collect();
+    actions.sort_by_key(|action| preview_action_sort_key(&code, action));
+    mark_duplicate_action_targets(&mut actions);
 
     InventoryWorkPreview {
         code,
@@ -306,6 +302,92 @@ fn build_work_preview(
         resources,
         target_dir,
         actions,
+    }
+}
+
+// Assign video target slots so the bare main file remains primary even when path sorting puts parts first.
+fn video_action_indexes(code: &str, resources: &[InventoryResource]) -> BTreeMap<PathBuf, usize> {
+    let mut videos: Vec<&InventoryResource> = resources
+        .iter()
+        .filter(|resource| resource.kind == InventoryResourceKind::Video)
+        .collect();
+    videos.sort_by_key(|resource| video_action_sort_key(code, &resource.path));
+    videos
+        .into_iter()
+        .enumerate()
+        .map(|(index, resource)| (resource.path.clone(), index))
+        .collect()
+}
+
+// Keep the action list in the same semantic order used for assigning preview video names.
+fn preview_action_sort_key(
+    code: &str,
+    action: &InventoryPreviewAction,
+) -> (u8, u8, usize, PathBuf) {
+    match action.kind {
+        InventoryResourceKind::Video => {
+            let (video_group, part_index, path) = video_action_sort_key(code, &action.from_path);
+            (0, video_group, part_index, path)
+        }
+        InventoryResourceKind::Nfo => (1, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Poster => (2, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Fanart => (3, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Thumb => (4, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Screenshot => (5, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Gif => (6, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Image => (7, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Other => (8, 0, 0, action.from_path.clone()),
+    }
+}
+
+// Sort bare CODE.ext before explicit CD/part/disc variants, then fall back to path for determinism.
+fn video_action_sort_key(code: &str, path: &Path) -> (u8, usize, PathBuf) {
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
+        return (0, 0, path.to_path_buf());
+    }
+    if let Some(part_index) = explicit_video_part_index(&stem) {
+        return (1, part_index, path.to_path_buf());
+    }
+    (2, usize::MAX, path.to_path_buf())
+}
+
+// Extract common CD/part/disc suffix numbers such as CODE-CD2 or CODE_part02.
+fn explicit_video_part_index(stem: &str) -> Option<usize> {
+    stem.rsplit(|ch| matches!(ch, '-' | '_' | '.' | ' '))
+        .find_map(|token| {
+            let token = token.to_ascii_lowercase();
+            ["cd", "part", "disc"]
+                .iter()
+                .find_map(|marker| token.strip_prefix(marker))
+                .map(|digits| digits.parse::<usize>().unwrap_or(usize::MAX))
+        })
+}
+
+// Mark generated target collisions inside one preview batch without hiding pre-existing disk conflicts.
+fn mark_duplicate_action_targets(actions: &mut [InventoryPreviewAction]) {
+    let mut indexes_by_target: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
+    for (index, action) in actions.iter().enumerate() {
+        if let Some(to_path) = &action.to_path {
+            indexes_by_target
+                .entry(to_path.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+
+    for indexes in indexes_by_target.values() {
+        if indexes.len() < 2 {
+            continue;
+        }
+        for index in indexes {
+            if actions[*index].conflict.is_none() {
+                actions[*index].conflict = Some("target_duplicate".to_string());
+            }
+        }
     }
 }
 

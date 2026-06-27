@@ -250,6 +250,85 @@ fn inventory_preview_builds_target_actions_and_marks_existing_targets() {
 }
 
 #[test]
+fn inventory_preview_uses_bare_video_as_primary_action_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-159-CD2.mkv"), b"part2");
+    write_file(&root.join("IPX-159.mp4"), b"main");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-159")
+        .unwrap();
+    let main_action = work
+        .actions
+        .iter()
+        .find(|action| action.from_path.file_name().unwrap() == "IPX-159.mp4")
+        .unwrap();
+    assert!(main_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-159/IPX-159.mp4")));
+    let main_position = work
+        .actions
+        .iter()
+        .position(|action| action.from_path.file_name().unwrap() == "IPX-159.mp4")
+        .unwrap();
+    let part_action = work
+        .actions
+        .iter()
+        .find(|action| action.from_path.file_name().unwrap() == "IPX-159-CD2.mkv")
+        .unwrap();
+    assert!(part_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-159/IPX-159-v2.mkv")));
+    let part_position = work
+        .actions
+        .iter()
+        .position(|action| action.from_path.file_name().unwrap() == "IPX-159-CD2.mkv")
+        .unwrap();
+    assert!(main_position < part_position);
+}
+
+#[test]
+fn inventory_preview_marks_duplicate_generated_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-201-cover.jpg"), b"cover");
+    write_file(&root.join("IPX-201-poster.jpg"), b"poster");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-201")
+        .unwrap();
+    let duplicate_posters: Vec<_> = work
+        .actions
+        .iter()
+        .filter(|action| action.kind == InventoryResourceKind::Poster)
+        .collect();
+    assert_eq!(duplicate_posters.len(), 2);
+    assert!(duplicate_posters.iter().all(|action| action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-201/poster.jpg"))));
+    assert!(duplicate_posters
+        .iter()
+        .all(|action| action.conflict.as_deref() == Some("target_duplicate")));
+}
+
+#[test]
 fn inventory_preview_keeps_missing_roots_as_warnings() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("missing");
