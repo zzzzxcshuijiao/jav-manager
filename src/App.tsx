@@ -38,6 +38,8 @@ import type {
   IngestDecision,
   IngestItem,
   IngestJobSummary,
+  InventoryPreviewReport,
+  InventoryStatus,
   MigrationPlan,
   PipelineRun,
   PooledWork,
@@ -88,6 +90,9 @@ import {
   formatExceptionStatus,
   formatFileVersionSummary,
   formatHoldingReason,
+  formatInventoryActionTarget,
+  formatInventoryStatus,
+  formatInventorySummary,
   formatMediaInfo,
   formatPipelineStatus,
   formatRemoteScraperSettingsSummary,
@@ -181,6 +186,15 @@ const defaultRemoteScraperSettings: RemoteScraperSettings = {
   ]
 };
 
+const inventoryStatusFilters: Array<InventoryStatus | "all"> = [
+  "all",
+  "ready",
+  "missing_nfo",
+  "missing_video",
+  "multi_video",
+  "code_conflict"
+];
+
 export function App() {
   const [sourceRoots, setSourceRoots] = useState("H:/Downloads/A\nH:/Downloads/B\nH:/Inbox");
   const [archiveRoot, setArchiveRoot] = useState("H:/Archive");
@@ -230,6 +244,11 @@ export function App() {
   const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "export" | null>(null);
   const [selfCheckReport, setSelfCheckReport] = useState<SelfCheckReport | null>(null);
   const [selfCheckBusy, setSelfCheckBusy] = useState(false);
+  const [inventoryRootsText, setInventoryRootsText] = useState("");
+  const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [inventoryReport, setInventoryReport] = useState<InventoryPreviewReport | null>(null);
+  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryStatus | "all">("all");
+  const [selectedInventoryCode, setSelectedInventoryCode] = useState<string | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
   const [aria2Busy, setAria2Busy] = useState(false);
@@ -323,6 +342,13 @@ export function App() {
     () => findIngestItemForWork(items, selectedLibraryWork),
     [items, selectedLibraryWork]
   );
+  const filteredInventoryWorks = inventoryReport
+    ? inventoryStatusFilter === "all"
+      ? inventoryReport.works
+      : inventoryReport.works.filter((work) => work.statuses.includes(inventoryStatusFilter))
+    : [];
+  const selectedInventoryWork =
+    inventoryReport?.works.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -641,6 +667,14 @@ export function App() {
       .filter(Boolean);
   }
 
+  /** 将存量扫描输入拆成去空白的根目录列表。 */
+  function inventoryRootsFromText(): string[] {
+    return inventoryRootsText
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
   function switchView(view: WorkbenchView) {
     setActiveView(view);
     if (view === "ingest" || view === "review") {
@@ -763,6 +797,29 @@ export function App() {
       setStatus(`刷新自动管线失败：${String(error)}`);
     } finally {
       setDaemonBusy(null);
+    }
+  }
+
+  /** 生成只读存量整理预览，不执行任何文件移动。 */
+  async function generateInventoryPreview() {
+    if (inventoryBusy) return;
+    const roots = inventoryRootsFromText();
+    if (roots.length === 0) {
+      setStatus("请先填写至少一个存量扫描根目录。");
+      return;
+    }
+    setInventoryBusy(true);
+    setStatus("正在扫描存量资源...");
+    try {
+      const report = await api.previewInventory(roots, daemonStatus?.archive_root ?? null);
+      setInventoryReport(report);
+      setInventoryStatusFilter("all");
+      setSelectedInventoryCode(report.works[0]?.code ?? null);
+      setStatus(formatInventorySummary(report));
+    } catch (error) {
+      setStatus(`存量整理预览失败：${String(error)}`);
+    } finally {
+      setInventoryBusy(false);
     }
   }
 
@@ -1988,6 +2045,168 @@ export function App() {
                         <small>{run.error || run.finished_at || run.started_at || "无错误"}</small>
                       </div>
                     ))
+                  )}
+                </div>
+
+                <div className="inventory-panel">
+                  <div className="inventory-panel-head">
+                    <div>
+                      <strong>存量整理预览</strong>
+                      <span>预览，不会移动文件</span>
+                    </div>
+                    <span>{inventoryReport ? inventoryReport.generated_at : "未生成"}</span>
+                  </div>
+                  <label className="inventory-roots-field">
+                    存量扫描根目录
+                    <textarea
+                      rows={4}
+                      value={inventoryRootsText}
+                      onChange={(event) => setInventoryRootsText(event.target.value)}
+                      placeholder="每行一个根目录"
+                    />
+                  </label>
+                  <div className="daemon-actions">
+                    <button type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || !hasBackend}>
+                      <RefreshCw size={16} /> {inventoryBusy ? "扫描中" : "生成整理预览"}
+                    </button>
+                  </div>
+                  <span className="inventory-status-line">
+                    {inventoryBusy
+                      ? "正在扫描存量资源..."
+                      : hasBackend
+                        ? "只读预览会检查资源、目标目录和冲突，不会移动文件。"
+                        : "桌面后端不可用，需在 Tauri 环境中生成预览。"}
+                  </span>
+
+                  {inventoryReport ? (
+                    <>
+                      <div className="inventory-summary">
+                        <div>
+                          <span>作品</span>
+                          <strong>{inventoryReport.summary.works}</strong>
+                        </div>
+                        <div>
+                          <span>可整理</span>
+                          <strong>{inventoryReport.summary.ready}</strong>
+                        </div>
+                        <div>
+                          <span>缺 NFO</span>
+                          <strong>{inventoryReport.summary.missing_nfo}</strong>
+                        </div>
+                        <div>
+                          <span>缺视频</span>
+                          <strong>{inventoryReport.summary.missing_video}</strong>
+                        </div>
+                        <div>
+                          <span>冲突</span>
+                          <strong>{inventoryReport.summary.code_conflict}</strong>
+                        </div>
+                        <div>
+                          <span>孤儿</span>
+                          <strong>{inventoryReport.summary.orphans}</strong>
+                        </div>
+                      </div>
+
+                      <div className="inventory-filter">
+                        {inventoryStatusFilters.map((filterValue) => (
+                          <button
+                            type="button"
+                            key={filterValue}
+                            className={inventoryStatusFilter === filterValue ? "active" : ""}
+                            onClick={() => {
+                              setInventoryStatusFilter(filterValue);
+                              setSelectedInventoryCode(null);
+                            }}
+                          >
+                            {filterValue === "all" ? "全部" : formatInventoryStatus(filterValue)}
+                          </button>
+                        ))}
+                      </div>
+
+                      {inventoryReport.warnings.length > 0 ? (
+                        <div className="inventory-warnings">
+                          {inventoryReport.warnings.slice(0, 5).map((warning, index) => (
+                            <span key={`${warning}-${index}`}>{warning}</span>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <div className="inventory-layout">
+                        <div className="inventory-work-list">
+                          <div className="inventory-section-head">
+                            <strong>作品列表</strong>
+                            <span>{filteredInventoryWorks.length} 项</span>
+                          </div>
+                          {filteredInventoryWorks.length === 0 ? (
+                            <span className="empty-text">当前筛选没有作品</span>
+                          ) : (
+                            filteredInventoryWorks.slice(0, 50).map((work) => (
+                              <button
+                                type="button"
+                                className={`inventory-work-row ${selectedInventoryWork?.code === work.code ? "active" : ""}`}
+                                key={work.code}
+                                onClick={() => setSelectedInventoryCode(work.code)}
+                              >
+                                <strong>{work.code}</strong>
+                                <span>{work.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+
+                        <div className="inventory-detail">
+                          {selectedInventoryWork ? (
+                            <>
+                              <div className="inventory-section-head">
+                                <strong>{selectedInventoryWork.code}</strong>
+                                <span>{selectedInventoryWork.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                              </div>
+                              <div className="inventory-target">
+                                <span>目标目录</span>
+                                <strong>{selectedInventoryWork.target_dir ?? "未配置归档根目录"}</strong>
+                              </div>
+
+                              <div className="inventory-subsection">
+                                <strong>资源</strong>
+                                {selectedInventoryWork.resources.length === 0 ? (
+                                  <span className="empty-text">暂无资源</span>
+                                ) : (
+                                  selectedInventoryWork.resources.map((resource) => (
+                                    <div className="inventory-resource-row" key={resource.path}>
+                                      <strong>{resource.kind} · {resource.file_name}</strong>
+                                      <span>{formatBytes(resource.size_bytes)} · {resource.code ?? "未识别番号"}</span>
+                                      <small>{resource.path}</small>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+
+                              <div className="inventory-subsection">
+                                <strong>整理动作预览</strong>
+                                {selectedInventoryWork.actions.length === 0 ? (
+                                  <span className="empty-text">暂无整理动作预览</span>
+                                ) : (
+                                  selectedInventoryWork.actions.map((action, index) => (
+                                    <div
+                                      className={`inventory-action-row ${action.conflict ? "warn" : ""}`}
+                                      key={`${action.from_path}-${index}`}
+                                    >
+                                      <strong>{action.kind}</strong>
+                                      <span>{action.from_path}</span>
+                                      <small>{formatInventoryActionTarget(action)}</small>
+                                    </div>
+                                  ))
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <span className="empty-text">请选择一个作品查看整理预览</span>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <span className="empty-text">尚未生成存量整理预览</span>
                   )}
                 </div>
 
