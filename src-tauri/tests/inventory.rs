@@ -377,6 +377,7 @@ fn inventory_preview_marks_duplicate_generated_targets() {
         .all(|action| action.conflict.as_deref() == Some("target_duplicate")));
 }
 
+#[cfg(windows)]
 #[test]
 fn inventory_preview_marks_case_insensitive_duplicate_targets() {
     let tmp = tempfile::tempdir().unwrap();
