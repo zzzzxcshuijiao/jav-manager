@@ -65,6 +65,66 @@ pub enum InventoryStatus {
     Orphan,
 }
 
+/// Review queue assigned to one inventory work after read-only pairing rules run.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryReviewBucket {
+    AutoReady,
+    NeedsReview,
+    Blocked,
+    AssetCandidate,
+}
+
+/// Confidence level for the pairing recommendation shown in the inventory UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryConfidence {
+    High,
+    Medium,
+    Low,
+}
+
+/// Role assigned to one scanned resource by the pairing rules.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryResourceRoleKind {
+    PrimaryVideo,
+    SecondaryVideo,
+    DuplicateVideo,
+    PrimaryNfo,
+    SecondaryNfo,
+    Poster,
+    Fanart,
+    Thumb,
+    Screenshot,
+    Gif,
+    Image,
+    Other,
+}
+
+/// Explanation for one resource's role in the proposed pairing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryResourceRole {
+    pub path: PathBuf,
+    pub role: InventoryResourceRoleKind,
+    pub reason: String,
+    pub selected: bool,
+    pub needs_review: bool,
+}
+
+/// Work-level read-only pairing decision used by the review UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryResolution {
+    pub bucket: InventoryReviewBucket,
+    pub primary_video: Option<PathBuf>,
+    pub primary_nfo: Option<PathBuf>,
+    pub recommended: String,
+    pub reasons: Vec<String>,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub confidence: InventoryConfidence,
+}
+
 /// A planned target path. Stage 7A describes actions but never executes them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryPreviewAction {
@@ -82,6 +142,8 @@ pub struct InventoryWorkPreview {
     pub resources: Vec<InventoryResource>,
     pub target_dir: Option<PathBuf>,
     pub actions: Vec<InventoryPreviewAction>,
+    pub resolution: InventoryResolution,
+    pub resource_roles: Vec<InventoryResourceRole>,
 }
 
 /// Aggregate counts for a read-only inventory preview.
@@ -327,6 +389,7 @@ fn build_work_preview(
         .collect();
     actions.sort_by_key(|action| preview_action_sort_key(&code, action));
     mark_duplicate_action_targets(&mut actions);
+    let (resolution, resource_roles) = build_resolution(&code, &resources, &statuses);
 
     InventoryWorkPreview {
         code,
@@ -334,6 +397,318 @@ fn build_work_preview(
         resources,
         target_dir,
         actions,
+        resolution,
+        resource_roles,
+    }
+}
+
+// Build the first read-only pairing explanation for one code group.
+fn build_resolution(
+    code: &str,
+    resources: &[InventoryResource],
+    statuses: &[InventoryStatus],
+) -> (InventoryResolution, Vec<InventoryResourceRole>) {
+    let (primary_video, video_reason) = select_primary_video(code, resources);
+    let (primary_nfo, nfo_reason) = select_primary_nfo(code, resources, primary_video);
+    let mut reasons = Vec::new();
+    if let Some(reason) = video_reason {
+        reasons.push(reason);
+    }
+    if let Some(reason) = nfo_reason {
+        reasons.push(reason);
+    }
+
+    let warnings = resolution_warnings(primary_video, primary_nfo, statuses);
+    let blockers = Vec::new();
+    let bucket = resolution_bucket(statuses, primary_video, primary_nfo);
+    let confidence = resolution_confidence(&bucket, primary_video, primary_nfo);
+    let recommended = resolution_recommendation(&bucket, primary_video, primary_nfo);
+    let roles = build_resource_roles(resources, primary_video, primary_nfo);
+
+    (
+        InventoryResolution {
+            bucket,
+            primary_video: primary_video.map(|resource| resource.path.clone()),
+            primary_nfo: primary_nfo.map(|resource| resource.path.clone()),
+            recommended,
+            reasons,
+            warnings,
+            blockers,
+            confidence,
+        },
+        roles,
+    )
+}
+
+// Return videos in primary-selection order while keeping deterministic path fallback.
+fn sorted_videos_for_resolution<'a>(
+    code: &str,
+    resources: &'a [InventoryResource],
+) -> Vec<&'a InventoryResource> {
+    let mut videos: Vec<&InventoryResource> = resources
+        .iter()
+        .filter(|resource| resource.kind == InventoryResourceKind::Video)
+        .collect();
+    videos.sort_by_key(|resource| video_resolution_sort_key(code, resource));
+    videos
+}
+
+// Rank videos as bare code, explicit first part, then largest remaining video.
+fn video_resolution_sort_key(
+    code: &str,
+    resource: &InventoryResource,
+) -> (u8, std::cmp::Reverse<u64>, PathBuf) {
+    let stem = resource
+        .path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
+        return (0, std::cmp::Reverse(0), resource.path.clone());
+    }
+    if explicit_video_part_index(&stem) == Some(1) {
+        return (1, std::cmp::Reverse(0), resource.path.clone());
+    }
+    (
+        2,
+        std::cmp::Reverse(resource.size_bytes),
+        resource.path.clone(),
+    )
+}
+
+// Choose the primary video and return a human-readable reason for the UI.
+fn select_primary_video<'a>(
+    code: &str,
+    resources: &'a [InventoryResource],
+) -> (Option<&'a InventoryResource>, Option<String>) {
+    let videos = sorted_videos_for_resolution(code, resources);
+    let Some(selected) = videos.first().copied() else {
+        return (None, None);
+    };
+    let stem = selected
+        .path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let reason =
+        if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
+            "推荐主视频：文件名是裸番号视频".to_string()
+        } else if explicit_video_part_index(&stem) == Some(1) {
+            "推荐主视频：文件名标记为第一段视频".to_string()
+        } else if videos.len() > 1 {
+            "推荐主视频：未找到裸番号或第一段，选择体积最大视频".to_string()
+        } else {
+            "推荐主视频：唯一视频资源".to_string()
+        };
+    (Some(selected), Some(reason))
+}
+
+// Rank NFO files by code agreement, bare-code filename, same directory, then path.
+fn nfo_resolution_sort_key(
+    code: &str,
+    resource: &InventoryResource,
+    primary_video: Option<&InventoryResource>,
+) -> (u8, u8, u8, PathBuf) {
+    let nfo_matches_code = resource
+        .evidence
+        .iter()
+        .any(|evidence| evidence.source == "nfo_num" && evidence.code == code);
+    let stem = resource
+        .path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let bare_stem =
+        normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem);
+    let same_dir = primary_video
+        .and_then(|video| video.path.parent())
+        .zip(resource.path.parent())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false);
+    (
+        if nfo_matches_code { 0 } else { 1 },
+        if bare_stem { 0 } else { 1 },
+        if same_dir { 0 } else { 1 },
+        resource.path.clone(),
+    )
+}
+
+// Choose the primary NFO and return a human-readable reason for the UI.
+fn select_primary_nfo<'a>(
+    code: &str,
+    resources: &'a [InventoryResource],
+    primary_video: Option<&InventoryResource>,
+) -> (Option<&'a InventoryResource>, Option<String>) {
+    let mut nfos: Vec<&InventoryResource> = resources
+        .iter()
+        .filter(|resource| resource.kind == InventoryResourceKind::Nfo)
+        .collect();
+    nfos.sort_by_key(|resource| nfo_resolution_sort_key(code, resource, primary_video));
+    let Some(selected) = nfos.first().copied() else {
+        return (None, None);
+    };
+    let key = nfo_resolution_sort_key(code, selected, primary_video);
+    let reason = if key.0 == 0 {
+        "推荐主 NFO：NFO <num> 与番号一致".to_string()
+    } else if key.1 == 0 {
+        "推荐主 NFO：文件名是裸番号".to_string()
+    } else if key.2 == 0 {
+        "推荐主 NFO：与主视频位于同一目录".to_string()
+    } else {
+        "推荐主 NFO：按路径排序选择稳定候选".to_string()
+    };
+    (Some(selected), Some(reason))
+}
+
+// Produce the minimal Task 1 warning list without expanding Task 2 blockers.
+fn resolution_warnings(
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+    statuses: &[InventoryStatus],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if primary_video.is_none() && !statuses.contains(&InventoryStatus::AssetOnly) {
+        warnings.push("未找到可作为主视频的资源".to_string());
+    }
+    if primary_nfo.is_none() && !statuses.contains(&InventoryStatus::AssetOnly) {
+        warnings.push("未找到可作为主 NFO 的资源".to_string());
+    }
+    warnings
+}
+
+// Assign the coarse Task 1 review bucket before later blocker rules are added.
+fn resolution_bucket(
+    statuses: &[InventoryStatus],
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> InventoryReviewBucket {
+    if statuses.contains(&InventoryStatus::AssetOnly) {
+        return InventoryReviewBucket::AssetCandidate;
+    }
+    if statuses.contains(&InventoryStatus::Ready)
+        && primary_video.is_some()
+        && primary_nfo.is_some()
+    {
+        return InventoryReviewBucket::AutoReady;
+    }
+    InventoryReviewBucket::NeedsReview
+}
+
+// Convert the coarse Task 1 bucket and selected anchors into confidence.
+fn resolution_confidence(
+    bucket: &InventoryReviewBucket,
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> InventoryConfidence {
+    match bucket {
+        InventoryReviewBucket::AutoReady => InventoryConfidence::High,
+        InventoryReviewBucket::AssetCandidate | InventoryReviewBucket::Blocked => {
+            InventoryConfidence::Low
+        }
+        InventoryReviewBucket::NeedsReview if primary_video.is_some() || primary_nfo.is_some() => {
+            InventoryConfidence::Medium
+        }
+        InventoryReviewBucket::NeedsReview => InventoryConfidence::Low,
+    }
+}
+
+// Summarize the Task 1 recommendation in one frontend-friendly sentence.
+fn resolution_recommendation(
+    bucket: &InventoryReviewBucket,
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> String {
+    match bucket {
+        InventoryReviewBucket::AutoReady => "可自动整理".to_string(),
+        InventoryReviewBucket::AssetCandidate => "素材候选，等待人工补配视频或 NFO".to_string(),
+        InventoryReviewBucket::Blocked => "存在阻断，不能自动整理".to_string(),
+        InventoryReviewBucket::NeedsReview if primary_video.is_none() => {
+            "需人工确认：缺少主视频".to_string()
+        }
+        InventoryReviewBucket::NeedsReview if primary_nfo.is_none() => {
+            "需人工确认：缺少主 NFO".to_string()
+        }
+        InventoryReviewBucket::NeedsReview => "需人工确认后再整理".to_string(),
+    }
+}
+
+// Assign each scanned resource a role label for the frontend detail panel.
+fn build_resource_roles(
+    resources: &[InventoryResource],
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> Vec<InventoryResourceRole> {
+    resources
+        .iter()
+        .map(|resource| {
+            let is_primary_video = primary_video
+                .map(|selected| selected.path.as_path() == resource.path.as_path())
+                .unwrap_or(false);
+            let is_primary_nfo = primary_nfo
+                .map(|selected| selected.path.as_path() == resource.path.as_path())
+                .unwrap_or(false);
+            let role = match resource.kind {
+                InventoryResourceKind::Video if is_primary_video => {
+                    InventoryResourceRoleKind::PrimaryVideo
+                }
+                InventoryResourceKind::Video => InventoryResourceRoleKind::SecondaryVideo,
+                InventoryResourceKind::Nfo if is_primary_nfo => {
+                    InventoryResourceRoleKind::PrimaryNfo
+                }
+                InventoryResourceKind::Nfo => InventoryResourceRoleKind::SecondaryNfo,
+                InventoryResourceKind::Poster => InventoryResourceRoleKind::Poster,
+                InventoryResourceKind::Fanart => InventoryResourceRoleKind::Fanart,
+                InventoryResourceKind::Thumb => InventoryResourceRoleKind::Thumb,
+                InventoryResourceKind::Screenshot => InventoryResourceRoleKind::Screenshot,
+                InventoryResourceKind::Gif => InventoryResourceRoleKind::Gif,
+                InventoryResourceKind::Image => InventoryResourceRoleKind::Image,
+                InventoryResourceKind::Other => InventoryResourceRoleKind::Other,
+            };
+            let selected = matches!(
+                role,
+                InventoryResourceRoleKind::PrimaryVideo | InventoryResourceRoleKind::PrimaryNfo
+            );
+            let needs_review = matches!(
+                role,
+                InventoryResourceRoleKind::SecondaryVideo | InventoryResourceRoleKind::SecondaryNfo
+            );
+            InventoryResourceRole {
+                path: resource.path.clone(),
+                reason: resource_role_reason(resource, &role, selected),
+                role,
+                selected,
+                needs_review,
+            }
+        })
+        .collect()
+}
+
+// Explain why a resource received its role.
+fn resource_role_reason(
+    resource: &InventoryResource,
+    role: &InventoryResourceRoleKind,
+    selected: bool,
+) -> String {
+    match role {
+        InventoryResourceRoleKind::PrimaryVideo if selected => "推荐作为主视频".to_string(),
+        InventoryResourceRoleKind::SecondaryVideo => {
+            "同番号额外视频，需要复核是分段、版本还是重复".to_string()
+        }
+        InventoryResourceRoleKind::DuplicateVideo => "疑似重复视频，需要人工复核".to_string(),
+        InventoryResourceRoleKind::PrimaryNfo if selected => "推荐作为主 NFO".to_string(),
+        InventoryResourceRoleKind::SecondaryNfo => "同番号额外 NFO，需要复核是否保留".to_string(),
+        InventoryResourceRoleKind::Poster => "按文件名识别为 poster".to_string(),
+        InventoryResourceRoleKind::Fanart => "按文件名识别为 fanart".to_string(),
+        InventoryResourceRoleKind::Thumb => "按文件名识别为 thumb".to_string(),
+        InventoryResourceRoleKind::Screenshot => "按文件名识别为 screenshot".to_string(),
+        InventoryResourceRoleKind::Gif => "GIF 素材，随作品归组".to_string(),
+        InventoryResourceRoleKind::Image => "其他图片素材，随作品归组".to_string(),
+        InventoryResourceRoleKind::Other => {
+            format!("其他资源：{}", resource.file_name)
+        }
+        InventoryResourceRoleKind::PrimaryVideo | InventoryResourceRoleKind::PrimaryNfo => {
+            "推荐作为主资源".to_string()
+        }
     }
 }
 

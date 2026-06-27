@@ -538,3 +538,91 @@ fn inventory_preview_keeps_missing_roots_as_warnings() {
         .iter()
         .any(|warning| warning.contains("扫描根目录不存在")));
 }
+
+#[test]
+fn inventory_resolution_selects_bare_video_and_matching_nfo_as_primary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-159-CD2.mkv"), b"part2");
+    write_file(&root.join("IPX-159.mp4"), b"main-video");
+    write_file(
+        &root.join("metadata.nfo"),
+        br#"<movie><num>IPX-159</num><title>Main</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-159")
+        .unwrap();
+
+    assert_eq!(
+        work.resolution.primary_video.as_deref(),
+        Some(
+            work.resources
+                .iter()
+                .find(|resource| resource.file_name == "IPX-159.mp4")
+                .unwrap()
+                .path
+                .as_path()
+        )
+    );
+    assert_eq!(
+        work.resolution.primary_nfo.as_deref(),
+        Some(
+            work.resources
+                .iter()
+                .find(|resource| resource.file_name == "metadata.nfo")
+                .unwrap()
+                .path
+                .as_path()
+        )
+    );
+    assert_eq!(
+        work.resolution.confidence,
+        media_manager::inventory::InventoryConfidence::High
+    );
+    assert!(work
+        .resolution
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("裸番号视频")));
+    assert!(work.resource_roles.iter().any(|role| role.path.ends_with("IPX-159.mp4")
+        && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryVideo
+        && role.selected));
+    assert!(work.resource_roles.iter().any(|role| role.path.ends_with("metadata.nfo")
+        && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryNfo
+        && role.selected));
+}
+
+#[test]
+fn inventory_resolution_uses_largest_video_when_no_bare_or_first_part_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-160-extra-small.mp4"), b"small");
+    write_file(&root.join("IPX-160-extra-large.mkv"), b"larger-video");
+    write_file(
+        &root.join("IPX-160.nfo"),
+        br#"<movie><num>IPX-160</num><title>Main</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-160")
+        .unwrap();
+
+    assert!(work
+        .resolution
+        .primary_video
+        .as_ref()
+        .unwrap()
+        .ends_with("IPX-160-extra-large.mkv"));
+    assert!(work
+        .resolution
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("体积最大视频")));
+}
