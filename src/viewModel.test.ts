@@ -39,6 +39,7 @@ import {
   formatWorkOption,
   mergeVersionTargetWorks,
   normalizeManualCodeInput,
+  parseInventoryRootsInput,
   mergeableWorksForItem,
   parseDelimitedListInput,
   parseProfileRatingInput,
@@ -146,6 +147,7 @@ describe("workbench view helpers", () => {
     expect(workbenchViewTitle("ingest")).toBe("入库队列");
     expect(workbenchViewTitle("review")).toBe("待处理队列");
     expect(workbenchViewTitle("archive")).toBe("迁移计划");
+    expect(workbenchViewTitle("inventory")).toBe("一键盘点");
     expect(workbenchViewTitle("settings")).toBe("设置");
     expect(workbenchViewTitle("library")).toBe("作品库");
   });
@@ -478,6 +480,10 @@ describe("formatRebuildReport", () => {
 });
 
 describe("inventory preview formatting", () => {
+  it("parses one-click inventory roots from pasted or picked directories", () => {
+    expect(parseInventoryRootsInput(" H:/video \n\nH:/AV\nH:/video ")).toEqual(["H:/video", "H:/AV"]);
+  });
+
   it("formats inventory statuses and summaries", () => {
     const report = {
       generated_at: "2026-06-27T12:00:00Z",

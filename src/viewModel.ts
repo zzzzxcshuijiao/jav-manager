@@ -30,7 +30,7 @@ import type {
 export type DecisionFilter = IngestDecision | "All";
 export type ReviewReasonFilter = ReviewReason | "All";
 export type CodePresenceFilter = "All" | "HasCode" | "MissingCode";
-export type WorkbenchView = "ingest" | "review" | "archive" | "settings" | "library";
+export type WorkbenchView = "ingest" | "review" | "archive" | "inventory" | "settings" | "library";
 export type WorkStatusFilter = Work["watch_status"] | "All";
 export type InventoryStatusFilter = InventoryStatus | "all";
 
@@ -190,6 +190,7 @@ export function workbenchViewTitle(view: WorkbenchView): string {
     ingest: "入库队列",
     review: "待处理队列",
     archive: "迁移计划",
+    inventory: "一键盘点",
     settings: "设置",
     library: "作品库"
   };
@@ -310,6 +311,21 @@ export function parseDelimitedListInput(value: string): string[] {
   const seen = new Set<string>();
   return value
     .split(/[,\n/]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => {
+      if (!entry || seen.has(entry)) {
+        return false;
+      }
+      seen.add(entry);
+      return true;
+    });
+}
+
+/** Parse the one-click inventory textarea into unique root paths without treating Windows separators as delimiters. */
+export function parseInventoryRootsInput(value: string): string[] {
+  const seen = new Set<string>();
+  return value
+    .split(/\r?\n/)
     .map((entry) => entry.trim())
     .filter((entry) => {
       if (!entry || seen.has(entry)) {
