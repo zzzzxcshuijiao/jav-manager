@@ -11,6 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 <#
     Write text as UTF-8 without BOM so generated diagnostics do not change
@@ -373,6 +374,8 @@ $commandResults = New-Object System.Collections.Generic.List[object]
 $commandResults.Add((Invoke-FeedbackCommand -Name "git status" -Executable $git -Arguments @("status", "--short", "--branch") -OutputPath (Join-Path $commandDirectory "git-status.txt")))
 $commandResults.Add((Invoke-FeedbackCommand -Name "git log" -Executable $git -Arguments @("log", "--oneline", "-10") -OutputPath (Join-Path $commandDirectory "git-log.txt")))
 $commandResults.Add((Invoke-FeedbackCommand -Name "git worktree list" -Executable $git -Arguments @("worktree", "list") -OutputPath (Join-Path $commandDirectory "git-worktree-list.txt")))
+$commandResults.Add((Invoke-FeedbackCommand -Name "git diff names" -Executable $git -Arguments @("diff", "--name-only") -OutputPath (Join-Path $commandDirectory "git-diff-names.txt")))
+$commandResults.Add((Invoke-FeedbackCommand -Name "git diff stat" -Executable $git -Arguments @("diff", "--stat") -OutputPath (Join-Path $commandDirectory "git-diff-stat.txt")))
 
 if (-not $SkipTests -and -not $SkipNodeTests) {
     $commandResults.Add((Invoke-FeedbackCommand -Name "npm test" -Executable $npm -Arguments @("test") -OutputPath (Join-Path $commandDirectory "npm-test.txt")))
@@ -427,7 +430,7 @@ $archivePath = "$runDirectory.zip"
 if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
 }
-Compress-Archive -Path (Join-Path $runDirectory "*") -DestinationPath $archivePath -Force
+[System.IO.Compression.ZipFile]::CreateFromDirectory($runDirectory, $archivePath)
 
 Write-Output "Feedback directory: $runDirectory"
 Write-Output "Feedback package: $archivePath"

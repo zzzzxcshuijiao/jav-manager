@@ -13,3 +13,4 @@ src-tauri/gen/schemas/
 .tmp-*
 .spec-workflow/
 .worktrees/
+feedback/

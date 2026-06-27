@@ -114,12 +114,16 @@ describe("collect-feedback script", () => {
     expect(existsSync(manifestPath)).toBe(true);
 
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const commandNames = manifest.commands.map((command: { name: string }) => command.name);
     expect(manifest.schemaVersion).toBe(1);
     expect(manifest.options.skipTests).toBe(true);
     expect(manifest.options.skipBuild).toBe(true);
     expect(manifest.appData.available).toBe(false);
-    expect(manifest.commands.map((command: { name: string }) => command.name)).toContain("git status");
+    expect(commandNames).toContain("git status");
+    expect(commandNames).toContain("git diff names");
+    expect(commandNames).toContain("git diff stat");
     expect(existsSync(join(runDirectory, "summary.md"))).toBe(true);
+    expect(readFileSync(join(runDirectory, "commands", "git-log.txt"), "utf8")).toContain("新增一键反馈包脚本");
     expect(readFileSync(join(runDirectory, "app-data", "app-data-status.txt"), "utf8")).toContain(
       "App data path was not found",
     );
@@ -140,5 +144,9 @@ describe("collect-feedback script", () => {
     const statuses = new Map(manifest.commands.map((command: { name: string; status: string }) => [command.name, command.status]));
     expect(statuses.get("npm test")).toBe("skipped");
     expect(statuses.has("cargo test")).toBe(false);
+  });
+
+  it("keeps the default feedback output directory out of git status", () => {
+    expect(readFileSync(".gitignore", "utf8")).toMatch(/^feedback\/$/m);
   });
 });
