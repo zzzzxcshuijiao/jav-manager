@@ -123,7 +123,11 @@ describe("collect-feedback script", () => {
     expect(commandNames).toContain("git diff names");
     expect(commandNames).toContain("git diff stat");
     expect(existsSync(join(runDirectory, "summary.md"))).toBe(true);
-    expect(readFileSync(join(runDirectory, "commands", "git-log.txt"), "utf8")).toContain("新增一键反馈包脚本");
+    const gitLog = readFileSync(join(runDirectory, "commands", "git-log.txt"), "utf8");
+    const gitDiffNames = readFileSync(join(runDirectory, "commands", "git-diff-names.txt"), "utf8");
+    expect(gitLog).toContain("git.exe -c i18n.logOutputEncoding=utf-8 log --oneline -10");
+    expect(gitLog).toContain("新增一键反馈包脚本");
+    expect(gitDiffNames).toContain("git.exe -c core.safecrlf=false diff --name-only");
     expect(readFileSync(join(runDirectory, "app-data", "app-data-status.txt"), "utf8")).toContain(
       "App data path was not found",
     );
