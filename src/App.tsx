@@ -39,6 +39,8 @@ import type {
   IngestItem,
   IngestJobSummary,
   InventoryPreviewReport,
+  InventoryResource,
+  InventoryResourceKind,
   InventoryStatus,
   MigrationPlan,
   PipelineRun,
@@ -198,6 +200,34 @@ const inventoryStatusFilters: Array<InventoryStatus | "all"> = [
   "nfo_parse_error",
   "orphan"
 ];
+
+const inventoryImageKinds = new Set<InventoryResourceKind>(["poster", "fanart", "thumb", "screenshot", "gif", "image"]);
+
+/** 汇总存量预览资源数量，保持作品列表可扫读。 */
+function summarizeInventoryResources(resources: InventoryResource[]): string {
+  const counts = resources.reduce(
+    (acc, resource) => {
+      if (resource.kind === "video") {
+        acc.video += 1;
+      } else if (resource.kind === "nfo") {
+        acc.nfo += 1;
+      } else if (inventoryImageKinds.has(resource.kind)) {
+        acc.image += 1;
+      } else {
+        acc.other += 1;
+      }
+      return acc;
+    },
+    { video: 0, nfo: 0, image: 0, other: 0 }
+  );
+  const parts = [
+    counts.video > 0 ? `视频 ${counts.video}` : null,
+    counts.nfo > 0 ? `NFO ${counts.nfo}` : null,
+    counts.image > 0 ? `图片 ${counts.image}` : null,
+    counts.other > 0 ? `其他 ${counts.other}` : null
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : "暂无资源";
+}
 
 export function App() {
   const [sourceRoots, setSourceRoots] = useState("H:/Downloads/A\nH:/Downloads/B\nH:/Inbox");
@@ -812,15 +842,22 @@ export function App() {
       setStatus("请先填写至少一个存量扫描根目录。");
       return;
     }
+    const startedAt = Date.now();
     setInventoryBusy(true);
-    setStatus("正在扫描存量资源...");
+    setInventoryReport(null);
+    setInventoryStatusFilter("all");
+    setSelectedInventoryCode(null);
+    setStatus(`正在扫描 ${roots.length} 个存量根目录...`);
     try {
-      const report = await api.previewInventory(roots, daemonStatus?.archive_root ?? null);
+      const report = await api.previewInventory(roots, null);
+      const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       setInventoryReport(report);
       setInventoryStatusFilter("all");
       setSelectedInventoryCode(report.works[0]?.code ?? null);
-      setStatus(formatInventorySummary(report));
+      setStatus(`${formatInventorySummary(report)} 扫描 ${roots.length} 个根目录，用时 ${elapsedSeconds} 秒。`);
     } catch (error) {
+      setInventoryReport(null);
+      setSelectedInventoryCode(null);
       setStatus(`存量整理预览失败：${String(error)}`);
     } finally {
       setInventoryBusy(false);
@@ -2115,6 +2152,11 @@ export function App() {
                         </div>
                       </div>
 
+                      <div className="inventory-report-root">
+                        <span>本次归档根</span>
+                        <strong>{inventoryReport.archive_root ?? "未配置归档根目录"}</strong>
+                      </div>
+
                       <div className="inventory-filter">
                         {inventoryStatusFilters.map((filterValue) => (
                           <button
@@ -2136,6 +2178,9 @@ export function App() {
                           {inventoryReport.warnings.slice(0, 5).map((warning, index) => (
                             <span key={`${warning}-${index}`}>{warning}</span>
                           ))}
+                          {inventoryReport.warnings.length > 5 ? (
+                            <span>另有 {inventoryReport.warnings.length - 5} 条 warning</span>
+                          ) : null}
                         </div>
                       ) : null}
 
@@ -2148,7 +2193,7 @@ export function App() {
                           {filteredInventoryWorks.length === 0 ? (
                             <span className="empty-text">当前筛选没有作品</span>
                           ) : (
-                            filteredInventoryWorks.slice(0, 50).map((work) => (
+                            filteredInventoryWorks.map((work) => (
                               <button
                                 type="button"
                                 className={`inventory-work-row ${selectedInventoryWork?.code === work.code ? "active" : ""}`}
@@ -2157,6 +2202,8 @@ export function App() {
                               >
                                 <strong>{work.code}</strong>
                                 <span>{work.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                                <small>{summarizeInventoryResources(work.resources)}</small>
+                                <small>{work.target_dir ?? inventoryReport.archive_root ?? "未配置归档根目录"}</small>
                               </button>
                             ))
                           )}
@@ -2171,7 +2218,7 @@ export function App() {
                               </div>
                               <div className="inventory-target">
                                 <span>目标目录</span>
-                                <strong>{selectedInventoryWork.target_dir ?? "未配置归档根目录"}</strong>
+                                <strong>{selectedInventoryWork.target_dir ?? inventoryReport.archive_root ?? "未配置归档根目录"}</strong>
                               </div>
 
                               <div className="inventory-subsection">
@@ -2184,6 +2231,22 @@ export function App() {
                                       <strong>{resource.kind} · {resource.file_name}</strong>
                                       <span>{formatBytes(resource.size_bytes)} · {resource.code ?? "未识别番号"}</span>
                                       <small>{resource.path}</small>
+                                      {resource.evidence.length > 0 ? (
+                                        <div className="inventory-resource-meta">
+                                          {resource.evidence.map((evidence, index) => (
+                                            <small key={`${resource.path}-evidence-${index}`}>
+                                              {evidence.source}: {evidence.value} -&gt; {evidence.code}
+                                            </small>
+                                          ))}
+                                        </div>
+                                      ) : null}
+                                      {resource.warnings.length > 0 ? (
+                                        <div className="inventory-resource-warnings">
+                                          {resource.warnings.map((warning, index) => (
+                                            <span key={`${resource.path}-warning-${index}`}>{warning}</span>
+                                          ))}
+                                        </div>
+                                      ) : null}
                                     </div>
                                   ))
                                 )}
