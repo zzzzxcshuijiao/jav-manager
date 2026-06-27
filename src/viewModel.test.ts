@@ -30,6 +30,9 @@ import {
   formatExceptionStatus,
   formatFileVersionSummary,
   formatHoldingReason,
+  formatInventoryActionTarget,
+  formatInventoryStatus,
+  formatInventorySummary,
   formatMediaInfo,
   formatPipelineStatus,
   formatWorkOption,
@@ -470,6 +473,41 @@ describe("formatRebuildReport", () => {
     const message = formatRebuildReport("rebuild", report);
     expect(message).toContain("重建完成");
     expect(message).toContain("1 个 NFO 解析失败");
+  });
+});
+
+describe("inventory preview formatting", () => {
+  it("formats inventory statuses and summaries", () => {
+    const report = {
+      generated_at: "2026-06-27T12:00:00Z",
+      roots: ["H:/downloads"],
+      archive_root: "H:/AV",
+      summary: {
+        total_files: 8,
+        works: 3,
+        ready: 1,
+        missing_nfo: 1,
+        missing_video: 1,
+        multi_video: 1,
+        multi_nfo: 0,
+        code_conflict: 1,
+        duplicate_candidate: 0,
+        orphans: 2
+      },
+      works: [],
+      orphans: [],
+      warnings: [],
+      truncated: false
+    };
+
+    expect(formatInventoryStatus("ready")).toBe("可整理");
+    expect(formatInventoryStatus("missing_nfo")).toBe("缺 NFO");
+    expect(formatInventorySummary(report)).toBe("识别 3 部作品：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
+  });
+
+  it("formats inventory action targets", () => {
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: null })).toBe("H:/AV/IPX-001/IPX-001.mp4");
+    expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: null, kind: "video", conflict: null })).toBe("未配置归档根目录");
   });
 });
 

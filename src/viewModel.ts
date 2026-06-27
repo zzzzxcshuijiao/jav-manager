@@ -14,6 +14,9 @@ import type {
   IngestDecision,
   IngestItem,
   IngestItemFilters,
+  InventoryPreviewAction,
+  InventoryPreviewReport,
+  InventoryStatus,
   RebuildReport,
   RemoteScraperSettings,
   ReviewReason,
@@ -421,6 +424,40 @@ export function formatRebuildReport(mode: RebuildMode, report: RebuildReport): s
   const verb = mode === "preview" ? "预览完成" : "重建完成";
   const errorPart = report.errors.length > 0 ? `，${report.errors.length} 个 NFO 解析失败` : "";
   return `${verb}：${report.nfos_scanned} 个 NFO，${report.works_created} 个作品，${report.works_merged} 个多文件合并组${errorPart}。`;
+}
+
+/** Format an inventory work status into the compact Chinese label shown by preview rows. */
+export function formatInventoryStatus(status: InventoryStatus): string {
+  const labels: Record<InventoryStatus, string> = {
+    ready: "可整理",
+    missing_nfo: "缺 NFO",
+    missing_video: "缺视频",
+    multi_video: "多视频",
+    multi_nfo: "多 NFO",
+    code_conflict: "番号冲突",
+    duplicate_candidate: "疑似重复",
+    nfo_parse_error: "NFO 解析失败",
+    orphan: "孤儿资源"
+  };
+  return labels[status];
+}
+
+/** Summarize an inventory preview report for status-line feedback. */
+export function formatInventorySummary(report: InventoryPreviewReport): string {
+  const s = report.summary;
+  const suffix = report.truncated ? " 结果过多，仅展示前 1000 部。" : "";
+  return `识别 ${s.works} 部作品：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
+}
+
+/** Format the planned target path for one inventory preview action. */
+export function formatInventoryActionTarget(action: InventoryPreviewAction): string {
+  if (!action.to_path) {
+    return "未配置归档根目录";
+  }
+  if (action.conflict === "target_exists") {
+    return `${action.to_path}（目标已存在）`;
+  }
+  return action.to_path;
 }
 
 export function formatDaemonState(state: DaemonState): string {

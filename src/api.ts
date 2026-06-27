@@ -341,6 +341,73 @@ export interface ResourcePool {
   orphan_images: number;
 }
 
+export type InventoryResourceKind = "video" | "nfo" | "poster" | "fanart" | "thumb" | "screenshot" | "gif" | "image" | "other";
+export type InventoryStatus =
+  | "ready"
+  | "missing_nfo"
+  | "missing_video"
+  | "multi_video"
+  | "multi_nfo"
+  | "code_conflict"
+  | "duplicate_candidate"
+  | "nfo_parse_error"
+  | "orphan";
+
+export interface InventoryCodeEvidence {
+  source: string;
+  code: string;
+  value: string;
+}
+
+export interface InventoryResource {
+  path: string;
+  file_name: string;
+  kind: InventoryResourceKind;
+  size_bytes: number;
+  code?: string | null;
+  evidence: InventoryCodeEvidence[];
+  warnings: string[];
+}
+
+export interface InventoryPreviewAction {
+  from_path: string;
+  to_path?: string | null;
+  kind: InventoryResourceKind;
+  conflict?: string | null;
+}
+
+export interface InventoryWorkPreview {
+  code: string;
+  statuses: InventoryStatus[];
+  resources: InventoryResource[];
+  target_dir?: string | null;
+  actions: InventoryPreviewAction[];
+}
+
+export interface InventorySummary {
+  total_files: number;
+  works: number;
+  ready: number;
+  missing_nfo: number;
+  missing_video: number;
+  multi_video: number;
+  multi_nfo: number;
+  code_conflict: number;
+  duplicate_candidate: number;
+  orphans: number;
+}
+
+export interface InventoryPreviewReport {
+  generated_at: string;
+  roots: string[];
+  archive_root?: string | null;
+  summary: InventorySummary;
+  works: InventoryWorkPreview[];
+  orphans: InventoryResource[];
+  warnings: string[];
+  truncated: boolean;
+}
+
 export interface UnifiedMigrationWorkPlan {
   code: string;
   nfo_path: string | null;
@@ -462,6 +529,10 @@ export const api = {
   },
   getArchiveRoot() {
     return command<string | null>("get_archive_root");
+  },
+  /** Preview inventory grouping and archive targets without moving files. */
+  previewInventory(roots: string[], archiveRoot?: string | null) {
+    return command<InventoryPreviewReport>("preview_inventory", { roots, archiveRoot });
   },
   configureMetadataProviderEnabled(enabled: boolean) {
     return command<boolean>("configure_metadata_provider_enabled", { enabled });
