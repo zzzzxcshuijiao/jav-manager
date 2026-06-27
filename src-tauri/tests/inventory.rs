@@ -197,6 +197,55 @@ fn inventory_preview_marks_missing_and_conflict_states() {
 }
 
 #[test]
+fn inventory_preview_marks_multiple_nfo_files_for_one_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(
+        &root.join("IPX-203.nfo"),
+        br#"<movie><num>IPX-203</num></movie>"#,
+    );
+    write_file(
+        &root.join("renamed-metadata.nfo"),
+        br#"<movie><num>IPX-203</num></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], None).unwrap();
+
+    assert_eq!(report.summary.multi_nfo, 1);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-203")
+        .unwrap();
+    assert!(work.statuses.contains(&InventoryStatus::MultiNfo));
+}
+
+#[test]
+fn inventory_preview_marks_nfo_parse_errors_when_file_stem_provides_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-204.nfo"), &[0xff, 0xfe, 0xfd]);
+
+    let report = preview_inventory_roots(&[root.clone()], None).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-204")
+        .unwrap();
+    assert!(work.statuses.contains(&InventoryStatus::NfoParseError));
+    let nfo = work
+        .resources
+        .iter()
+        .find(|resource| resource.kind == InventoryResourceKind::Nfo)
+        .unwrap();
+    assert!(nfo
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("NFO 解析失败")));
+}
+
+#[test]
 fn inventory_preview_builds_target_actions_and_marks_existing_targets() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
