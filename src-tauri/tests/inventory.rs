@@ -154,10 +154,11 @@ fn inventory_preview_treats_whole_unpadded_code_image_stems_as_posters() {
     let report = preview_inventory_roots(&[root], None).unwrap();
 
     let work = report
-        .works
+        .asset_candidates
         .iter()
         .find(|work| work.code == "ABP-001")
         .unwrap();
+    assert!(work.statuses.contains(&InventoryStatus::AssetOnly));
     assert_eq!(
         work.resources
             .iter()
@@ -165,6 +166,39 @@ fn inventory_preview_treats_whole_unpadded_code_image_stems_as_posters() {
             .count(),
         2
     );
+}
+
+#[test]
+fn inventory_preview_keeps_asset_only_groups_out_of_missing_video_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-301-cover.jpg"), b"poster");
+    write_file(&root.join("IPX-301-01.jpg"), b"shot");
+    write_file(&root.join("IPX-301.gif"), b"gif");
+    write_file(
+        &root.join("IPX-302.nfo"),
+        br#"<movie><num>IPX-302</num></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 4);
+    assert_eq!(report.summary.works, 1);
+    assert_eq!(report.summary.asset_candidates, 1);
+    assert_eq!(report.summary.missing_video, 1);
+    assert!(report.works.iter().any(|work| work.code == "IPX-302"));
+    assert!(report.works.iter().all(|work| work.code != "IPX-301"));
+    let asset_candidate = report
+        .asset_candidates
+        .iter()
+        .find(|work| work.code == "IPX-301")
+        .unwrap();
+    assert!(asset_candidate
+        .statuses
+        .contains(&InventoryStatus::AssetOnly));
+    assert!(!asset_candidate
+        .statuses
+        .contains(&InventoryStatus::MissingVideo));
 }
 
 #[test]

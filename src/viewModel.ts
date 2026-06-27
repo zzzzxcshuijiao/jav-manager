@@ -439,6 +439,7 @@ export function formatInventoryStatus(status: InventoryStatus): string {
     code_conflict: "番号冲突",
     duplicate_candidate: "疑似重复",
     nfo_parse_error: "NFO 解析失败",
+    asset_only: "素材候选",
     orphan: "孤儿资源"
   };
   return labels[status];
@@ -452,14 +453,14 @@ export function inventoryOrphansForFilter(
   if (!report) {
     return [];
   }
-  return filter === "all" || filter === "orphan" ? report.orphans : [];
+  return filter === "orphan" ? report.orphans : [];
 }
 
 /** Summarize an inventory preview report for status-line feedback. */
 export function formatInventorySummary(report: InventoryPreviewReport): string {
   const s = report.summary;
-  const suffix = report.truncated ? " 结果过多，作品和孤儿资源明细各最多展示 1000 项。" : "";
-  return `识别 ${s.works} 部作品：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
+  const suffix = report.truncated ? " 结果过多，作品、素材候选和孤儿资源明细各最多展示 1000 项。" : "";
+  return `识别 ${s.works} 部作品，素材候选 ${s.asset_candidates} 组：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
 }
 
 /** Format the planned target path and comma-separated conflict tokens for one inventory preview action. */

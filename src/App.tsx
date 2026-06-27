@@ -199,6 +199,7 @@ const inventoryStatusFilters: InventoryStatusFilter[] = [
   "code_conflict",
   "duplicate_candidate",
   "nfo_parse_error",
+  "asset_only",
   "orphan"
 ];
 
@@ -378,14 +379,16 @@ export function App() {
     [items, selectedLibraryWork]
   );
   const filteredInventoryWorks = inventoryReport
-    ? inventoryStatusFilter === "all"
-      ? inventoryReport.works
-      : inventoryReport.works.filter((work) => work.statuses.includes(inventoryStatusFilter))
+    ? inventoryStatusFilter === "asset_only"
+      ? inventoryReport.asset_candidates
+      : inventoryStatusFilter === "all"
+        ? inventoryReport.works
+        : inventoryReport.works.filter((work) => work.statuses.includes(inventoryStatusFilter))
     : [];
   const visibleInventoryOrphans = inventoryOrphansForFilter(inventoryReport, inventoryStatusFilter);
   const inventoryListItemCount = filteredInventoryWorks.length + visibleInventoryOrphans.length;
   const selectedInventoryWork =
-    inventoryReport?.works.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
+    filteredInventoryWorks.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -2130,6 +2133,10 @@ export function App() {
                           <strong>{inventoryReport.summary.works}</strong>
                         </div>
                         <div>
+                          <span>素材候选</span>
+                          <strong>{inventoryReport.summary.asset_candidates}</strong>
+                        </div>
+                        <div>
                           <span>可整理</span>
                           <strong>{inventoryReport.summary.ready}</strong>
                         </div>
@@ -2190,11 +2197,17 @@ export function App() {
                       <div className="inventory-layout">
                         <div className="inventory-work-list">
                           <div className="inventory-section-head">
-                            <strong>作品列表</strong>
+                            <strong>
+                              {inventoryStatusFilter === "asset_only"
+                                ? "素材候选"
+                                : inventoryStatusFilter === "orphan"
+                                  ? "资源列表"
+                                  : "作品列表"}
+                            </strong>
                             <span>{inventoryListItemCount} 项</span>
                           </div>
                           {inventoryListItemCount === 0 ? (
-                            <span className="empty-text">当前筛选没有作品</span>
+                            <span className="empty-text">当前筛选没有资源</span>
                           ) : (
                             <>
                               {filteredInventoryWorks.map((work) => (
