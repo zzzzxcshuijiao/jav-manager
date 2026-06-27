@@ -887,10 +887,20 @@ h2 {
   background: #eef3f6;
 }
 
+.inventory-orphan-list {
+  border-top: 1px solid #edf2f5;
+  display: grid;
+}
+
+.inventory-orphan-list .inventory-section-head {
+  background: #fbfdfe;
+}
+
 .inventory-work-row strong,
 .inventory-report-root strong,
 .inventory-target strong,
 .inventory-resource-row strong,
+.inventory-orphan-row strong,
 .inventory-action-row strong {
   color: #25313c;
   overflow-wrap: anywhere;
@@ -902,6 +912,8 @@ h2 {
 .inventory-target span,
 .inventory-resource-row span,
 .inventory-resource-row small,
+.inventory-orphan-row span,
+.inventory-orphan-row small,
 .inventory-action-row span,
 .inventory-action-row small {
   color: #61717d;
@@ -935,6 +947,7 @@ h2 {
 }
 
 .inventory-resource-row,
+.inventory-orphan-row,
 .inventory-action-row {
   border: 1px solid #d8e1e7;
   border-radius: 6px;

@@ -47,7 +47,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 阶段 6F 新增本地一键自检：后端 `self_check` 模块会在 app data 下创建隔离 `self-check/<timestamp>/` 沙盒、独立 SQLite、假视频和临时归档目录，运行自动管线核心确认 `MMT-001.mp4` 可归档；同时输出控制服务、真实目录、元数据源、aria2、远程 scraper、诊断系统的 pass/warn/fail 配置健康检查。前端“自动管线”页新增“一键自检”按钮和结果面板，所有操作有 loading/disabled/status 反馈。自检不连接真实 aria2，不访问真实 scraper 站点，不创建下载任务，不写真实媒体库。
 
 **阶段 7A（存量资源盘点与整理预览）已实现并验证。**
-阶段 7A 从下载入口转向用户当前真实痛点：已有视频、NFO、图片、GIF 和信息文件散乱在多个目录/盘。新增 `inventory` 只读扫描器，可扫描多个根目录，按番号聚合视频/NFO/poster/fanart/thumb/screenshot/GIF/其他资源，生成 `archive_root/CODE/` 目标路径预览，标记缺 NFO、缺视频、多视频、多 NFO、番号冲突、NFO 解析失败、目标已存在和目标重复等风险。前端“自动管线”页新增“存量整理预览”面板，支持多根目录输入、全状态过滤、summary、资源证据、warnings 和 action target 预览。阶段 7A 不写 SQLite、不创建归档目录、不移动/复制/删除真实资源。
+阶段 7A 从下载入口转向用户当前真实痛点：已有视频、NFO、图片、GIF 和信息文件散乱在多个目录/盘。新增 `inventory` 只读扫描器，可扫描多个根目录，按番号聚合视频/NFO/poster/fanart/thumb/screenshot/GIF/其他资源，生成 `archive_root/CODE/` 目标路径预览，标记缺 NFO、缺视频、多视频、多 NFO、疑似重复、番号冲突、NFO 解析失败、目标已存在和目标重复等风险。扫描会对重复/父子 root 下的同一文件去重，避免假多视频冲突；孤儿资源可在“全部/孤儿资源”筛选下直接看到路径和告警，明细最多返回 1000 条但 summary 保留全量计数。前端“自动管线”页新增“存量整理预览”面板，支持多根目录输入、全状态过滤、summary、孤儿资源、资源证据、warnings 和 action target 预览。阶段 7A 不写 SQLite、不创建归档目录、不移动/复制/删除真实资源。
 
 验证已通过：
 
@@ -70,7 +70,22 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1`
 
-说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业完整通过。阶段 6C 收尾时默认 `src-tauri/target` 出现过 rlib mmap/metadata 异常，完整 gate 使用 `$env:CARGO_TARGET_DIR='src-tauri/target/stage6c'` 通过。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 6F 新增失败。
+阶段 7A 最终 reviewer follow-up 之后额外通过：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`（15 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::tests::inventory_preview -j 1`（5 tests）
+- `npx tsc --noEmit`
+- `npm test`（54 tests）
+- `npm run build`
+
+orphan 明细上限 follow-up 之后额外通过：
+
+- `npx tsc --noEmit`
+- `npm test -- src/viewModel.test.ts`（45 tests）
+- `npm test -- src/daemonClient.test.ts src/viewModel.test.ts`（52 tests）
+- `npm run build`
+
+说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业曾完整通过。阶段 7A follow-up 清理无关 `cargo fmt` 噪音后复跑完整 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`，当前会话在编译 examples/tests 时再次触发 `os error 1455`。orphan 明细上限修复后，focused inventory Rust re-run 也被同一 `os error 1455` 挡在编译阶段；full `npm test` 被 child Windows PowerShell OOM/internal loading error 挡在 `scripts/collect-feedback.test.ts`。这些失败未进入业务断言。新环境接手时建议先释放/扩展页面文件，再重跑完整 `cargo test --manifest-path src-tauri/Cargo.toml -j 1` 和 `npm test`。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 7A 新增失败。
 
 ## 接手步骤（新电脑）
 
@@ -269,11 +284,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - `inventory` 识别视频、NFO、poster、fanart、thumb、screenshot、GIF、其他图片/文件；NFO parse/read 失败不会中断扫描，会保留资源并标记 `nfo_parse_error`。
 - 目标路径只做预览：主视频 `CODE.ext`、多视频 `CODE-vN.ext`、NFO `CODE.nfo`、poster/fanart/thumb 固定名、screenshots/gifs/images 子目录；不会创建目录或移动文件。
 - 目标冲突会标记 `target_exists` 和 `target_duplicate`，组合冲突不会互相覆盖；Windows 下 `.JPG/.jpg` 这类大小写冲突也会被识别。
+- 重复/重叠 roots 会按 canonical path 去重；同一番号组内同尺寸多视频会打 `duplicate_candidate`，供 7B 冲突处理继续细化。
+- 作品详情和孤儿资源明细各最多返回 1000 条；summary 仍按完整扫描结果计算，过量时 `truncated=true`。
 - `commands.rs` 新增并注册 `preview_inventory`，递归扫描通过 `spawn_blocking` 执行；命令参数和 state archive root 都会 trim/空白归一化，空 roots 返回中文错误。
 - `src/api.ts` 新增 inventory DTO 与 `previewInventory()`；`src/viewModel.ts` 新增 inventory 状态、summary、action target 格式化，并按 token 处理组合 conflict。
-- `src/App.tsx` 设置页“自动管线”新增“存量整理预览”面板：多根目录输入、生成预览按钮、summary、全状态过滤、作品列表、详情资源、evidence、warnings 和 action target。
+- `src/App.tsx` 设置页“自动管线”新增“存量整理预览”面板：多根目录输入、生成预览按钮、summary、全状态过滤、作品列表、孤儿资源列表、详情资源、evidence、warnings 和 action target。
 - `src/styles.css` 新增 inventory panel / summary / filter / list / detail / action / responsive 样式。
-- 新增 `src-tauri/tests/inventory.rs`，并扩展 `commands` unit 与 `src/viewModel.test.ts`；完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。
+- 新增 `src-tauri/tests/inventory.rs`，并扩展 `commands` unit 与 `src/viewModel.test.ts`；复审后 focused Rust、前端 unit/type/build 均通过。最终 orphan 明细截断修复的 Rust 测试在当前 Windows 会话被 `os error 1455` 页面文件限制挡在编译阶段，需要新环境复跑。
 
 ## 阶段 6A 交付物
 

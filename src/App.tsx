@@ -41,7 +41,6 @@ import type {
   InventoryPreviewReport,
   InventoryResource,
   InventoryResourceKind,
-  InventoryStatus,
   MigrationPlan,
   PipelineRun,
   PooledWork,
@@ -95,6 +94,7 @@ import {
   formatInventoryActionTarget,
   formatInventoryStatus,
   formatInventorySummary,
+  inventoryOrphansForFilter,
   formatMediaInfo,
   formatPipelineStatus,
   formatRemoteScraperSettingsSummary,
@@ -115,6 +115,7 @@ import {
   type ReviewReasonFilter,
   shortEvidence,
   summarizeRunOnceReport,
+  type InventoryStatusFilter,
   viewItemsForMode,
   type WorkStatusFilter,
   type WorkbenchView,
@@ -188,7 +189,7 @@ const defaultRemoteScraperSettings: RemoteScraperSettings = {
   ]
 };
 
-const inventoryStatusFilters: Array<InventoryStatus | "all"> = [
+const inventoryStatusFilters: InventoryStatusFilter[] = [
   "all",
   "ready",
   "missing_nfo",
@@ -281,7 +282,7 @@ export function App() {
   const [inventoryRootsText, setInventoryRootsText] = useState("");
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [inventoryReport, setInventoryReport] = useState<InventoryPreviewReport | null>(null);
-  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryStatus | "all">("all");
+  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryStatusFilter>("all");
   const [selectedInventoryCode, setSelectedInventoryCode] = useState<string | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
@@ -381,6 +382,8 @@ export function App() {
       ? inventoryReport.works
       : inventoryReport.works.filter((work) => work.statuses.includes(inventoryStatusFilter))
     : [];
+  const visibleInventoryOrphans = inventoryOrphansForFilter(inventoryReport, inventoryStatusFilter);
+  const inventoryListItemCount = filteredInventoryWorks.length + visibleInventoryOrphans.length;
   const selectedInventoryWork =
     inventoryReport?.works.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
 
@@ -2188,24 +2191,42 @@ export function App() {
                         <div className="inventory-work-list">
                           <div className="inventory-section-head">
                             <strong>作品列表</strong>
-                            <span>{filteredInventoryWorks.length} 项</span>
+                            <span>{inventoryListItemCount} 项</span>
                           </div>
-                          {filteredInventoryWorks.length === 0 ? (
+                          {inventoryListItemCount === 0 ? (
                             <span className="empty-text">当前筛选没有作品</span>
                           ) : (
-                            filteredInventoryWorks.map((work) => (
-                              <button
-                                type="button"
-                                className={`inventory-work-row ${selectedInventoryWork?.code === work.code ? "active" : ""}`}
-                                key={work.code}
-                                onClick={() => setSelectedInventoryCode(work.code)}
-                              >
-                                <strong>{work.code}</strong>
-                                <span>{work.statuses.map(formatInventoryStatus).join(" · ")}</span>
-                                <small>{summarizeInventoryResources(work.resources)}</small>
-                                <small>{work.target_dir ?? inventoryReport.archive_root ?? "未配置归档根目录"}</small>
-                              </button>
-                            ))
+                            <>
+                              {filteredInventoryWorks.map((work) => (
+                                <button
+                                  type="button"
+                                  className={`inventory-work-row ${selectedInventoryWork?.code === work.code ? "active" : ""}`}
+                                  key={work.code}
+                                  onClick={() => setSelectedInventoryCode(work.code)}
+                                >
+                                  <strong>{work.code}</strong>
+                                  <span>{work.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                                  <small>{summarizeInventoryResources(work.resources)}</small>
+                                  <small>{work.target_dir ?? inventoryReport.archive_root ?? "未配置归档根目录"}</small>
+                                </button>
+                              ))}
+                              {visibleInventoryOrphans.length > 0 ? (
+                                <div className="inventory-orphan-list">
+                                  <div className="inventory-section-head">
+                                    <strong>孤儿资源</strong>
+                                    <span>{visibleInventoryOrphans.length} 项</span>
+                                  </div>
+                                  {visibleInventoryOrphans.map((resource) => (
+                                    <div className="inventory-orphan-row" key={resource.path}>
+                                      <strong>{resource.kind} · {resource.file_name}</strong>
+                                      <span>{formatBytes(resource.size_bytes)} · 未识别番号</span>
+                                      <small>{resource.path}</small>
+                                      {resource.warnings.length > 0 ? <small>{resource.warnings.join("；")}</small> : null}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </>
                           )}
                         </div>
 
@@ -2271,7 +2292,9 @@ export function App() {
                               </div>
                             </>
                           ) : (
-                            <span className="empty-text">请选择一个作品查看整理预览</span>
+                            <span className="empty-text">
+                              {visibleInventoryOrphans.length > 0 ? "孤儿资源没有作品详情，左侧可查看路径和告警" : "请选择一个作品查看整理预览"}
+                            </span>
                           )}
                         </div>
                       </div>

@@ -16,6 +16,7 @@ import type {
   IngestItemFilters,
   InventoryPreviewAction,
   InventoryPreviewReport,
+  InventoryResource,
   InventoryStatus,
   RebuildReport,
   RemoteScraperSettings,
@@ -31,6 +32,7 @@ export type ReviewReasonFilter = ReviewReason | "All";
 export type CodePresenceFilter = "All" | "HasCode" | "MissingCode";
 export type WorkbenchView = "ingest" | "review" | "archive" | "settings" | "library";
 export type WorkStatusFilter = Work["watch_status"] | "All";
+export type InventoryStatusFilter = InventoryStatus | "all";
 
 export interface DashboardStats {
   total: number;
@@ -442,10 +444,21 @@ export function formatInventoryStatus(status: InventoryStatus): string {
   return labels[status];
 }
 
+/** Return orphan resources that should remain visible for the current inventory status filter. */
+export function inventoryOrphansForFilter(
+  report: InventoryPreviewReport | null,
+  filter: InventoryStatusFilter
+): InventoryResource[] {
+  if (!report) {
+    return [];
+  }
+  return filter === "all" || filter === "orphan" ? report.orphans : [];
+}
+
 /** Summarize an inventory preview report for status-line feedback. */
 export function formatInventorySummary(report: InventoryPreviewReport): string {
   const s = report.summary;
-  const suffix = report.truncated ? " 结果过多，仅展示前 1000 部。" : "";
+  const suffix = report.truncated ? " 结果过多，作品和孤儿资源明细各最多展示 1000 项。" : "";
   return `识别 ${s.works} 部作品：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
 }
 

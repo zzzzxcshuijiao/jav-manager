@@ -781,7 +781,7 @@ export function formatInventoryStatus(status: InventoryStatus): string {
 
 export function formatInventorySummary(report: InventoryPreviewReport): string {
   const s = report.summary;
-  const suffix = report.truncated ? " 结果过多，仅展示前 1000 部。" : "";
+  const suffix = report.truncated ? " 结果过多，作品和孤儿资源明细各最多展示 1000 项。" : "";
   return `识别 ${s.works} 部作品：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
 }
 
@@ -1197,9 +1197,9 @@ Create `.ai_state/reviews/sprint-14.md`:
 
 ## Residual Risk
 
-- No persistence or pagination; report details are capped at 1000 works.
+- No persistence or pagination; report details are capped at 1000 works and 1000 orphan resources.
 - Multi-video and multi-NFO decisions are classified but not resolved until 7B.
-- Duplicate candidates are heuristic only; full fingerprint-based duplicate handling remains future work.
+- Duplicate candidates are same-size heuristic only in Stage 7A; full fingerprint/stem/path-similarity duplicate handling remains future work.
 ```
 
 - [ ] **Step 6: Update handoff and lessons**

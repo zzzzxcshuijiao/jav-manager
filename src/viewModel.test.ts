@@ -33,6 +33,7 @@ import {
   formatInventoryActionTarget,
   formatInventoryStatus,
   formatInventorySummary,
+  inventoryOrphansForFilter,
   formatMediaInfo,
   formatPipelineStatus,
   formatWorkOption,
@@ -503,6 +504,9 @@ describe("inventory preview formatting", () => {
     expect(formatInventoryStatus("ready")).toBe("可整理");
     expect(formatInventoryStatus("missing_nfo")).toBe("缺 NFO");
     expect(formatInventorySummary(report)).toBe("识别 3 部作品：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
+    expect(formatInventorySummary({ ...report, truncated: true })).toBe(
+      "识别 3 部作品：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。 结果过多，作品和孤儿资源明细各最多展示 1000 项。"
+    );
   });
 
   it("formats inventory action targets", () => {
@@ -512,6 +516,43 @@ describe("inventory preview formatting", () => {
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "target_exists,target_duplicate" })).toBe("H:/AV/IPX-001/IPX-001.mp4（目标已存在，目标重复）");
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: "H:/AV/IPX-001/IPX-001.mp4", kind: "video", conflict: "unexpected_token" })).toBe("H:/AV/IPX-001/IPX-001.mp4（存在冲突：unexpected_token）");
     expect(formatInventoryActionTarget({ from_path: "H:/x/IPX-001.mp4", to_path: null, kind: "video", conflict: null })).toBe("未配置归档根目录");
+  });
+
+  it("keeps orphan resources visible for all and orphan filters", () => {
+    const orphan = {
+      path: "H:/loose/readme.txt",
+      file_name: "readme.txt",
+      kind: "other" as const,
+      size_bytes: 12,
+      code: null,
+      evidence: [],
+      warnings: ["无法识别番号"]
+    };
+    const report = {
+      generated_at: "2026-06-27T12:00:00Z",
+      roots: ["H:/downloads"],
+      archive_root: null,
+      summary: {
+        total_files: 1,
+        works: 0,
+        ready: 0,
+        missing_nfo: 0,
+        missing_video: 0,
+        multi_video: 0,
+        multi_nfo: 0,
+        code_conflict: 0,
+        duplicate_candidate: 0,
+        orphans: 1
+      },
+      works: [],
+      orphans: [orphan],
+      warnings: [],
+      truncated: false
+    };
+
+    expect(inventoryOrphansForFilter(report, "all")).toEqual([orphan]);
+    expect(inventoryOrphansForFilter(report, "orphan")).toEqual([orphan]);
+    expect(inventoryOrphansForFilter(report, "ready")).toEqual([]);
   });
 });
 

@@ -118,6 +118,7 @@ pub fn preview_inventory_roots(
 ) -> Result<InventoryPreviewReport> {
     let mut warnings = Vec::new();
     let mut resources = Vec::new();
+    let mut seen_files = BTreeSet::new();
     for root in roots {
         if !root.exists() {
             warnings.push(format!("扫描根目录不存在：{}", root.to_string_lossy()));
@@ -135,10 +136,26 @@ pub fn preview_inventory_roots(
             if !entry.file_type().is_file() {
                 continue;
             }
+            if !seen_files.insert(inventory_seen_key(path)) {
+                continue;
+            }
             push_classified_resource(path, &mut resources, &mut warnings);
         }
     }
     Ok(build_report(roots, archive_root, resources, warnings))
+}
+
+// Normalize a scanned file path for duplicate suppression across repeated or overlapping roots.
+fn inventory_seen_key(path: &Path) -> String {
+    let normalized = fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
 }
 
 // Downgrade one unreadable/disappearing file to a report warning so one bad file never aborts a scan.
@@ -259,9 +276,12 @@ fn build_report(
         .map(|(code, resources)| build_work_preview(code, resources, archive_root))
         .collect();
     let summary = summarize_works(&works, &orphans, total_files);
-    let truncated = works.len() > INVENTORY_DETAIL_LIMIT;
-    if truncated {
+    let truncated = works.len() > INVENTORY_DETAIL_LIMIT || orphans.len() > INVENTORY_DETAIL_LIMIT;
+    if works.len() > INVENTORY_DETAIL_LIMIT {
         works.truncate(INVENTORY_DETAIL_LIMIT);
+    }
+    if orphans.len() > INVENTORY_DETAIL_LIMIT {
+        orphans.truncate(INVENTORY_DETAIL_LIMIT);
     }
 
     InventoryPreviewReport {
@@ -483,6 +503,9 @@ fn work_statuses(resources: &[InventoryResource]) -> Vec<InventoryStatus> {
     if resources.iter().any(resource_has_conflicting_evidence) {
         statuses.insert(InventoryStatus::CodeConflict);
     }
+    if has_duplicate_video_candidate(resources) {
+        statuses.insert(InventoryStatus::DuplicateCandidate);
+    }
     if resources.iter().any(|resource| {
         resource
             .warnings
@@ -493,6 +516,15 @@ fn work_statuses(resources: &[InventoryResource]) -> Vec<InventoryStatus> {
     }
 
     statuses.into_iter().collect()
+}
+
+// Flag same-size videos in one code group as a cheap preview-only duplicate candidate signal.
+fn has_duplicate_video_candidate(resources: &[InventoryResource]) -> bool {
+    let mut sizes = BTreeSet::new();
+    resources
+        .iter()
+        .filter(|resource| resource.kind == InventoryResourceKind::Video && resource.size_bytes > 0)
+        .any(|resource| !sizes.insert(resource.size_bytes))
 }
 
 // A resource is conflicting when different code sources disagree on the normalized code.

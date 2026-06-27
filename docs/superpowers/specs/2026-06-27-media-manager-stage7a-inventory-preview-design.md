@@ -124,7 +124,7 @@ GIF 单独归类。
 - `multi_video`：同一番号有多个视频，可能是多版本或分集。
 - `multi_nfo`：同一番号有多个 NFO，需要后续选择主 NFO。
 - `code_conflict`：NFO、文件名、目录名之间提取到不同番号。
-- `duplicate_candidate`：多个视频 fingerprint 暂未计算时先按相同 stem/大小/路径相似度标记候选。
+- `duplicate_candidate`：多个视频 fingerprint 暂未计算时，阶段 7A 先按同番号组内相同文件大小标记候选；stem/path 相似度裁决留给 7B。
 - `orphan`：无法识别番号或无法归到任何作品。
 
 阶段 7A 只分类，不自动裁决。多版本、多 NFO、冲突处理留给 7B。
@@ -182,7 +182,7 @@ GIF 单独归类。
 - 单个文件读取 metadata 失败：记录 orphan/warning，不中断扫描。
 - NFO 解析失败：资源仍保留为 NFO 文件，作品标记 `nfo_parse_error`。
 - archive root 未配置：扫描仍可执行，但不生成 `to_path`，summary 标记需要先配置归档根目录。
-- 扫描结果过大：后端完整计算 summary，但返回作品详情最多 1000 个，并附加 `truncated` warning；分页和持久化任务表留给后续阶段。
+- 扫描结果过大：后端完整计算 summary，但返回作品详情和孤儿资源明细各最多 1000 个，并附加 `truncated` warning；分页和持久化任务表留给后续阶段。
 
 ## 测试策略
 

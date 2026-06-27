@@ -109,6 +109,22 @@ fn inventory_preview_preserves_full_summary_when_work_details_are_truncated() {
 }
 
 #[test]
+fn inventory_preview_preserves_full_summary_when_orphan_details_are_truncated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("loose");
+    for index in 1..=1001 {
+        write_file(&root.join(format!("note-{index:04}.txt")), b"note");
+    }
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 1001);
+    assert_eq!(report.summary.orphans, 1001);
+    assert_eq!(report.orphans.len(), 1000);
+    assert!(report.truncated);
+}
+
+#[test]
 fn inventory_preview_reports_missing_roots_and_uncoded_orphans() {
     let tmp = tempfile::tempdir().unwrap();
     let missing_root = tmp.path().join("missing");
@@ -194,6 +210,45 @@ fn inventory_preview_marks_missing_and_conflict_states() {
         .find(|work| work.code == "IPX-160")
         .unwrap();
     assert!(ipx160.statuses.contains(&InventoryStatus::CodeConflict));
+}
+
+#[test]
+fn inventory_preview_marks_same_size_multi_videos_as_duplicate_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-206.mp4"), b"same-size-a");
+    write_file(&root.join("IPX-206-copy.mkv"), b"same-size-b");
+
+    let report = preview_inventory_roots(&[root.clone()], None).unwrap();
+
+    assert_eq!(report.summary.duplicate_candidate, 1);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-206")
+        .unwrap();
+    assert!(work.statuses.contains(&InventoryStatus::DuplicateCandidate));
+}
+
+#[test]
+fn inventory_preview_deduplicates_repeated_or_overlapping_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let child = root.join("child");
+    write_file(&child.join("IPX-207.mp4"), b"video");
+
+    let report = preview_inventory_roots(&[root.clone(), child.clone()], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 1);
+    assert_eq!(report.summary.multi_video, 0);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-207")
+        .unwrap();
+    assert_eq!(work.resources.len(), 1);
+    assert_eq!(work.actions.len(), 1);
+    assert_eq!(work.actions[0].conflict, None);
 }
 
 #[test]
