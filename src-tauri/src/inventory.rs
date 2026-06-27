@@ -124,18 +124,39 @@ pub fn preview_inventory_roots(
             continue;
         }
         for entry in WalkDir::new(root).follow_links(false) {
-            let Ok(entry) = entry else {
-                warnings.push(format!("读取目录项失败：{}", root.to_string_lossy()));
-                continue;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warnings.push(format_walkdir_warning(root, err.path(), &err.to_string()));
+                    continue;
+                }
             };
             let path = entry.path();
             if !entry.file_type().is_file() {
                 continue;
             }
-            resources.push(classify_resource(path)?);
+            push_classified_resource(path, &mut resources, &mut warnings);
         }
     }
     Ok(build_report(roots, archive_root, resources, warnings))
+}
+
+// Downgrade one unreadable/disappearing file to a report warning so one bad file never aborts a scan.
+fn push_classified_resource(
+    path: &Path,
+    resources: &mut Vec<InventoryResource>,
+    warnings: &mut Vec<String>,
+) {
+    match classify_resource(path) {
+        Ok(resource) => resources.push(resource),
+        Err(err) => warnings.push(format!("文件分类失败：{}：{}", path.to_string_lossy(), err)),
+    }
+}
+
+// Preserve the most specific WalkDir location available when directory traversal fails.
+fn format_walkdir_warning(root: &Path, path: Option<&Path>, error: &str) -> String {
+    let location = path.unwrap_or(root);
+    format!("读取目录项失败：{}：{}", location.to_string_lossy(), error)
 }
 
 // Build a read-only resource DTO from one filesystem path.
@@ -420,10 +441,7 @@ fn nfo_code_evidence(
 
 // A bare-code image is usually the poster/cover in existing JAV libraries.
 fn is_bare_code_stem(stem: &str) -> bool {
-    let Some(code) = normalize_code(stem) else {
-        return false;
-    };
-    compact_alnum(stem) == compact_alnum(&code)
+    normalize_code(stem).is_some() && whole_stem_is_single_code(stem)
 }
 
 // Detect scraper screenshot names like CODE-01 or CODE_01 without matching CODE-001.
@@ -433,11 +451,64 @@ fn has_numbered_image_suffix(stem: &str) -> bool {
         .unwrap_or(false)
 }
 
-// Compare names across separators and case without changing normalization rules.
-fn compact_alnum(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+// Accept only a single full-stem code, including unpadded forms such as ABP-1.
+fn whole_stem_is_single_code(stem: &str) -> bool {
+    let trimmed = stem.trim();
+    let mut prefix_len = 0usize;
+    let mut digit_len = 0usize;
+    let mut seen_separator = false;
+    let mut seen_digit = false;
+
+    for ch in trimmed.chars() {
+        if !seen_digit && ch.is_ascii_alphabetic() {
+            if seen_separator {
+                return false;
+            }
+            prefix_len += 1;
+        } else if !seen_digit && matches!(ch, '-' | '_' | ' ') {
+            if prefix_len == 0 {
+                return false;
+            }
+            seen_separator = true;
+        } else if ch.is_ascii_digit() {
+            seen_digit = true;
+            digit_len += 1;
+        } else {
+            return false;
+        }
+    }
+
+    (2..=10).contains(&prefix_len) && (1..=6).contains(&digit_len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classification_errors_are_reported_without_aborting_collection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_file = tmp.path().join("gone.mp4");
+        let mut resources = Vec::new();
+        let mut warnings = Vec::new();
+
+        push_classified_resource(&missing_file, &mut resources, &mut warnings);
+
+        assert!(resources.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("文件分类失败"));
+        assert!(warnings[0].contains(&missing_file.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn walkdir_warning_includes_child_path_and_error_text() {
+        let warning = format_walkdir_warning(
+            Path::new("root"),
+            Some(Path::new("root/bad-child")),
+            "access denied",
+        );
+
+        assert!(warning.contains("root/bad-child"));
+        assert!(warning.contains("access denied"));
+    }
 }

@@ -91,3 +91,62 @@ fn inventory_preview_groups_scattered_resources_by_code_without_writing_files() 
         "stage 7A preview must not create archive directories"
     );
 }
+
+#[test]
+fn inventory_preview_preserves_full_summary_when_work_details_are_truncated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("videos");
+    for index in 1..=1001 {
+        write_file(&root.join(format!("TST-{index:04}.mp4")), b"video");
+    }
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 1001);
+    assert_eq!(report.summary.works, 1001);
+    assert_eq!(report.works.len(), 1000);
+    assert!(report.truncated);
+}
+
+#[test]
+fn inventory_preview_reports_missing_roots_and_uncoded_orphans() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing_root = tmp.path().join("missing");
+    let loose_root = tmp.path().join("loose");
+    write_file(&loose_root.join("readme.txt"), b"notes");
+
+    let report = preview_inventory_roots(&[missing_root.clone(), loose_root], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 1);
+    assert_eq!(report.summary.works, 0);
+    assert_eq!(report.summary.orphans, 1);
+    assert_eq!(report.orphans.len(), 1);
+    assert_eq!(report.orphans[0].file_name, "readme.txt");
+    assert!(report.warnings.iter().any(|warning| {
+        warning.contains("扫描根目录不存在")
+            && warning.contains(&missing_root.to_string_lossy().to_string())
+    }));
+}
+
+#[test]
+fn inventory_preview_treats_whole_unpadded_code_image_stems_as_posters() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("images");
+    write_file(&root.join("ABP-1.jpg"), b"poster");
+    write_file(&root.join("ABP-01.jpg"), b"poster");
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "ABP-001")
+        .unwrap();
+    assert_eq!(
+        work.resources
+            .iter()
+            .filter(|resource| resource.kind == InventoryResourceKind::Poster)
+            .count(),
+        2
+    );
+}
