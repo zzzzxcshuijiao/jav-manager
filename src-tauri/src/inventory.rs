@@ -387,7 +387,7 @@ fn build_work_preview(
             preview_action(&code, resource, action_index, target_dir.as_deref())
         })
         .collect();
-    actions.sort_by_key(|action| preview_action_sort_key(&code, action));
+    actions.sort_by_key(|action| preview_action_sort_key(action, &video_indexes));
     mark_duplicate_action_targets(&mut actions);
     let (resolution, resource_roles) = build_resolution(&code, &resources, &statuses);
 
@@ -449,31 +449,56 @@ fn sorted_videos_for_resolution<'a>(
         .iter()
         .filter(|resource| resource.kind == InventoryResourceKind::Video)
         .collect();
-    videos.sort_by_key(|resource| video_resolution_sort_key(code, resource));
+    let has_primary_anchor = videos
+        .iter()
+        .any(|resource| video_has_primary_anchor(code, &resource.path));
+    videos.sort_by_key(|resource| video_resolution_sort_key(code, resource, has_primary_anchor));
     videos
 }
 
-// Rank videos as bare code, explicit first part, then largest remaining video.
+// Rank videos for both resolution and action targets so both surfaces pick the same primary file.
 fn video_resolution_sort_key(
     code: &str,
     resource: &InventoryResource,
-) -> (u8, std::cmp::Reverse<u64>, PathBuf) {
+    has_primary_anchor: bool,
+) -> (u8, usize, std::cmp::Reverse<u64>, PathBuf) {
     let stem = resource
         .path
         .file_stem()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
-        return (0, std::cmp::Reverse(0), resource.path.clone());
+        return (0, 0, std::cmp::Reverse(0), resource.path.clone());
     }
-    if explicit_video_part_index(&stem) == Some(1) {
-        return (1, std::cmp::Reverse(0), resource.path.clone());
+    if let Some(part_index) = explicit_video_part_index(&stem) {
+        if part_index == 1 {
+            return (1, 0, std::cmp::Reverse(0), resource.path.clone());
+        }
+        if has_primary_anchor {
+            return (2, part_index, std::cmp::Reverse(0), resource.path.clone());
+        }
     }
     (
-        2,
+        if has_primary_anchor { 3 } else { 2 },
+        usize::MAX,
         std::cmp::Reverse(resource.size_bytes),
         resource.path.clone(),
     )
+}
+
+// Detect whether a video can serve as a direct primary anchor before fallback sizing.
+fn video_has_primary_anchor(code: &str, path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
+        return true;
+    }
+    if explicit_video_part_index(&stem) == Some(1) {
+        return true;
+    }
+    false
 }
 
 // Choose the primary video and return a human-readable reason for the UI.
@@ -712,14 +737,9 @@ fn resource_role_reason(
     }
 }
 
-// Assign video target slots so the bare main file remains primary even when path sorting puts parts first.
+// Assign video target slots using the same pairing order as resolution.primary_video.
 fn video_action_indexes(code: &str, resources: &[InventoryResource]) -> BTreeMap<PathBuf, usize> {
-    let mut videos: Vec<&InventoryResource> = resources
-        .iter()
-        .filter(|resource| resource.kind == InventoryResourceKind::Video)
-        .collect();
-    videos.sort_by_key(|resource| video_action_sort_key(code, &resource.path));
-    videos
+    sorted_videos_for_resolution(code, resources)
         .into_iter()
         .enumerate()
         .map(|(index, resource)| (resource.path.clone(), index))
@@ -728,38 +748,26 @@ fn video_action_indexes(code: &str, resources: &[InventoryResource]) -> BTreeMap
 
 // Keep the action list in the same semantic order used for assigning preview video names.
 fn preview_action_sort_key(
-    code: &str,
     action: &InventoryPreviewAction,
-) -> (u8, u8, usize, PathBuf) {
+    video_indexes: &BTreeMap<PathBuf, usize>,
+) -> (u8, usize, PathBuf) {
     match action.kind {
         InventoryResourceKind::Video => {
-            let (video_group, part_index, path) = video_action_sort_key(code, &action.from_path);
-            (0, video_group, part_index, path)
+            let index = video_indexes
+                .get(&action.from_path)
+                .copied()
+                .unwrap_or(usize::MAX);
+            (0, index, action.from_path.clone())
         }
-        InventoryResourceKind::Nfo => (1, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Poster => (2, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Fanart => (3, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Thumb => (4, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Screenshot => (5, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Gif => (6, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Image => (7, 0, 0, action.from_path.clone()),
-        InventoryResourceKind::Other => (8, 0, 0, action.from_path.clone()),
+        InventoryResourceKind::Nfo => (1, 0, action.from_path.clone()),
+        InventoryResourceKind::Poster => (2, 0, action.from_path.clone()),
+        InventoryResourceKind::Fanart => (3, 0, action.from_path.clone()),
+        InventoryResourceKind::Thumb => (4, 0, action.from_path.clone()),
+        InventoryResourceKind::Screenshot => (5, 0, action.from_path.clone()),
+        InventoryResourceKind::Gif => (6, 0, action.from_path.clone()),
+        InventoryResourceKind::Image => (7, 0, action.from_path.clone()),
+        InventoryResourceKind::Other => (8, 0, action.from_path.clone()),
     }
-}
-
-// Sort bare CODE.ext before explicit CD/part/disc variants, then fall back to path for determinism.
-fn video_action_sort_key(code: &str, path: &Path) -> (u8, usize, PathBuf) {
-    let stem = path
-        .file_stem()
-        .map(|value| value.to_string_lossy().to_string())
-        .unwrap_or_default();
-    if normalize_code(&stem).as_deref() == Some(code) && whole_stem_is_single_code(&stem) {
-        return (0, 0, path.to_path_buf());
-    }
-    if let Some(part_index) = explicit_video_part_index(&stem) {
-        return (1, part_index, path.to_path_buf());
-    }
-    (2, usize::MAX, path.to_path_buf())
 }
 
 // Extract common CD/part/disc suffix numbers such as CODE-CD2 or CODE_part02.

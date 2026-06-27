@@ -588,26 +588,33 @@ fn inventory_resolution_selects_bare_video_and_matching_nfo_as_primary() {
         .reasons
         .iter()
         .any(|reason| reason.contains("裸番号视频")));
-    assert!(work.resource_roles.iter().any(|role| role.path.ends_with("IPX-159.mp4")
-        && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryVideo
-        && role.selected));
-    assert!(work.resource_roles.iter().any(|role| role.path.ends_with("metadata.nfo")
-        && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryNfo
-        && role.selected));
+    assert!(work
+        .resource_roles
+        .iter()
+        .any(|role| role.path.ends_with("IPX-159.mp4")
+            && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryVideo
+            && role.selected));
+    assert!(work
+        .resource_roles
+        .iter()
+        .any(|role| role.path.ends_with("metadata.nfo")
+            && role.role == media_manager::inventory::InventoryResourceRoleKind::PrimaryNfo
+            && role.selected));
 }
 
 #[test]
 fn inventory_resolution_uses_largest_video_when_no_bare_or_first_part_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
-    write_file(&root.join("IPX-160-extra-small.mp4"), b"small");
-    write_file(&root.join("IPX-160-extra-large.mkv"), b"larger-video");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-160-a-small.mp4"), b"small");
+    write_file(&root.join("IPX-160-z-large.mkv"), b"larger-video");
     write_file(
         &root.join("IPX-160.nfo"),
         br#"<movie><num>IPX-160</num><title>Main</title></movie>"#,
     );
 
-    let report = preview_inventory_roots(&[root], None).unwrap();
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
     let work = report
         .works
         .iter()
@@ -619,10 +626,20 @@ fn inventory_resolution_uses_largest_video_when_no_bare_or_first_part_exists() {
         .primary_video
         .as_ref()
         .unwrap()
-        .ends_with("IPX-160-extra-large.mkv"));
+        .ends_with("IPX-160-z-large.mkv"));
     assert!(work
         .resolution
         .reasons
         .iter()
         .any(|reason| reason.contains("体积最大视频")));
+    let primary_action = work
+        .actions
+        .iter()
+        .find(|action| action.from_path.ends_with("IPX-160-z-large.mkv"))
+        .unwrap();
+    assert!(primary_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-160/IPX-160.mkv")));
 }
