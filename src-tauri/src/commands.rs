@@ -2286,11 +2286,11 @@ mod tests {
             .iter()
             .find(|work| work.code == "IPX-301")
             .unwrap();
-        assert!(work
-            .target_dir
-            .as_ref()
-            .unwrap()
-            .ends_with(std::path::PathBuf::from("IPX-301")));
+        assert_eq!(response.data.archive_root.as_deref(), Some(archive.as_path()));
+        assert_eq!(
+            work.target_dir.as_deref(),
+            Some(archive.join("IPX-301").as_path())
+        );
         assert!(!archive.exists(), "inventory preview must not create target dirs");
     }
 
