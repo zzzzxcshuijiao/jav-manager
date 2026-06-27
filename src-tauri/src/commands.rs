@@ -26,6 +26,7 @@ use crate::domain::{
 };
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
+use crate::inventory::{preview_inventory_roots, InventoryPreviewReport};
 use crate::provider::{DisabledProvider, ExampleProvider};
 use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
@@ -898,6 +899,44 @@ pub fn list_file_versions_for_work(
             .list_file_versions_for_work(work_id)
             .map_err(|error| error.to_string())?,
     })
+}
+
+/// Build a read-only inventory preview from plain `AppState` for tests and the Tauri command.
+fn preview_inventory_in_state(
+    roots: Vec<String>,
+    archive_root: Option<String>,
+    state: &AppState,
+) -> Result<CommandResult<InventoryPreviewReport>, String> {
+    let root_paths: Vec<PathBuf> = roots
+        .into_iter()
+        .map(|root| PathBuf::from(root.trim()))
+        .filter(|root| !root.as_os_str().is_empty())
+        .collect();
+    if root_paths.is_empty() {
+        return Err("至少需要一个存量扫描根目录".to_string());
+    }
+    let archive_root = match archive_root {
+        Some(value) if !value.trim().is_empty() => Some(PathBuf::from(value.trim())),
+        _ => state
+            .archive_root
+            .lock()
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            .map(PathBuf::from),
+    };
+    let report = preview_inventory_roots(&root_paths, archive_root.as_deref())
+        .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: report })
+}
+
+/// Preview inventory grouping and target paths without moving or writing files.
+#[tauri::command]
+pub fn preview_inventory(
+    roots: Vec<String>,
+    archive_root: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<CommandResult<InventoryPreviewReport>, String> {
+    preview_inventory_in_state(roots, archive_root, &state)
 }
 
 #[tauri::command]
@@ -1829,6 +1868,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_poster_dirs,
             list_file_versions_for_work,
             list_work_actors,
+            preview_inventory,
             preview_archive_plan,
             execute_archive_plan,
             list_archive_action_logs,
@@ -2224,6 +2264,34 @@ mod tests {
         assert_eq!(settings.host, "127.0.0.1");
         assert_eq!(settings.port, 6800);
         assert_eq!(settings.path, "/jsonrpc");
+    }
+
+    #[test]
+    fn inventory_preview_command_uses_state_archive_root_when_argument_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let root = tmp.path().join("inventory-root");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("IPX-301.mp4"), b"video").unwrap();
+        *state.archive_root.lock().unwrap() = Some(archive.to_string_lossy().to_string());
+
+        let response =
+            preview_inventory_in_state(vec![root.to_string_lossy().to_string()], None, &state)
+                .unwrap();
+
+        let work = response
+            .data
+            .works
+            .iter()
+            .find(|work| work.code == "IPX-301")
+            .unwrap();
+        assert!(work
+            .target_dir
+            .as_ref()
+            .unwrap()
+            .ends_with(std::path::PathBuf::from("IPX-301")));
+        assert!(!archive.exists(), "inventory preview must not create target dirs");
     }
 
     #[test]
