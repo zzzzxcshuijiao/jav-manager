@@ -901,12 +901,8 @@ pub fn list_file_versions_for_work(
     })
 }
 
-/// Build a read-only inventory preview from plain `AppState` for tests and the Tauri command.
-fn preview_inventory_in_state(
-    roots: Vec<String>,
-    archive_root: Option<String>,
-    state: &AppState,
-) -> Result<CommandResult<InventoryPreviewReport>, String> {
+/// Normalize inventory roots from UI strings, ignoring blanks and rejecting an empty scan request.
+fn inventory_root_paths(roots: Vec<String>) -> Result<Vec<PathBuf>, String> {
     let root_paths: Vec<PathBuf> = roots
         .into_iter()
         .map(|root| PathBuf::from(root.trim()))
@@ -915,28 +911,76 @@ fn preview_inventory_in_state(
     if root_paths.is_empty() {
         return Err("至少需要一个存量扫描根目录".to_string());
     }
-    let archive_root = match archive_root {
-        Some(value) if !value.trim().is_empty() => Some(PathBuf::from(value.trim())),
-        _ => state
-            .archive_root
-            .lock()
-            .map_err(|error| error.to_string())?
-            .as_ref()
-            .map(PathBuf::from),
-    };
+    Ok(root_paths)
+}
+
+/// Convert an optional UI path into a usable path, treating blank strings as absent.
+fn normalize_optional_path(value: Option<String>) -> Option<PathBuf> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    })
+}
+
+/// Resolve the command archive root, preferring a non-blank argument over the saved state value.
+fn inventory_archive_root(
+    argument: Option<String>,
+    state: &AppState,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = normalize_optional_path(argument) {
+        return Ok(Some(path));
+    }
+    let state_value = state
+        .archive_root
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    Ok(normalize_optional_path(state_value))
+}
+
+/// Run the synchronous read-only inventory preview from normalized paths for unit tests.
+#[cfg(test)]
+fn preview_inventory_from_paths(
+    root_paths: Vec<PathBuf>,
+    archive_root: Option<PathBuf>,
+) -> Result<CommandResult<InventoryPreviewReport>, String> {
     let report = preview_inventory_roots(&root_paths, archive_root.as_deref())
         .map_err(|error| error.to_string())?;
     Ok(CommandResult { data: report })
 }
 
+/// Build a read-only inventory preview from plain `AppState` for unit tests.
+#[cfg(test)]
+fn preview_inventory_in_state(
+    roots: Vec<String>,
+    archive_root: Option<String>,
+    state: &AppState,
+) -> Result<CommandResult<InventoryPreviewReport>, String> {
+    let root_paths = inventory_root_paths(roots)?;
+    let archive_root = inventory_archive_root(archive_root, state)?;
+    preview_inventory_from_paths(root_paths, archive_root)
+}
+
 /// Preview inventory grouping and target paths without moving or writing files.
 #[tauri::command]
-pub fn preview_inventory(
+pub async fn preview_inventory(
     roots: Vec<String>,
     archive_root: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<CommandResult<InventoryPreviewReport>, String> {
-    preview_inventory_in_state(roots, archive_root, &state)
+    let root_paths = inventory_root_paths(roots)?;
+    let archive_root = inventory_archive_root(archive_root, &state)?;
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        preview_inventory_roots(&root_paths, archive_root.as_deref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: report })
 }
 
 #[tauri::command]
@@ -2292,6 +2336,108 @@ mod tests {
             Some(archive.join("IPX-301").as_path())
         );
         assert!(!archive.exists(), "inventory preview must not create target dirs");
+    }
+
+    #[test]
+    fn inventory_preview_command_prefers_argument_archive_root_over_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let root = tmp.path().join("inventory-root");
+        let state_archive = tmp.path().join("state-archive");
+        let argument_archive = tmp.path().join("argument-archive");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("IPX-302.mp4"), b"video").unwrap();
+        *state.archive_root.lock().unwrap() = Some(state_archive.to_string_lossy().to_string());
+
+        let response = preview_inventory_in_state(
+            vec![root.to_string_lossy().to_string()],
+            Some(format!("  {}  ", argument_archive.to_string_lossy())),
+            &state,
+        )
+        .unwrap();
+
+        let work = response
+            .data
+            .works
+            .iter()
+            .find(|work| work.code == "IPX-302")
+            .unwrap();
+        assert_eq!(
+            response.data.archive_root.as_deref(),
+            Some(argument_archive.as_path())
+        );
+        assert_eq!(
+            work.target_dir.as_deref(),
+            Some(argument_archive.join("IPX-302").as_path())
+        );
+    }
+
+    #[test]
+    fn inventory_preview_command_falls_back_to_state_when_argument_is_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let root = tmp.path().join("inventory-root");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("IPX-303.mp4"), b"video").unwrap();
+        *state.archive_root.lock().unwrap() = Some(archive.to_string_lossy().to_string());
+
+        let response = preview_inventory_in_state(
+            vec![root.to_string_lossy().to_string()],
+            Some("   ".to_string()),
+            &state,
+        )
+        .unwrap();
+
+        let work = response
+            .data
+            .works
+            .iter()
+            .find(|work| work.code == "IPX-303")
+            .unwrap();
+        assert_eq!(response.data.archive_root.as_deref(), Some(archive.as_path()));
+        assert_eq!(
+            work.target_dir.as_deref(),
+            Some(archive.join("IPX-303").as_path())
+        );
+    }
+
+    #[test]
+    fn inventory_preview_command_rejects_empty_roots() {
+        let state = AppState::default();
+
+        let result = preview_inventory_in_state(
+            vec!["".to_string(), "   ".to_string(), "\t".to_string()],
+            None,
+            &state,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn inventory_preview_command_ignores_blank_state_archive_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let root = tmp.path().join("inventory-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("IPX-304.mp4"), b"video").unwrap();
+        *state.archive_root.lock().unwrap() = Some("   ".to_string());
+
+        let response =
+            preview_inventory_in_state(vec![root.to_string_lossy().to_string()], None, &state)
+                .unwrap();
+
+        let work = response
+            .data
+            .works
+            .iter()
+            .find(|work| work.code == "IPX-304")
+            .unwrap();
+        assert_eq!(response.data.archive_root, None);
+        assert_eq!(work.target_dir, None);
+        assert!(!work.actions.is_empty());
+        assert!(work.actions.iter().all(|action| action.to_path.is_none()));
     }
 
     #[test]
