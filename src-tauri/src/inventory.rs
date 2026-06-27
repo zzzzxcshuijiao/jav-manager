@@ -258,7 +258,7 @@ fn build_report(
         .into_iter()
         .map(|(code, resources)| build_work_preview(code, resources, archive_root))
         .collect();
-    let summary = summarize_works(&works, orphans.len(), total_files);
+    let summary = summarize_works(&works, &orphans, total_files);
     let truncated = works.len() > INVENTORY_DETAIL_LIMIT;
     if truncated {
         works.truncate(INVENTORY_DETAIL_LIMIT);
@@ -284,18 +284,21 @@ fn build_work_preview(
 ) -> InventoryWorkPreview {
     resources.sort_by(|left, right| left.path.cmp(&right.path));
     let target_dir = archive_root.map(|root| root.join(&code));
+    let statuses = work_statuses(&resources);
+    let mut video_index = 0usize;
     let actions = resources
         .iter()
-        .map(|resource| InventoryPreviewAction {
-            from_path: resource.path.clone(),
-            to_path: target_dir
-                .as_ref()
-                .map(|target_dir| target_dir.join(&resource.file_name)),
-            kind: resource.kind.clone(),
-            conflict: None,
+        .map(|resource| {
+            let action_index = if resource.kind == InventoryResourceKind::Video {
+                let current_index = video_index;
+                video_index += 1;
+                current_index
+            } else {
+                0
+            };
+            preview_action(&code, resource, action_index, target_dir.as_deref())
         })
         .collect();
-    let statuses = work_statuses(&code, &resources);
 
     InventoryWorkPreview {
         code,
@@ -309,13 +312,13 @@ fn build_work_preview(
 // Summarize work statuses while keeping the report total independent of truncation.
 fn summarize_works(
     works: &[InventoryWorkPreview],
-    orphan_count: usize,
+    orphans: &[InventoryResource],
     total_files: usize,
 ) -> InventorySummary {
     let mut summary = InventorySummary {
         total_files,
         works: works.len(),
-        orphans: orphan_count,
+        orphans: orphans.len(),
         ..InventorySummary::default()
     };
 
@@ -346,8 +349,8 @@ fn summarize_works(
     summary
 }
 
-// Produce conservative status tags for the Stage 7A scanner skeleton.
-fn work_statuses(code: &str, resources: &[InventoryResource]) -> Vec<InventoryStatus> {
+// Produce work-level status tags from the resource mix and per-file evidence.
+fn work_statuses(resources: &[InventoryResource]) -> Vec<InventoryStatus> {
     let video_count = resources
         .iter()
         .filter(|resource| resource.kind == InventoryResourceKind::Video)
@@ -356,19 +359,12 @@ fn work_statuses(code: &str, resources: &[InventoryResource]) -> Vec<InventorySt
         .iter()
         .filter(|resource| resource.kind == InventoryResourceKind::Nfo)
         .count();
-    let has_nfo_parse_error = resources.iter().any(|resource| {
-        resource
-            .warnings
-            .iter()
-            .any(|warning| warning == "NFO 解析失败")
-    });
-    let has_code_conflict = resources
-        .iter()
-        .flat_map(|resource| &resource.evidence)
-        .any(|evidence| evidence.code != code);
 
     let mut statuses = BTreeSet::new();
-    if nfo_count == 0 {
+    if video_count > 0 && nfo_count > 0 {
+        statuses.insert(InventoryStatus::Ready);
+    }
+    if video_count > 0 && nfo_count == 0 {
         statuses.insert(InventoryStatus::MissingNfo);
     }
     if video_count == 0 {
@@ -380,17 +376,94 @@ fn work_statuses(code: &str, resources: &[InventoryResource]) -> Vec<InventorySt
     if nfo_count > 1 {
         statuses.insert(InventoryStatus::MultiNfo);
     }
-    if has_code_conflict {
+    if resources.iter().any(resource_has_conflicting_evidence) {
         statuses.insert(InventoryStatus::CodeConflict);
     }
-    if has_nfo_parse_error {
+    if resources.iter().any(|resource| {
+        resource
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("NFO 解析失败"))
+    }) {
         statuses.insert(InventoryStatus::NfoParseError);
-    }
-    if statuses.is_empty() {
-        statuses.insert(InventoryStatus::Ready);
     }
 
     statuses.into_iter().collect()
+}
+
+// A resource is conflicting when different code sources disagree on the normalized code.
+fn resource_has_conflicting_evidence(resource: &InventoryResource) -> bool {
+    resource
+        .evidence
+        .iter()
+        .map(|evidence| evidence.code.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
+}
+
+// Build one read-only file action for the archive preview without touching the target path.
+fn preview_action(
+    code: &str,
+    resource: &InventoryResource,
+    index: usize,
+    target_dir: Option<&Path>,
+) -> InventoryPreviewAction {
+    let to_path =
+        target_dir.map(|target_dir| target_dir.join(target_relative_path(code, resource, index)));
+    let conflict = to_path
+        .as_ref()
+        .filter(|path| path.exists())
+        .map(|_| "target_exists".to_string());
+
+    InventoryPreviewAction {
+        from_path: resource.path.clone(),
+        to_path,
+        kind: resource.kind.clone(),
+        conflict,
+    }
+}
+
+// Choose the stable archive-relative name for one resource kind.
+fn target_relative_path(code: &str, resource: &InventoryResource, index: usize) -> PathBuf {
+    match resource.kind {
+        InventoryResourceKind::Video => PathBuf::from(named_with_original_extension(
+            if index == 0 {
+                code.to_string()
+            } else {
+                format!("{code}-v{}", index + 1)
+            },
+            resource,
+        )),
+        InventoryResourceKind::Nfo => PathBuf::from(format!("{code}.nfo")),
+        InventoryResourceKind::Poster => {
+            PathBuf::from(named_with_original_extension("poster", resource))
+        }
+        InventoryResourceKind::Fanart => {
+            PathBuf::from(named_with_original_extension("fanart", resource))
+        }
+        InventoryResourceKind::Thumb => {
+            PathBuf::from(named_with_original_extension("thumb", resource))
+        }
+        InventoryResourceKind::Screenshot => PathBuf::from("screenshots").join(&resource.file_name),
+        InventoryResourceKind::Gif => PathBuf::from("gifs").join(&resource.file_name),
+        InventoryResourceKind::Image | InventoryResourceKind::Other => {
+            PathBuf::from("images").join(&resource.file_name)
+        }
+    }
+}
+
+// Reuse the source extension for normalized target names when one exists.
+fn named_with_original_extension(name: impl Into<String>, resource: &InventoryResource) -> String {
+    let name = name.into();
+    match resource
+        .path
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some(extension) if !extension.is_empty() => format!("{name}.{extension}"),
+        _ => name,
+    }
 }
 
 // Add normalized-code evidence and return the normalized value for precedence decisions.

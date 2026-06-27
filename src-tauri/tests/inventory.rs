@@ -150,3 +150,115 @@ fn inventory_preview_treats_whole_unpadded_code_image_stems_as_posters() {
         2
     );
 }
+
+#[test]
+fn inventory_preview_marks_missing_and_conflict_states() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("ABP-001.mp4"), b"video");
+    write_file(
+        &root.join("SSIS-777.nfo"),
+        br#"<movie><num>SSIS-777</num></movie>"#,
+    );
+    write_file(&root.join("IPX-159.mp4"), b"v1");
+    write_file(&root.join("IPX-159-CD2.mkv"), b"v2");
+    write_file(
+        &root.join("IPX-159.nfo"),
+        br#"<movie><num>IPX-160</num></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+
+    let abp = report
+        .works
+        .iter()
+        .find(|work| work.code == "ABP-001")
+        .unwrap();
+    assert!(abp.statuses.contains(&InventoryStatus::MissingNfo));
+    let ssis = report
+        .works
+        .iter()
+        .find(|work| work.code == "SSIS-777")
+        .unwrap();
+    assert!(ssis.statuses.contains(&InventoryStatus::MissingVideo));
+    let ipx159 = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-159")
+        .unwrap();
+    assert!(ipx159.statuses.contains(&InventoryStatus::MultiVideo));
+    let ipx160 = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-160")
+        .unwrap();
+    assert!(ipx160.statuses.contains(&InventoryStatus::CodeConflict));
+}
+
+#[test]
+fn inventory_preview_builds_target_actions_and_marks_existing_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-200.mp4"), b"video");
+    write_file(
+        &root.join("IPX-200.nfo"),
+        br#"<movie><num>IPX-200</num></movie>"#,
+    );
+    write_file(&root.join("IPX-200-cover.jpg"), b"poster");
+    write_file(&archive.join("IPX-200").join("IPX-200.mp4"), b"existing");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-200")
+        .unwrap();
+    let video_action = work
+        .actions
+        .iter()
+        .find(|action| action.kind == InventoryResourceKind::Video)
+        .unwrap();
+    assert!(video_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-200/IPX-200.mp4")));
+    assert_eq!(video_action.conflict.as_deref(), Some("target_exists"));
+    let nfo_action = work
+        .actions
+        .iter()
+        .find(|action| action.kind == InventoryResourceKind::Nfo)
+        .unwrap();
+    assert!(nfo_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-200/IPX-200.nfo")));
+    let poster_action = work
+        .actions
+        .iter()
+        .find(|action| action.kind == InventoryResourceKind::Poster)
+        .unwrap();
+    assert!(poster_action
+        .to_path
+        .as_ref()
+        .unwrap()
+        .ends_with(PathBuf::from("IPX-200/poster.jpg")));
+}
+
+#[test]
+fn inventory_preview_keeps_missing_roots_as_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing");
+
+    let report = preview_inventory_roots(&[missing.clone()], None).unwrap();
+
+    assert_eq!(report.summary.total_files, 0);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("扫描根目录不存在")));
+}
