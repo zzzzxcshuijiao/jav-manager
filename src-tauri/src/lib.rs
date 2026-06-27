@@ -10,6 +10,7 @@ pub mod diagnostics;
 pub mod domain;
 pub mod identifier;
 pub mod ingest;
+pub mod inventory;
 pub mod matcher;
 pub mod migration;
 pub mod nfo;
