@@ -944,7 +944,8 @@ h2 {
 }
 
 .inventory-target,
-.inventory-resolution {
+.inventory-resolution,
+.inventory-execution-plan {
   margin: 10px 12px;
   border: 1px solid #d8e1e7;
   border-radius: 6px;
@@ -957,6 +958,22 @@ h2 {
 .inventory-resolution {
   background: #ffffff;
   gap: 8px;
+}
+
+.inventory-execution-plan {
+  border-color: rgba(37, 99, 235, 0.25);
+  background: #f8fbff;
+  gap: 8px;
+}
+
+.inventory-execution-plan.ready {
+  border-color: rgba(22, 163, 74, 0.35);
+  background: #f7fdf9;
+}
+
+.inventory-execution-plan.review {
+  border-color: rgba(217, 119, 6, 0.35);
+  background: #fffaf2;
 }
 
 .inventory-resolution div:first-child {

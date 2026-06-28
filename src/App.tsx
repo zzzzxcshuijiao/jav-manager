@@ -93,6 +93,7 @@ import {
   formatHoldingReason,
   formatInventoryActionTarget,
   filterInventoryWorks,
+  formatInventoryExecutionPlanSummary,
   formatInventoryExportSummary,
   formatInventoryResourceRole,
   formatInventoryResolutionSummary,
@@ -1972,6 +1973,27 @@ export function App() {
                             ) : null}
                           </div>
 
+                          <div className={`inventory-execution-plan ${selectedInventoryWork.resolution.execution_plan.ready ? "ready" : "review"}`}>
+                            <div className="inventory-section-head">
+                              <strong>安全执行计划</strong>
+                              <span>{formatInventoryExecutionPlanSummary(selectedInventoryWork.resolution.execution_plan)}</span>
+                            </div>
+                            {selectedInventoryWork.resolution.execution_plan.conflicts.length > 0 ? (
+                              <div className="inventory-resolution-notes block">
+                                {selectedInventoryWork.resolution.execution_plan.conflicts.map((conflict, index) => (
+                                  <span key={`${selectedInventoryWork.code}-execution-conflict-${index}`}>{conflict}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {selectedInventoryWork.resolution.execution_plan.notes.length > 0 ? (
+                              <div className="inventory-resolution-notes">
+                                {selectedInventoryWork.resolution.execution_plan.notes.map((note, index) => (
+                                  <span key={`${selectedInventoryWork.code}-execution-note-${index}`}>{note}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+
                           <div className="inventory-subsection">
                             <strong>资源</strong>
                             {selectedInventoryWork.resources.length === 0 ? (
@@ -2005,9 +2027,9 @@ export function App() {
                           </div>
 
                           <div className="inventory-subsection">
-                            <strong>整理动作预览</strong>
+                            <strong>候选动作预览</strong>
                             {selectedInventoryWork.actions.length === 0 ? (
-                              <span className="empty-text">暂无整理动作预览</span>
+                              <span className="empty-text">暂无候选动作预览</span>
                             ) : (
                               selectedInventoryWork.actions.map((action, index) => (
                                 <div

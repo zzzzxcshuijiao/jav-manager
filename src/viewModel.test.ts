@@ -31,6 +31,7 @@ import {
   formatFileVersionSummary,
   filterInventoryWorks,
   formatInventoryConfidence,
+  formatInventoryExecutionPlanSummary,
   formatInventoryExportSummary,
   formatInventoryResourceRole,
   formatInventoryReviewBucket,
@@ -595,7 +596,13 @@ describe("inventory preview formatting", () => {
         reasons: ["推荐主视频：文件名是裸番号视频"],
         warnings: [],
         blockers: [],
-        confidence: "high" as const
+        confidence: "high" as const,
+        execution_plan: {
+          ready: true,
+          actions: [{ from_path: "H:/x/IPX-180.mp4", to_path: "H:/AV/IPX-180/IPX-180.mp4", kind: "video" as const, conflict: null }],
+          conflicts: [],
+          notes: []
+        }
       }
     };
 
@@ -603,6 +610,19 @@ describe("inventory preview formatting", () => {
     expect(formatInventoryReviewBucket("needs_review")).toBe("需人工确认");
     expect(formatInventoryConfidence("high")).toBe("高");
     expect(formatInventoryResolutionSummary(work)).toBe("可自动整理 · 置信度 高");
+    expect(formatInventoryExecutionPlanSummary(work.resolution.execution_plan)).toBe("安全计划可执行：1 个动作。");
+    expect(formatInventoryExecutionPlanSummary({
+      ready: false,
+      actions: [],
+      conflicts: ["未配置整理目标目录"],
+      notes: []
+    })).toBe("安全计划需复核：未配置整理目标目录。");
+    expect(formatInventoryExecutionPlanSummary({
+      ready: false,
+      actions: [],
+      conflicts: [],
+      notes: []
+    })).toBe("安全计划不可执行：暂无动作。");
     expect(formatInventoryResourceRole("primary_video")).toBe("主视频");
     expect(formatInventoryResourceRole("duplicate_video")).toBe("疑似重复视频");
     expect(formatInventoryResourceRole("poster")).toBe("封面");
@@ -624,7 +644,13 @@ describe("inventory preview formatting", () => {
         reasons: [],
         warnings: [],
         blockers: [],
-        confidence: "high" as const
+        confidence: "high" as const,
+        execution_plan: {
+          ready: true,
+          actions: [{ from_path: "H:/x/IPX-181.mp4", to_path: "H:/AV/IPX-181/IPX-181.mp4", kind: "video" as const, conflict: null }],
+          conflicts: [],
+          notes: []
+        }
       }
     };
     const reviewWork = {

@@ -402,6 +402,14 @@ export interface InventoryResolution {
   warnings: string[];
   blockers: string[];
   confidence: InventoryConfidence;
+  execution_plan: InventoryExecutionPlan;
+}
+
+export interface InventoryExecutionPlan {
+  ready: boolean;
+  actions: InventoryPreviewAction[];
+  conflicts: string[];
+  notes: string[];
 }
 
 export interface InventoryResourceRole {
