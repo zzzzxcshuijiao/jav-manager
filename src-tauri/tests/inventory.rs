@@ -1,9 +1,23 @@
-use media_manager::inventory::{preview_inventory_roots, InventoryResourceKind, InventoryStatus};
+use media_manager::inventory::{
+    preview_inventory_roots, InventoryResourceKind, InventoryResourceRoleKind,
+    InventoryReviewBucket, InventoryStatus,
+};
 use std::path::{Path, PathBuf};
 
 fn write_file(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, bytes).unwrap();
+}
+
+// Build unique alphabetic file suffixes that avoid accidental normalized code matches.
+fn alphabetic_suffix(mut index: usize) -> String {
+    let mut chars = Vec::new();
+    while index > 0 {
+        index -= 1;
+        chars.push((b'a' + (index % 26) as u8) as char);
+        index /= 26;
+    }
+    chars.into_iter().rev().collect()
 }
 
 #[test]
@@ -113,7 +127,10 @@ fn inventory_preview_preserves_full_summary_when_orphan_details_are_truncated() 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("loose");
     for index in 1..=1001 {
-        write_file(&root.join(format!("note-{index:04}.txt")), b"note");
+        write_file(
+            &root.join(format!("note-{}.txt", alphabetic_suffix(index))),
+            b"note",
+        );
     }
 
     let report = preview_inventory_roots(&[root], None).unwrap();
@@ -446,7 +463,7 @@ fn inventory_preview_marks_duplicate_generated_targets() {
     let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
 
     let work = report
-        .works
+        .asset_candidates
         .iter()
         .find(|work| work.code == "IPX-201")
         .unwrap();
@@ -478,7 +495,7 @@ fn inventory_preview_marks_case_insensitive_duplicate_targets() {
     let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
 
     let work = report
-        .works
+        .asset_candidates
         .iter()
         .find(|work| work.code == "IPX-205")
         .unwrap();
@@ -509,7 +526,7 @@ fn inventory_preview_combines_existing_and_duplicate_target_conflicts() {
     let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
 
     let work = report
-        .works
+        .asset_candidates
         .iter()
         .find(|work| work.code == "IPX-202")
         .unwrap();
@@ -537,6 +554,132 @@ fn inventory_preview_keeps_missing_roots_as_warnings() {
         .warnings
         .iter()
         .any(|warning| warning.contains("扫描根目录不存在")));
+}
+
+#[test]
+fn inventory_resolution_buckets_clean_work_as_auto_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-170.mp4"), b"video");
+    write_file(
+        &root.join("IPX-170.nfo"),
+        br#"<movie><num>IPX-170</num><title>Ready</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.auto_ready, 1);
+    assert_eq!(report.summary.needs_review, 0);
+    assert_eq!(report.summary.blocked, 0);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-170")
+        .unwrap();
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::AutoReady);
+    assert_eq!(work.resolution.recommended, "可自动整理");
+}
+
+#[test]
+fn inventory_resolution_blocks_when_target_path_already_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-171.mp4"), b"video");
+    write_file(
+        &root.join("IPX-171.nfo"),
+        br#"<movie><num>IPX-171</num><title>Existing target</title></movie>"#,
+    );
+    write_file(&archive.join("IPX-171").join("IPX-171.mp4"), b"existing");
+
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
+
+    assert_eq!(report.summary.blocked, 1);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-171")
+        .unwrap();
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::Blocked);
+    assert!(work
+        .resolution
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("目标路径已存在")));
+}
+
+#[test]
+fn inventory_resolution_blocks_code_conflict_from_nfo_num_precedence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-172.mp4"), b"video");
+    write_file(
+        &root.join("IPX-172.nfo"),
+        br#"<movie><num>IPX-173</num><title>Conflicting num</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.blocked, 1);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.statuses.contains(&InventoryStatus::CodeConflict))
+        .unwrap();
+    assert_eq!(work.code, "IPX-173");
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::Blocked);
+    assert!(work
+        .resolution
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("番号证据冲突")));
+}
+
+#[test]
+fn inventory_resolution_keeps_asset_only_group_as_asset_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-174-cover.jpg"), b"cover");
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.asset_candidates, 1);
+    assert_eq!(report.summary.auto_ready, 0);
+    assert_eq!(report.summary.needs_review, 0);
+    assert_eq!(report.summary.blocked, 0);
+    let asset_candidate = report
+        .asset_candidates
+        .iter()
+        .find(|work| work.code == "IPX-174")
+        .unwrap();
+    assert_eq!(
+        asset_candidate.resolution.bucket,
+        InventoryReviewBucket::AssetCandidate
+    );
+}
+
+#[test]
+fn inventory_resolution_marks_same_size_non_primary_video_as_duplicate_role() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    write_file(&root.join("IPX-175.mp4"), b"same-size");
+    write_file(&root.join("IPX-175-copy.mkv"), b"same-size");
+
+    let report = preview_inventory_roots(&[root], None).unwrap();
+
+    assert_eq!(report.summary.needs_review, 1);
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-175")
+        .unwrap();
+    let duplicate_role = work
+        .resource_roles
+        .iter()
+        .find(|role| role.role == InventoryResourceRoleKind::DuplicateVideo)
+        .unwrap();
+    assert!(duplicate_role.needs_review);
+    assert!(duplicate_role.reason.contains("疑似重复视频"));
 }
 
 #[test]

@@ -152,6 +152,9 @@ pub struct InventorySummary {
     pub total_files: usize,
     pub works: usize,
     pub asset_candidates: usize,
+    pub auto_ready: usize,
+    pub needs_review: usize,
+    pub blocked: usize,
     pub ready: usize,
     pub missing_nfo: usize,
     pub missing_video: usize,
@@ -389,7 +392,7 @@ fn build_work_preview(
         .collect();
     actions.sort_by_key(|action| preview_action_sort_key(action, &video_indexes));
     mark_duplicate_action_targets(&mut actions);
-    let (resolution, resource_roles) = build_resolution(&code, &resources, &statuses);
+    let (resolution, resource_roles) = build_resolution(&code, &resources, &statuses, &actions);
 
     InventoryWorkPreview {
         code,
@@ -407,6 +410,7 @@ fn build_resolution(
     code: &str,
     resources: &[InventoryResource],
     statuses: &[InventoryStatus],
+    actions: &[InventoryPreviewAction],
 ) -> (InventoryResolution, Vec<InventoryResourceRole>) {
     let (primary_video, video_reason) = select_primary_video(code, resources);
     let (primary_nfo, nfo_reason) = select_primary_nfo(code, resources, primary_video);
@@ -419,8 +423,8 @@ fn build_resolution(
     }
 
     let warnings = resolution_warnings(primary_video, primary_nfo, statuses);
-    let blockers = Vec::new();
-    let bucket = resolution_bucket(statuses, primary_video, primary_nfo);
+    let blockers = resolution_blockers(statuses, actions);
+    let bucket = resolution_bucket(statuses, primary_video, primary_nfo, &warnings, &blockers);
     let confidence = resolution_confidence(&bucket, primary_video, primary_nfo);
     let recommended = resolution_recommendation(&bucket, primary_video, primary_nfo);
     let roles = build_resource_roles(resources, primary_video, primary_nfo);
@@ -585,7 +589,7 @@ fn select_primary_nfo<'a>(
     (Some(selected), Some(reason))
 }
 
-// Produce the minimal Task 1 warning list without expanding Task 2 blockers.
+// Produce non-blocking warnings for incomplete pair anchors.
 fn resolution_warnings(
     primary_video: Option<&InventoryResource>,
     primary_nfo: Option<&InventoryResource>,
@@ -601,18 +605,57 @@ fn resolution_warnings(
     warnings
 }
 
-// Assign the coarse Task 1 review bucket before later blocker rules are added.
+// Promote hard preview conflicts into blockers before any automatic action can be trusted.
+fn resolution_blockers(
+    statuses: &[InventoryStatus],
+    actions: &[InventoryPreviewAction],
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if statuses.contains(&InventoryStatus::CodeConflict) {
+        blockers.push("番号证据冲突".to_string());
+    }
+    if actions.iter().any(|action| {
+        conflict_tokens(action)
+            .iter()
+            .any(|token| *token == "target_exists")
+    }) {
+        blockers.push("目标路径已存在".to_string());
+    }
+    blockers
+}
+
+// Split compact conflict strings while supporting combined values such as target_exists,target_duplicate.
+fn conflict_tokens(action: &InventoryPreviewAction) -> Vec<&str> {
+    action
+        .conflict
+        .as_deref()
+        .map(|conflict| {
+            conflict
+                .split(',')
+                .filter(|token| !token.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// Assign the review bucket that drives the Stage 7B manual review queues.
 fn resolution_bucket(
     statuses: &[InventoryStatus],
     primary_video: Option<&InventoryResource>,
     primary_nfo: Option<&InventoryResource>,
+    warnings: &[String],
+    blockers: &[String],
 ) -> InventoryReviewBucket {
     if statuses.contains(&InventoryStatus::AssetOnly) {
         return InventoryReviewBucket::AssetCandidate;
     }
+    if !blockers.is_empty() {
+        return InventoryReviewBucket::Blocked;
+    }
     if statuses.contains(&InventoryStatus::Ready)
         && primary_video.is_some()
         && primary_nfo.is_some()
+        && warnings.is_empty()
     {
         return InventoryReviewBucket::AutoReady;
     }
@@ -663,6 +706,7 @@ fn build_resource_roles(
     primary_video: Option<&InventoryResource>,
     primary_nfo: Option<&InventoryResource>,
 ) -> Vec<InventoryResourceRole> {
+    let duplicate_video_paths = duplicate_video_role_paths(resources, primary_video);
     resources
         .iter()
         .map(|resource| {
@@ -675,6 +719,9 @@ fn build_resource_roles(
             let role = match resource.kind {
                 InventoryResourceKind::Video if is_primary_video => {
                     InventoryResourceRoleKind::PrimaryVideo
+                }
+                InventoryResourceKind::Video if duplicate_video_paths.contains(&resource.path) => {
+                    InventoryResourceRoleKind::DuplicateVideo
                 }
                 InventoryResourceKind::Video => InventoryResourceRoleKind::SecondaryVideo,
                 InventoryResourceKind::Nfo if is_primary_nfo => {
@@ -695,7 +742,9 @@ fn build_resource_roles(
             );
             let needs_review = matches!(
                 role,
-                InventoryResourceRoleKind::SecondaryVideo | InventoryResourceRoleKind::SecondaryNfo
+                InventoryResourceRoleKind::SecondaryVideo
+                    | InventoryResourceRoleKind::DuplicateVideo
+                    | InventoryResourceRoleKind::SecondaryNfo
             );
             InventoryResourceRole {
                 path: resource.path.clone(),
@@ -704,6 +753,36 @@ fn build_resource_roles(
                 selected,
                 needs_review,
             }
+        })
+        .collect()
+}
+
+// Find same-size non-primary videos so the UI can separate likely duplicates from ordinary extras.
+fn duplicate_video_role_paths(
+    resources: &[InventoryResource],
+    primary_video: Option<&InventoryResource>,
+) -> BTreeSet<PathBuf> {
+    let mut sizes: BTreeMap<u64, Vec<&InventoryResource>> = BTreeMap::new();
+    for resource in resources
+        .iter()
+        .filter(|resource| resource.kind == InventoryResourceKind::Video && resource.size_bytes > 0)
+    {
+        sizes.entry(resource.size_bytes).or_default().push(resource);
+    }
+
+    let primary_path = primary_video.map(|resource| resource.path.as_path());
+    sizes
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .flat_map(|group| {
+            group
+                .into_iter()
+                .filter(move |resource| {
+                    primary_path
+                        .map(|path| resource.path.as_path() != path)
+                        .unwrap_or(true)
+                })
+                .map(|resource| resource.path.clone())
         })
         .collect()
 }
@@ -844,6 +923,12 @@ fn summarize_works(
     };
 
     for work in works {
+        match work.resolution.bucket {
+            InventoryReviewBucket::AutoReady => summary.auto_ready += 1,
+            InventoryReviewBucket::NeedsReview => summary.needs_review += 1,
+            InventoryReviewBucket::Blocked => summary.blocked += 1,
+            InventoryReviewBucket::AssetCandidate => {}
+        }
         if work.statuses.contains(&InventoryStatus::Ready) {
             summary.ready += 1;
         }
