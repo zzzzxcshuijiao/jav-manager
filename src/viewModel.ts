@@ -551,6 +551,9 @@ export function formatInventoryExportSummary(result: InventoryExportResult): str
 
 /** Format the inventory execution report for status-line feedback. */
 export function formatInventoryExecutionSummary(report: InventoryExecutionReport): string {
+  if (report.mode === "move") {
+    return `集中迁移完成：作品 ${report.executed_works}/${report.requested_works}，迁移 ${report.moved_actions}/${report.planned_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，同盘 ${report.same_volume_actions}，跨盘 ${report.cross_volume_actions}，迁移 ${formatBytes(report.bytes_moved)}。`;
+  }
   if (report.mode === "low_space") {
     return `低空间整理完成：作品 ${report.executed_works}/${report.requested_works}，硬链接 ${report.linked_actions}，复制 ${report.copied_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，链接视频 ${formatBytes(report.bytes_linked)}，复制小文件 ${formatBytes(report.bytes_copied)}。`;
   }

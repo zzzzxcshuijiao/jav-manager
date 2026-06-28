@@ -110,10 +110,16 @@ function makeInventoryExecutionReport(): InventoryExecutionReport {
     planned_actions: 1,
     linked_actions: 1,
     copied_actions: 0,
+    moved_actions: 0,
     failed_actions: 0,
     rolled_back_actions: 0,
+    rollback_failed_actions: 0,
+    same_volume_actions: 0,
+    cross_volume_actions: 0,
+    space_blocked_actions: 0,
     bytes_linked: 5,
     bytes_copied: 0,
+    bytes_moved: 0,
     logs: [
       {
         code: "IPX-201",

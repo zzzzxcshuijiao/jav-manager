@@ -694,10 +694,16 @@ describe("inventory preview formatting", () => {
       planned_actions: 12,
       linked_actions: 0,
       copied_actions: 11,
+      moved_actions: 0,
       failed_actions: 1,
       rolled_back_actions: 3,
+      rollback_failed_actions: 0,
+      same_volume_actions: 0,
+      cross_volume_actions: 0,
+      space_blocked_actions: 0,
       bytes_linked: 0,
       bytes_copied: 2048,
+      bytes_moved: 0,
       logs: []
     })).toBe("复制整理完成：作品 3/4，动作 11/12，失败 1，回滚 3，复制 2.00 KB。");
     expect(formatInventoryExecutionSummary({
@@ -710,12 +716,40 @@ describe("inventory preview formatting", () => {
       planned_actions: 12,
       linked_actions: 3,
       copied_actions: 8,
+      moved_actions: 0,
       failed_actions: 1,
       rolled_back_actions: 2,
+      rollback_failed_actions: 0,
+      same_volume_actions: 0,
+      cross_volume_actions: 0,
+      space_blocked_actions: 0,
       bytes_linked: 9_000_000_000,
       bytes_copied: 2048,
+      bytes_moved: 0,
       logs: []
     })).toBe("低空间整理完成：作品 3/4，硬链接 3，复制 8，失败 1，回滚 2，链接视频 8.38 GB，复制小文件 2.00 KB。");
+    expect(formatInventoryExecutionSummary({
+      mode: "move",
+      started_at: "2026-06-28T12:00:00Z",
+      finished_at: "2026-06-28T12:01:00Z",
+      requested_works: 4,
+      executed_works: 3,
+      skipped_works: 1,
+      planned_actions: 12,
+      linked_actions: 0,
+      copied_actions: 0,
+      moved_actions: 10,
+      failed_actions: 1,
+      rolled_back_actions: 2,
+      rollback_failed_actions: 0,
+      same_volume_actions: 7,
+      cross_volume_actions: 3,
+      space_blocked_actions: 0,
+      bytes_linked: 0,
+      bytes_copied: 0,
+      bytes_moved: 9_000_000_000,
+      logs: []
+    })).toBe("集中迁移完成：作品 3/4，迁移 10/12，失败 1，回滚 2，同盘 7，跨盘 3，迁移 8.38 GB。");
   });
 });
 
