@@ -32,6 +32,7 @@ import {
   filterInventoryWorks,
   formatInventoryConfidence,
   formatInventoryExecutionPlanSummary,
+  formatInventoryExecutionSummary,
   formatInventoryExportSummary,
   formatInventoryResourceRole,
   formatInventoryReviewBucket,
@@ -680,6 +681,41 @@ describe("inventory preview formatting", () => {
       asset_candidates: 3,
       orphans: 2
     })).toBe("已导出盘点结果：C:/Users/A/AppData/Roaming/local.media-manager/inventory-reports/inventory-20260628-101010.json（作品 10，素材候选 3，孤儿 2）。");
+  });
+
+  it("formats inventory execution summaries", () => {
+    expect(formatInventoryExecutionSummary({
+      mode: "copy",
+      started_at: "2026-06-28T10:00:00Z",
+      finished_at: "2026-06-28T10:01:00Z",
+      requested_works: 4,
+      executed_works: 3,
+      skipped_works: 2,
+      planned_actions: 12,
+      linked_actions: 0,
+      copied_actions: 11,
+      failed_actions: 1,
+      rolled_back_actions: 3,
+      bytes_linked: 0,
+      bytes_copied: 2048,
+      logs: []
+    })).toBe("复制整理完成：作品 3/4，动作 11/12，失败 1，回滚 3，复制 2.00 KB。");
+    expect(formatInventoryExecutionSummary({
+      mode: "low_space",
+      started_at: "2026-06-28T10:00:00Z",
+      finished_at: "2026-06-28T10:01:00Z",
+      requested_works: 4,
+      executed_works: 3,
+      skipped_works: 2,
+      planned_actions: 12,
+      linked_actions: 3,
+      copied_actions: 8,
+      failed_actions: 1,
+      rolled_back_actions: 2,
+      bytes_linked: 9_000_000_000,
+      bytes_copied: 2048,
+      logs: []
+    })).toBe("低空间整理完成：作品 3/4，硬链接 3，复制 8，失败 1，回滚 2，链接视频 8.38 GB，复制小文件 2.00 KB。");
   });
 });
 

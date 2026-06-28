@@ -466,6 +466,36 @@ export interface InventoryExportResult {
   orphans: number;
 }
 
+export type InventoryExecutionMode = "copy" | "low_space";
+export type InventoryExecutionActionStatus = "linked" | "copied" | "failed" | "rolled_back";
+
+export interface InventoryExecutionActionLog {
+  code: string;
+  kind: InventoryResourceKind;
+  from_path: string;
+  to_path: string;
+  status: InventoryExecutionActionStatus;
+  message?: string | null;
+  bytes: number;
+}
+
+export interface InventoryExecutionReport {
+  mode: InventoryExecutionMode;
+  started_at: string;
+  finished_at: string;
+  requested_works: number;
+  executed_works: number;
+  skipped_works: number;
+  planned_actions: number;
+  linked_actions: number;
+  copied_actions: number;
+  failed_actions: number;
+  rolled_back_actions: number;
+  bytes_linked: number;
+  bytes_copied: number;
+  logs: InventoryExecutionActionLog[];
+}
+
 export interface UnifiedMigrationWorkPlan {
   code: string;
   nfo_path: string | null;
@@ -594,6 +624,9 @@ export const api = {
   },
   exportInventoryReport(report: InventoryPreviewReport) {
     return command<InventoryExportResult>("export_inventory_report_command", { report });
+  },
+  executeInventoryPlan(report: InventoryPreviewReport, selectedCodes: string[] = [], mode: InventoryExecutionMode = "copy") {
+    return command<InventoryExecutionReport>("execute_inventory_plan", { report, selectedCodes, mode });
   },
   configureMetadataProviderEnabled(enabled: boolean) {
     return command<boolean>("configure_metadata_provider_enabled", { enabled });

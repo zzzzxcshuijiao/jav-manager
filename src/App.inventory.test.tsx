@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { api } from "./api";
-import type { InventoryPreviewReport } from "./api";
+import type { InventoryExecutionReport, InventoryPreviewReport } from "./api";
 
 /** Creates a deferred promise so tests can observe App loading state before it settles. */
 function deferred<T>() {
@@ -95,6 +95,36 @@ function makeInventoryReport(): InventoryPreviewReport {
     orphans: [],
     warnings: [],
     truncated: false
+  };
+}
+
+/** Minimal Stage 7D execution report used to verify low-space execution UI wiring. */
+function makeInventoryExecutionReport(): InventoryExecutionReport {
+  return {
+    mode: "low_space",
+    started_at: "2026-06-28T12:01:00Z",
+    finished_at: "2026-06-28T12:02:00Z",
+    requested_works: 1,
+    executed_works: 1,
+    skipped_works: 0,
+    planned_actions: 1,
+    linked_actions: 1,
+    copied_actions: 0,
+    failed_actions: 0,
+    rolled_back_actions: 0,
+    bytes_linked: 5,
+    bytes_copied: 0,
+    logs: [
+      {
+        code: "IPX-201",
+        kind: "video",
+        from_path: "D:\\inventory-inbox\\IPX-201.mp4",
+        to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
+        status: "linked",
+        message: null,
+        bytes: 5
+      }
+    ]
   };
 }
 
@@ -221,5 +251,70 @@ describe("inventory page wiring", () => {
     expect(document.body.textContent).toContain("安全执行计划");
     expect(document.body.textContent).toContain("安全计划可执行：1 个动作。");
     expect(document.body.textContent).toContain("候选动作预览");
+  });
+
+  it("executes the current safe inventory plan with low-space loading feedback", async () => {
+    const report = makeInventoryReport();
+    const executionReport = makeInventoryExecutionReport();
+    vi.spyOn(api, "previewInventory").mockResolvedValue(report);
+    const pendingExecution = deferred<InventoryExecutionReport>();
+    const executeSpy = vi.spyOn(api, "executeInventoryPlan").mockReturnValue(pendingExecution.promise);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("盘点").click();
+    });
+
+    const rootsField = document.querySelector(".inventory-roots-field textarea") as HTMLTextAreaElement;
+    const targetField = document.querySelector(".inventory-roots-field input") as HTMLInputElement;
+    await act(async () => {
+      setTextFieldValue(rootsField, "D:\\inventory-inbox");
+      setTextFieldValue(targetField, "D:\\inventory-archive");
+      buttonContaining("开始盘点").click();
+    });
+
+    await act(async () => {
+      buttonContaining("低空间整理").click();
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(report, [], "low_space");
+    expect(buttonContaining("整理中").disabled).toBe(true);
+
+    await act(async () => {
+      pendingExecution.resolve(executionReport);
+      await pendingExecution.promise;
+    });
+
+    expect(document.body.textContent).toContain("低空间整理完成：作品 1/1，硬链接 1，复制 0，失败 0，回滚 0");
+    expect(document.body.textContent).toContain("已硬链接");
+    expect(document.body.textContent).toContain("IPX-201");
+  });
+
+  it("blocks copy execution when the inventory report details are truncated", async () => {
+    const report = makeInventoryReport();
+    report.truncated = true;
+    report.summary.works = 1001;
+    vi.spyOn(api, "previewInventory").mockResolvedValue(report);
+
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("盘点").click();
+    });
+
+    const rootsField = document.querySelector(".inventory-roots-field textarea") as HTMLTextAreaElement;
+    const targetField = document.querySelector(".inventory-roots-field input") as HTMLInputElement;
+    await act(async () => {
+      setTextFieldValue(rootsField, "D:\\inventory-inbox");
+      setTextFieldValue(targetField, "D:\\inventory-archive");
+      buttonContaining("开始盘点").click();
+    });
+
+    expect(buttonContaining("低空间整理").disabled).toBe(true);
+    expect(document.body.textContent).toContain("报告明细已截断，不能低空间整理全部作品");
   });
 });

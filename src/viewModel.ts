@@ -15,6 +15,7 @@ import type {
   IngestItem,
   IngestItemFilters,
   InventoryConfidence,
+  InventoryExecutionReport,
   InventoryExecutionPlan,
   InventoryExportResult,
   InventoryPreviewAction,
@@ -546,6 +547,14 @@ export function filterInventoryWorks(works: InventoryWorkPreview[], filter: Inve
 /** Format inventory export output for the global status line. */
 export function formatInventoryExportSummary(result: InventoryExportResult): string {
   return `已导出盘点结果：${result.path}（作品 ${result.works}，素材候选 ${result.asset_candidates}，孤儿 ${result.orphans}）。`;
+}
+
+/** Format the inventory execution report for status-line feedback. */
+export function formatInventoryExecutionSummary(report: InventoryExecutionReport): string {
+  if (report.mode === "low_space") {
+    return `低空间整理完成：作品 ${report.executed_works}/${report.requested_works}，硬链接 ${report.linked_actions}，复制 ${report.copied_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，链接视频 ${formatBytes(report.bytes_linked)}，复制小文件 ${formatBytes(report.bytes_copied)}。`;
+  }
+  return `复制整理完成：作品 ${report.executed_works}/${report.requested_works}，动作 ${report.copied_actions}/${report.planned_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，复制 ${formatBytes(report.bytes_copied)}。`;
 }
 
 /** Return orphan resources that should remain visible for the current inventory status filter. */

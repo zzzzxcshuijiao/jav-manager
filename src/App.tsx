@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
+  Copy,
   Database,
   Film,
   FolderInput,
@@ -38,6 +39,7 @@ import type {
   IngestDecision,
   IngestItem,
   IngestJobSummary,
+  InventoryExecutionReport,
   InventoryPreviewReport,
   InventoryResource,
   InventoryResourceKind,
@@ -94,6 +96,7 @@ import {
   formatInventoryActionTarget,
   filterInventoryWorks,
   formatInventoryExecutionPlanSummary,
+  formatInventoryExecutionSummary,
   formatInventoryExportSummary,
   formatInventoryResourceRole,
   formatInventoryResolutionSummary,
@@ -294,6 +297,8 @@ export function App() {
   const [inventoryBusy, setInventoryBusy] = useState(false);
   const [inventoryExportBusy, setInventoryExportBusy] = useState(false);
   const [inventoryReport, setInventoryReport] = useState<InventoryPreviewReport | null>(null);
+  const [inventoryExecuteBusy, setInventoryExecuteBusy] = useState(false);
+  const [inventoryExecutionReport, setInventoryExecutionReport] = useState<InventoryExecutionReport | null>(null);
   const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryFilter>("all");
   const [selectedInventoryCode, setSelectedInventoryCode] = useState<string | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
@@ -399,6 +404,10 @@ export function App() {
   const inventoryListItemCount = filteredInventoryWorks.length + visibleInventoryOrphans.length;
   const selectedInventoryWork =
     filteredInventoryWorks.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
+  const inventoryExecutableCount =
+    inventoryReport?.works.filter((work) => work.resolution.bucket === "auto_ready" && work.resolution.execution_plan.ready).length ?? 0;
+  const inventoryExecutionBlockedByTruncation =
+    Boolean(inventoryReport && (inventoryReport.truncated || inventoryReport.summary.works > inventoryReport.works.length));
   const selectedInventoryRoleByPath = useMemo(
     () => new Map(selectedInventoryWork?.resource_roles.map((role) => [role.path, role]) ?? []),
     [selectedInventoryWork]
@@ -900,6 +909,7 @@ export function App() {
     const startedAt = Date.now();
     setInventoryBusy(true);
     setInventoryReport(null);
+    setInventoryExecutionReport(null);
     setInventoryStatusFilter("all");
     setSelectedInventoryCode(null);
     setStatus(`正在扫描 ${roots.length} 个存量根目录...`);
@@ -912,6 +922,7 @@ export function App() {
       setStatus(`${formatInventorySummary(report)} 扫描 ${roots.length} 个根目录，用时 ${elapsedSeconds} 秒。`);
     } catch (error) {
       setInventoryReport(null);
+      setInventoryExecutionReport(null);
       setSelectedInventoryCode(null);
       setStatus(`存量整理预览失败：${String(error)}`);
     } finally {
@@ -933,6 +944,39 @@ export function App() {
       setStatus(`导出盘点结果失败：${String(error)}`);
     } finally {
       setInventoryExportBusy(false);
+    }
+  }
+
+  /** 低空间执行当前盘点报告中的安全执行计划，视频硬链接，小资源复制。 */
+  async function executeInventoryPreview() {
+    if (!inventoryReport || inventoryExecuteBusy) {
+      return;
+    }
+    if (inventoryExecutableCount === 0) {
+      setStatus("当前盘点结果没有可低空间整理的安全计划。");
+      return;
+    }
+    if (inventoryExecutionBlockedByTruncation) {
+      setStatus("报告明细已截断，不能低空间整理全部作品；请缩小入口目录后重新盘点。");
+      return;
+    }
+    const targetRoot = inventoryReport.archive_root ?? inventoryArchiveRoot.trim();
+    const confirmed = window.confirm(`将低空间整理 ${inventoryExecutableCount} 部作品到 ${targetRoot || "未设置目标"}。视频会创建硬链接，不复制大视频；NFO、图片和 GIF 等小资源会复制；源文件不会删除。是否继续？`);
+    if (!confirmed) {
+      setStatus("已取消低空间整理。");
+      return;
+    }
+    setInventoryExecuteBusy(true);
+    setInventoryExecutionReport(null);
+    setStatus(`正在低空间整理 ${inventoryExecutableCount} 部作品...`);
+    try {
+      const result = await api.executeInventoryPlan(inventoryReport, [], "low_space");
+      setInventoryExecutionReport(result);
+      setStatus(`${formatInventoryExecutionSummary(result)} 建议重新盘点验证目标状态。`);
+    } catch (error) {
+      setStatus(`低空间整理失败：${String(error)}`);
+    } finally {
+      setInventoryExecuteBusy(false);
     }
   }
 
@@ -1761,7 +1805,7 @@ export function App() {
                   rows={4}
                   value={inventoryRootsText}
                   onChange={(event) => setInventoryRootsText(event.target.value)}
-                  disabled={inventoryBusy}
+                  disabled={inventoryBusy || inventoryExecuteBusy}
                   placeholder={"H:\\video\nH:\\AV"}
                 />
               </label>
@@ -1770,30 +1814,35 @@ export function App() {
                 <input
                   value={inventoryArchiveRoot}
                   onChange={(event) => setInventoryArchiveRoot(event.target.value)}
-                  disabled={inventoryBusy}
+                  disabled={inventoryBusy || inventoryExecuteBusy}
                   placeholder={"D:\\mm-7a-test\\archive"}
                 />
               </label>
               <div className="daemon-actions">
-                <button type="button" onClick={pickInventoryRoots} disabled={inventoryBusy || !hasBackend}>
+                <button type="button" onClick={pickInventoryRoots} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
                   <FolderOpen size={16} /> 选择目录
                 </button>
-                <button type="button" onClick={pickInventoryArchiveRoot} disabled={inventoryBusy || !hasBackend}>
+                <button type="button" onClick={pickInventoryArchiveRoot} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
                   <FolderInput size={16} /> 选择目标
                 </button>
-                <button className="primary" type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || !hasBackend}>
+                <button className="primary" type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
                   <Search size={16} /> {inventoryBusy ? "盘点中" : "开始盘点"}
                 </button>
-                <button type="button" onClick={exportInventoryPreview} disabled={!inventoryReport || inventoryBusy || inventoryExportBusy || !hasBackend}>
+                <button type="button" onClick={exportInventoryPreview} disabled={!inventoryReport || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || !hasBackend}>
                   <Archive size={16} /> {inventoryExportBusy ? "导出中" : "导出 JSON"}
+                </button>
+                <button type="button" onClick={executeInventoryPreview} disabled={!inventoryReport || inventoryExecutableCount === 0 || inventoryExecutionBlockedByTruncation || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || !hasBackend}>
+                  <Copy size={16} /> {inventoryExecuteBusy ? "整理中" : "低空间整理"}
                 </button>
               </div>
               <span className="inventory-status-line">
                 {inventoryBusy
                   ? "正在递归盘点资源..."
-                  : hasBackend
-                    ? "读取视频、NFO、图片和 GIF，生成整理预览。"
-                    : "桌面后端不可用，需在 Tauri 环境中盘点真实目录。"}
+                  : inventoryExecuteBusy
+                    ? "正在低空间整理安全执行计划..."
+                    : hasBackend
+                      ? "读取视频、NFO、图片和 GIF，生成整理预览。"
+                      : "桌面后端不可用，需在 Tauri 环境中盘点真实目录。"}
               </span>
 
               {inventoryReport ? (
@@ -1850,6 +1899,27 @@ export function App() {
                     <strong>{inventoryReport.archive_root ?? "未设置整理目标"}</strong>
                   </div>
 
+                  {inventoryExecutionReport ? (
+                    <div className="inventory-execution-report">
+                      <div className="inventory-section-head">
+                        <strong>最近低空间整理</strong>
+                        <span>{formatInventoryExecutionSummary(inventoryExecutionReport)}</span>
+                      </div>
+                      <div className="inventory-execution-log">
+                        {inventoryExecutionReport.logs.slice(0, 5).map((log, index) => (
+                          <div className={`inventory-execution-log-row ${log.status}`} key={`${log.to_path}-${index}`}>
+                            <strong>{log.code || "回滚清理"}</strong>
+                            <span>
+                              {log.status === "linked" ? "已硬链接" : log.status === "copied" ? "已复制" : log.status === "rolled_back" ? "已回滚" : "失败"} · {log.kind} · {formatBytes(log.bytes)}
+                            </span>
+                            <small>{log.to_path}</small>
+                            {log.message ? <small>{log.message}</small> : null}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="inventory-filter">
                     {inventoryFilters.map((filter) => (
                       <button
@@ -1874,6 +1944,12 @@ export function App() {
                       {inventoryReport.warnings.length > 5 ? (
                         <span>另有 {inventoryReport.warnings.length - 5} 条 warning</span>
                       ) : null}
+                    </div>
+                  ) : null}
+
+                  {inventoryExecutionBlockedByTruncation ? (
+                    <div className="inventory-warnings">
+                      <span>报告明细已截断，不能低空间整理全部作品；请缩小入口目录后重新盘点。</span>
                     </div>
                   ) : null}
 

@@ -804,6 +804,43 @@ h2 {
   gap: 4px;
 }
 
+.inventory-execution-report {
+  border: 1px solid #cfdbe4;
+  border-radius: 6px;
+  background: #f8fbff;
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.inventory-execution-log {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.inventory-execution-log-row {
+  border: 1px solid #d8e1e7;
+  border-radius: 6px;
+  background: #ffffff;
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  overflow-wrap: anywhere;
+}
+
+.inventory-execution-log-row.linked,
+.inventory-execution-log-row.copied {
+  border-color: rgba(22, 101, 52, 0.28);
+  background: #f6fff8;
+}
+
+.inventory-execution-log-row.failed,
+.inventory-execution-log-row.rolled_back {
+  border-color: rgba(190, 18, 60, 0.35);
+  background: #fff5f7;
+}
+
 .inventory-filter {
   display: flex;
   gap: 8px;
@@ -919,6 +956,7 @@ h2 {
 .inventory-target strong,
 .inventory-resource-row strong,
 .inventory-orphan-row strong,
+.inventory-execution-log-row strong,
 .inventory-action-row strong {
   color: #25313c;
   overflow-wrap: anywhere;
@@ -932,6 +970,8 @@ h2 {
 .inventory-resource-row small,
 .inventory-orphan-row span,
 .inventory-orphan-row small,
+.inventory-execution-log-row span,
+.inventory-execution-log-row small,
 .inventory-action-row span,
 .inventory-action-row small {
   color: #61717d;

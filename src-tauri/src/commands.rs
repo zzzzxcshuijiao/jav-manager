@@ -27,6 +27,10 @@ use crate::domain::{
 use crate::identifier::normalize_code;
 use crate::ingest::IngestEngine;
 use crate::inventory::{preview_inventory_roots, InventoryPreviewReport};
+use crate::inventory_execution::{
+    execute_inventory_report, InventoryExecutionMode, InventoryExecutionReport,
+    InventoryExecutionRequest,
+};
 use crate::provider::{DisabledProvider, ExampleProvider};
 use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
@@ -1025,6 +1029,25 @@ pub fn export_inventory_report_command(
     Ok(CommandResult { data: result })
 }
 
+/// Execute the safe inventory plan from a preview report in copy-only mode.
+#[tauri::command]
+pub async fn execute_inventory_plan(
+    report: InventoryPreviewReport,
+    selected_codes: Vec<String>,
+    mode: Option<InventoryExecutionMode>,
+) -> Result<CommandResult<InventoryExecutionReport>, String> {
+    let request = InventoryExecutionRequest {
+        mode: mode.unwrap_or(InventoryExecutionMode::Copy),
+        selected_codes,
+    };
+    let result =
+        tauri::async_runtime::spawn_blocking(move || execute_inventory_report(&report, &request))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: result })
+}
+
 #[tauri::command]
 pub fn preview_archive_plan(
     item_ids: Vec<i64>,
@@ -1956,6 +1979,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             list_work_actors,
             preview_inventory,
             export_inventory_report_command,
+            execute_inventory_plan,
             preview_archive_plan,
             execute_archive_plan,
             list_archive_action_logs,

@@ -55,6 +55,12 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 7B.1（盘点执行计划安全化）已实现并验证。** 当前工作分支：`codex/stage7b1-execution-plan`。
 阶段 7B.1 修正真实盘点 JSON 暴露出的关键边界：`InventoryWorkPreview.actions` 是候选动作预览，可能包含多 NFO、多 poster、多截图等 `target_duplicate` 诊断信息，不能直接给 7C 执行。每个作品的 `resolution` 新增 `execution_plan`，其中 `actions` 只包含主视频、主 NFO，以及每个目标路径唯一的已选择资源动作；`ready` / `conflicts` / `notes` 用于判断是否能进入自动执行。`auto_ready` 现在以 `execution_plan.ready == true` 为准；多 NFO / 多 poster 可通过安全计划去重，多视频/疑似重复视频仍进入复核，目标已存在/番号冲突/NFO 解析失败进入阻断。前端详情页新增“安全执行计划”，原始动作区改名为“候选动作预览”。阶段 7B.1 仍然只读：不写 SQLite inventory task、不创建目标目录、不移动/复制/删除媒体/NFO/图片。
 
+**阶段 7C（存量复制整理执行）已实现并验证。** 当前工作分支：`codex/stage7c-inventory-execution`。
+阶段 7C 将 7B.1 的安全执行计划落地为真实文件复制，但仍是保守的 copy-only：只复制 `resolution.execution_plan.actions` 到整理目标目录，不移动、不删除源文件，不覆盖已存在目标。后端新增 `inventory_execution` core 和 `execute_inventory_plan` command；执行前会拒绝非 auto-ready、截断 full report、缺源文件、目标已存在、批内重复目标、动作冲突、目标路径越界，以及 Windows junction / Unix symlink 指向 archive root 外的目标父目录。复制使用 create-new 临时文件、SHA-256 校验和 no-clobber 落盘；失败回滚前会验证 bytes + SHA-256，避免误删外部替换文件。前端盘点页新增“复制整理”按钮、确认弹窗、loading/disabled、状态摘要和最近执行日志；截断报告会禁用复制并提示缩小入口目录后重新盘点。阶段 7C 不写 SQLite inventory task，不执行人工复核项，不做移动/删除源文件。
+
+**阶段 7D（低空间存量整理执行）已实现并验证。** 当前工作分支：`codex/stage7d-low-space-execution`。
+阶段 7D 把 7C 的默认真实执行入口改成适合大视频库的低空间模式：前端“复制整理”改为“低空间整理”，显式调用 `low_space`；视频动作不复制内容，而是在同一文件系统内对源视频创建硬链接；NFO、poster、fanart、thumb、screenshot、GIF、image、other 等小资源继续走 7C 的临时文件 + no-clobber 复制流程。执行报告新增 `linked_actions` / `bytes_linked` 与 `linked` 日志状态，摘要会区分“硬链接视频”和“复制小文件”。硬链接失败不会 fallback 成复制视频，避免真实媒体库意外占满磁盘；源文件仍不删除、不移动，不写 SQLite，不执行人工复核项。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`
@@ -75,6 +81,14 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 - `npm run build`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage2_smoke -j 1`
 - `cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 1`
+
+阶段 7D 最终额外通过：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory_execution -j 1`（8 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（245 tests）
+- `npm test`（64 tests）
+- `npx tsc --noEmit`
+- `npm run build`
 
 阶段 7A 最终 reviewer follow-up 之后额外通过：
 
@@ -111,6 +125,16 @@ orphan 明细上限 follow-up 之后额外通过：
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（238 tests）
 - `npm test -- src/viewModel.test.ts src/App.inventory.test.tsx`（52 tests）
 - `npm test`（61 tests）
+- `npx tsc --noEmit`
+- `npm run build`
+
+阶段 7C 通过：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory_execution -j 1`（7 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`（28 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（245 tests）
+- `npm test -- src/viewModel.test.ts src/App.inventory.test.tsx`（55 tests）
+- `npm test`（64 tests）
 - `npx tsc --noEmit`
 - `npm run build`
 
@@ -347,6 +371,30 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 新增/更新测试覆盖真实反馈场景：多 NFO + 多 poster 候选重复、安全计划去重、多视频复核、目标已存在阻断、App 详情展示。
 - 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。历史 `resource_pool.rs` warning 仍存在。
 
+## 阶段 7C 交付物
+
+- 新增 `src-tauri/src/inventory_execution.rs`：copy-only `execute_inventory_report`，DTO 包含 `InventoryExecutionRequest` / `InventoryExecutionReport` / `InventoryExecutionActionLog`。
+- 执行器只消费 `resolution.execution_plan.actions`，并有 raw candidate 污染回归测试；`InventoryWorkPreview.actions` 仍只是候选动作预览。
+- 全量执行只处理 auto-ready 作品；显式选择非 auto-ready 会被拒绝；截断 report 不能执行全部作品。
+- 安全预检会拒绝源缺失、目标已存在、动作冲突、批内重复目标、目标路径越界，以及 Windows junction / Unix symlink 指向 archive root 外。
+- 复制使用 create-new 临时文件、SHA-256 校验、no-clobber 落盘；失败回滚只删除 bytes + SHA-256 仍匹配的本轮目标。
+- `src-tauri/src/commands.rs` 新增并注册 `execute_inventory_plan`，通过 `spawn_blocking` 执行真实复制。
+- `src/api.ts` / `src/viewModel.ts` 新增执行 DTO/API 和 `formatInventoryExecutionSummary`。
+- `src/App.tsx` 的“一键盘点”新增“复制整理”按钮、确认弹窗、执行中 disabled/loading、完成状态和最近执行日志；截断报告会禁用复制整理。
+- 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。历史 `resource_pool.rs` warning 仍存在。
+
+## 阶段 7D 交付物
+
+- `InventoryExecutionMode` 新增 `low_space`，保留 `copy` 兼容旧调用。
+- `InventoryExecutionActionStatus` 新增 `linked`；`InventoryExecutionReport` 新增 `linked_actions` / `bytes_linked`。
+- `low_space` 模式下 `InventoryResourceKind::Video` 使用 `fs::hard_link(source, target)` 创建目标硬链接，不调用临时复制流程；硬链接失败会返回“视频硬链接失败”，不会降级为复制视频。
+- 非视频资源仍使用 7C 的 create-new 临时文件、字节数校验、SHA-256 和 no-clobber 落盘。
+- 失败回滚会倒序删除本轮创建的目标；复制目标继续按 bytes + SHA-256 校验，硬链接目标只删除目标路径本身，不触碰源路径。
+- 新增后端回归：`inventory_low_space_execution_hardlinks_video_and_copies_small_assets`，证明修改源视频会同步反映到目标硬链接，而修改源 NFO 不会影响已复制目标。
+- 前端类型支持 `low_space` / `linked`，盘点页按钮改为“低空间整理”，确认框说明“视频硬链接，小资源复制，源文件不删除”。
+- 执行摘要显示硬链接数量、复制数量、链接视频字节数和复制小文件字节数；最近执行日志显示“已硬链接”。
+- 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。历史 `resource_pool.rs` warning 仍存在。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -369,17 +417,19 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点测阶段 7B.1 的“配对复核预览 + 安全执行计划”：
+如果先做实际环境验证，重点测阶段 7D 的“盘点预览 + 低空间整理”：
 
 1. 用户在自己的交互桌面终端运行 `npm run dev`，用浏览器打开 `http://localhost:1420`；Codex 不启动 WebView2/Tauri GUI。
 2. 设置页 → 自动管线 → 可先跑“一键自检”确认基础链路。
 3. 在“一键盘点”里每行填一个真实存量根目录，例如下载目录、NFO 输出目录、图片目录。
-4. 填写“整理目标目录”，这是本次预览使用的目标根目录，不会创建目录或移动文件。
+4. 填写“整理目标目录”，这是低空间整理的目标根目录；正式测试前建议先用同一盘符下的空目录或测试目录。
 5. 点击“开始盘点”；期望只生成汇总、复核分桶、作品列表、资源证据、配对建议、安全执行计划、候选动作预览、warnings 和目标路径预览，不移动、不复制、不删除任何文件。
 6. 重点看“可自动整理 / 需人工确认 / 阻断 / 素材候选 / 孤儿资源”筛选是否符合真实目录情况，并打开作品详情检查主视频、主 NFO、资源角色、安全执行计划、候选动作重复和阻断原因。
-7. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。
+7. 如果 `可自动整理` 大于 0 且报告未截断，可点击“低空间整理”；确认框会提示视频创建硬链接，小资源复制，源文件不删除。期望源视频仍在原位置，目标目录出现按番号整理后的硬链接视频和复制的小资源，并显示最近低空间整理摘要。
+8. 整理后重新点击“开始盘点”验证目标状态；如果目标已存在，后续报告应把对应目标冲突识别出来。
+9. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。
 
-如果继续做 Codex 可编码工作，下一阶段建议是 **7C：真实整理执行**。范围应包括二次确认、只消费 `resolution.execution_plan.actions` 的移动/复制策略、冲突确认、执行日志、失败恢复/回滚、可重试队列，以及真实执行前的最终预览。7C 不应直接消费 `InventoryWorkPreview.actions`。7D 再做整理后的浏览库体验。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7C 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，下一阶段建议是 **7E：低空间整理后的闭环校验与入库同步**。范围可以包括：目标目录回读校验、硬链接/复制结果的可导出执行明细、SQLite 库入库同步、人工复核项执行、移动/删除源文件的二次确认策略、可重试队列，以及整理后的浏览库体验。7E 仍不应直接消费 `InventoryWorkPreview.actions`；必须继续以 `resolution.execution_plan.actions` 或人工确认后的新执行计划为准。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7E 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
