@@ -29,6 +29,12 @@ import {
   formatExceptionKind,
   formatExceptionStatus,
   formatFileVersionSummary,
+  filterInventoryWorks,
+  formatInventoryConfidence,
+  formatInventoryExportSummary,
+  formatInventoryResourceRole,
+  formatInventoryReviewBucket,
+  formatInventoryResolutionSummary,
   formatHoldingReason,
   formatInventoryActionTarget,
   formatInventoryStatus,
@@ -57,7 +63,8 @@ import {
   libraryCardSubtitle,
   libraryCardTitle,
   formatRuntime,
-  partitionWorksByKind
+  partitionWorksByKind,
+  type InventoryFilter
 } from "./viewModel";
 
 import type { Work } from "./api";
@@ -493,6 +500,9 @@ describe("inventory preview formatting", () => {
         total_files: 10,
         works: 3,
         asset_candidates: 2,
+        auto_ready: 1,
+        needs_review: 1,
+        blocked: 1,
         ready: 1,
         missing_nfo: 1,
         missing_video: 1,
@@ -512,9 +522,9 @@ describe("inventory preview formatting", () => {
     expect(formatInventoryStatus("ready")).toBe("可整理");
     expect(formatInventoryStatus("missing_nfo")).toBe("缺 NFO");
     expect(formatInventoryStatus("asset_only")).toBe("素材候选");
-    expect(formatInventorySummary(report)).toBe("识别 3 部作品，素材候选 2 组：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
+    expect(formatInventorySummary(report)).toBe("识别 3 部作品，素材候选 2 组：可自动整理 1，需人工确认 1，阻断 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。");
     expect(formatInventorySummary({ ...report, truncated: true })).toBe(
-      "识别 3 部作品，素材候选 2 组：可整理 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。 结果过多，作品、素材候选和孤儿资源明细各最多展示 1000 项。"
+      "识别 3 部作品，素材候选 2 组：可自动整理 1，需人工确认 1，阻断 1，缺 NFO 1，缺视频 1，冲突 1，孤儿 2。 结果过多，作品、素材候选和孤儿资源明细各最多展示 1000 项。"
     );
   });
 
@@ -545,6 +555,9 @@ describe("inventory preview formatting", () => {
         total_files: 1,
         works: 0,
         asset_candidates: 0,
+        auto_ready: 0,
+        needs_review: 0,
+        blocked: 0,
         ready: 0,
         missing_nfo: 0,
         missing_video: 0,
@@ -563,7 +576,84 @@ describe("inventory preview formatting", () => {
 
     expect(inventoryOrphansForFilter(report, "all")).toEqual([]);
     expect(inventoryOrphansForFilter(report, "orphan")).toEqual([orphan]);
-    expect(inventoryOrphansForFilter(report, "ready")).toEqual([]);
+    expect(inventoryOrphansForFilter(report, "status:ready")).toEqual([]);
+  });
+
+  it("formats inventory review buckets, confidence, and resolution summary", () => {
+    const work = {
+      code: "IPX-180",
+      statuses: ["ready" as const],
+      resources: [],
+      target_dir: "H:/AV/IPX-180",
+      actions: [],
+      resource_roles: [],
+      resolution: {
+        bucket: "auto_ready" as const,
+        primary_video: "H:/x/IPX-180.mp4",
+        primary_nfo: "H:/x/IPX-180.nfo",
+        recommended: "可自动整理",
+        reasons: ["推荐主视频：文件名是裸番号视频"],
+        warnings: [],
+        blockers: [],
+        confidence: "high" as const
+      }
+    };
+
+    expect(formatInventoryReviewBucket("auto_ready")).toBe("可自动整理");
+    expect(formatInventoryReviewBucket("needs_review")).toBe("需人工确认");
+    expect(formatInventoryConfidence("high")).toBe("高");
+    expect(formatInventoryResolutionSummary(work)).toBe("可自动整理 · 置信度 高");
+    expect(formatInventoryResourceRole("primary_video")).toBe("主视频");
+    expect(formatInventoryResourceRole("duplicate_video")).toBe("疑似重复视频");
+    expect(formatInventoryResourceRole("poster")).toBe("封面");
+  });
+
+  it("filters inventory works by review bucket and existing status", () => {
+    const readyWork = {
+      code: "IPX-181",
+      statuses: ["ready" as const],
+      resources: [],
+      target_dir: null,
+      actions: [],
+      resource_roles: [],
+      resolution: {
+        bucket: "auto_ready" as const,
+        primary_video: "H:/x/IPX-181.mp4",
+        primary_nfo: "H:/x/IPX-181.nfo",
+        recommended: "可自动整理",
+        reasons: [],
+        warnings: [],
+        blockers: [],
+        confidence: "high" as const
+      }
+    };
+    const reviewWork = {
+      ...readyWork,
+      code: "IPX-182",
+      statuses: ["multi_video" as const],
+      resolution: {
+        ...readyWork.resolution,
+        bucket: "needs_review" as const,
+        recommended: "需人工确认后再整理",
+        confidence: "medium" as const
+      }
+    };
+
+    const reviewFilter: InventoryFilter = "review:auto_ready";
+    const statusFilter: InventoryFilter = "status:multi_video";
+
+    expect(filterInventoryWorks([readyWork, reviewWork], reviewFilter).map((work) => work.code)).toEqual(["IPX-181"]);
+    expect(filterInventoryWorks([readyWork, reviewWork], statusFilter).map((work) => work.code)).toEqual(["IPX-182"]);
+    expect(filterInventoryWorks([readyWork, reviewWork], "orphan")).toEqual([]);
+  });
+
+  it("formats inventory export result", () => {
+    expect(formatInventoryExportSummary({
+      path: "C:/Users/A/AppData/Roaming/local.media-manager/inventory-reports/inventory-20260628-101010.json",
+      works: 10,
+      asset_candidates: 3,
+      orphans: 2
+    })).toBe("已导出盘点结果：C:/Users/A/AppData/Roaming/local.media-manager/inventory-reports/inventory-20260628-101010.json（作品 10，素材候选 3，孤儿 2）。");
   });
 });
 

@@ -49,6 +49,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 7A（存量资源盘点与整理预览）已实现并验证。**
 阶段 7A 从下载入口转向用户当前真实痛点：已有视频、NFO、图片、GIF 和信息文件散乱在多个目录/盘。新增 `inventory` 只读扫描器，可扫描多个根目录，按番号聚合视频/NFO/poster/fanart/thumb/screenshot/GIF/其他资源，生成 `archive_root/CODE/` 目标路径预览，标记缺 NFO、缺视频、多视频、多 NFO、疑似重复、番号冲突、NFO 解析失败、目标已存在和目标重复等风险。扫描会对重复/父子 root 下的同一文件去重，避免假多视频冲突；孤儿资源可在“全部/孤儿资源”筛选下直接看到路径和告警，明细最多返回 1000 条但 summary 保留全量计数。前端“自动管线”页新增“存量整理预览”面板，支持多根目录输入、全状态过滤、summary、孤儿资源、资源证据、warnings 和 action target 预览。阶段 7A 不写 SQLite、不创建归档目录、不移动/复制/删除真实资源。
 
+**阶段 7B（配对规则与人工复核预览）已实现并验证。** 当前工作分支：`codex/stage7b-pairing-rules`。
+阶段 7B 在 7A 只读盘点结果上增加可解释判定层：每个作品新增 `resolution`（复核队列、主视频、主 NFO、推荐动作、理由、风险、阻断原因、置信度）和 `resource_roles`（主/副/疑似重复视频、主/副 NFO、poster/fanart/thumb/screenshot/GIF/image/other）。summary 新增 `auto_ready` / `needs_review` / `blocked`，前端新增可自动整理、需人工确认、阻断、素材候选、状态和孤儿筛选；盘点页可单独填写“整理目标目录”，并展示配对建议和资源角色。新增 `export_inventory_report_command`，把当前盘点 report JSON 导出到 app data 的 `inventory-reports/` 目录，便于真实环境反馈。阶段 7B 仍然只读：不写 SQLite inventory task、不创建目标目录、不移动/复制/删除媒体/NFO/图片。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`
@@ -84,6 +87,17 @@ orphan 明细上限 follow-up 之后额外通过：
 - `npm test -- src/viewModel.test.ts`（45 tests）
 - `npm test -- src/daemonClient.test.ts src/viewModel.test.ts`（52 tests）
 - `npm run build`
+
+阶段 7B 通过：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`（24 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::tests::inventory_export_command_writes_report_json_under_app_data -j 1`（1 test）
+- `cargo test --manifest-path src-tauri/Cargo.toml commands::tests::inventory_preview -j 1`（5 tests）
+- `npm test -- src/App.inventory.test.tsx`（2 tests）
+- `npm test`（60 tests）
+- `npx tsc --noEmit`
+- `npm run build`
+- `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（234 tests）
 
 说明：Windows 当前环境并行 `cargo test` 曾因页面文件不足触发 `os error 1455` / rlib mmap 失败；用 `-j 1` 单作业曾完整通过。阶段 7A follow-up 清理无关 `cargo fmt` 噪音后复跑完整 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`，当前会话在编译 examples/tests 时再次触发 `os error 1455`。orphan 明细上限修复后，focused inventory Rust re-run 也被同一 `os error 1455` 挡在编译阶段；full `npm test` 被 child Windows PowerShell OOM/internal loading error 挡在 `scripts/collect-feedback.test.ts`。这些失败未进入业务断言。新环境接手时建议先释放/扩展页面文件，再重跑完整 `cargo test --manifest-path src-tauri/Cargo.toml -j 1` 和 `npm test`。现有 `resource_pool.rs` 有历史 warning（unreachable pattern / unused role），非阶段 7A 新增失败。
 
@@ -142,6 +156,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 26. **`docs/superpowers/plans/2026-06-27-media-manager-stage6f-self-check.md`** — 阶段 6F plan（已完成，含 TDD 步骤与验收）。
 27. **`docs/superpowers/specs/2026-06-27-media-manager-stage7a-inventory-preview-design.md`** — 阶段 7A 存量资源盘点与整理预览设计（已完成）。
 28. **`docs/superpowers/plans/2026-06-27-media-manager-stage7a-inventory-preview.md`** — 阶段 7A plan（已完成，含 TDD 步骤、评审记录和验收）。
+29. **`docs/superpowers/specs/2026-06-28-media-manager-stage7b-pairing-rules-design.md`** — 阶段 7B 配对规则与人工复核预览设计（已完成）。
+30. **`docs/superpowers/plans/2026-06-28-media-manager-stage7b-pairing-rules.md`** — 阶段 7B plan（已完成，含 TDD 步骤、评审记录和验收）。
 
 ## 阶段 1 交付物
 
@@ -292,6 +308,17 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - `src/styles.css` 新增 inventory panel / summary / filter / list / detail / action / responsive 样式。
 - 新增 `src-tauri/tests/inventory.rs`，并扩展 `commands` unit 与 `src/viewModel.test.ts`；复审后 focused Rust、前端 unit/type/build 均通过。最终 orphan 明细截断修复的 Rust 测试在当前 Windows 会话被 `os error 1455` 页面文件限制挡在编译阶段，需要新环境复跑。
 
+## 阶段 7B 交付物
+
+- `src-tauri/src/inventory.rs` 新增 `InventoryReviewBucket`、`InventoryConfidence`、`InventoryResolution`、`InventoryResourceRoleKind`、`InventoryResourceRole`，并为每个番号组输出配对建议和资源角色。
+- 主视频选择和 action target 排序共用同一套视频排序，避免“详情解释选 A、动作预览移动 B”；主 NFO 按 `<num>`、裸番号、同目录、路径稳定排序选择。
+- summary 新增 `auto_ready`、`needs_review`、`blocked`；target_exists 和番号证据冲突会进入 `blocked`，多视频/多 NFO/疑似重复进入人工复核视角，纯图片/GIF 组进入素材候选。
+- `src-tauri/src/commands.rs` 新增并注册 `export_inventory_report_command`，只把当前 report JSON 写到 app data 的 `inventory-reports/`，不写媒体内容。
+- `src/api.ts` / `src/viewModel.ts` 新增 7B DTO、review/status/orphan 统一筛选、置信度/角色/复核分桶格式化和导出摘要。
+- `src/App.tsx` 的“一键盘点”支持本次整理目标目录、复核分桶筛选、配对建议详情、资源角色展示、扫描中输入禁用和导出 JSON。
+- 新增 `src/App.inventory.test.tsx`，通过 `happy-dom` 覆盖 App 层关键接线：目标目录传给 preview、导出当前 report、扫描中禁用输入和 Windows placeholder。
+- 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。历史 `resource_pool.rs` warning 仍存在。
+
 ## 阶段 6A 交付物
 
 - 新增 `src-tauri/src/remote_scraper.rs`：`RemoteMetadata`、`RemoteMetadataHttpClient`、`RemoteScraperConfig`、`RemoteScraperSource`、`parse_json_ld_metadata`。
@@ -314,15 +341,17 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点测阶段 7A 的“存量整理预览”：
+如果先做实际环境验证，重点测阶段 7B 的“配对复核预览”：
 
 1. 用户在自己的交互桌面终端运行 `npm run dev`，用浏览器打开 `http://localhost:1420`；Codex 不启动 WebView2/Tauri GUI。
-2. 设置页 → 自动管线 → 先确认 archive root 已配置；也可先跑“一键自检”确认基础链路。
-3. 在“存量整理预览”里每行填一个真实存量根目录，例如下载目录、NFO 输出目录、图片目录。
-4. 点击“生成整理预览”；期望只生成汇总、状态过滤、作品列表、资源证据、warnings 和目标路径预览，不移动、不复制、不删除任何文件。
-5. 重点看缺 NFO、缺视频、多视频、多 NFO、番号冲突、NFO 解析失败、目标已存在/目标重复是否符合真实目录情况。
+2. 设置页 → 自动管线 → 可先跑“一键自检”确认基础链路。
+3. 在“一键盘点”里每行填一个真实存量根目录，例如下载目录、NFO 输出目录、图片目录。
+4. 填写“整理目标目录”，这是本次预览使用的目标根目录，不会创建目录或移动文件。
+5. 点击“开始盘点”；期望只生成汇总、复核分桶、作品列表、资源证据、配对建议、warnings 和目标路径预览，不移动、不复制、不删除任何文件。
+6. 重点看“可自动整理 / 需人工确认 / 阻断 / 素材候选 / 孤儿资源”筛选是否符合真实目录情况，并打开作品详情检查主视频、主 NFO、资源角色和阻断原因。
+7. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。
 
-如果继续做 Codex 可编码工作，下一阶段建议是 **7B：配对规则与冲突处理**。范围包括多 NFO 主从选择、多视频版本/分集判断、手动合并/拆分、duplicate candidate 规则和冲突可解释 UI。7C 才做真实整理执行（移动/复制策略、二次确认、日志、失败回滚），7D 再做整理后的浏览库体验。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7B 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，下一阶段建议是 **7C：真实整理执行**。范围应包括二次确认、基于 7B `resolution` 的移动/复制策略、冲突确认、执行日志、失败恢复/回滚、可重试队列，以及真实执行前的最终预览。7D 再做整理后的浏览库体验。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7C 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 

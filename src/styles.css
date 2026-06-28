@@ -747,14 +747,23 @@ h2 {
   gap: 4px;
 }
 
-.inventory-roots-field textarea {
-  min-height: 94px;
+.inventory-roots-field textarea,
+.inventory-roots-field input {
   border: 1px solid #d8e1e7;
   border-radius: 6px;
   background: #ffffff;
   color: #25313c;
   padding: 9px 10px;
+  font: inherit;
+}
+
+.inventory-roots-field textarea {
+  min-height: 94px;
   resize: vertical;
+}
+
+.inventory-roots-field input {
+  min-height: 36px;
 }
 
 .inventory-status-line {
@@ -934,7 +943,8 @@ h2 {
   display: block;
 }
 
-.inventory-target {
+.inventory-target,
+.inventory-resolution {
   margin: 10px 12px;
   border: 1px solid #d8e1e7;
   border-radius: 6px;
@@ -942,6 +952,53 @@ h2 {
   padding: 9px 10px;
   display: grid;
   gap: 4px;
+}
+
+.inventory-resolution {
+  background: #ffffff;
+  gap: 8px;
+}
+
+.inventory-resolution div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.inventory-resolution strong {
+  color: #25313c;
+  overflow-wrap: anywhere;
+}
+
+.inventory-resolution span,
+.inventory-resolution small {
+  color: #61717d;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.inventory-resolution-notes {
+  display: grid;
+  gap: 5px;
+}
+
+.inventory-resolution-notes span {
+  border: 1px solid #d8e1e7;
+  border-radius: 6px;
+  background: #fbfdfe;
+  color: #52616c;
+  padding: 5px 7px;
+}
+
+.inventory-resolution-notes.warn span {
+  border-color: rgba(217, 119, 6, 0.35);
+  background: #fffaf2;
+  color: #8a4f08;
+}
+
+.inventory-resolution-notes.block span {
+  border-color: rgba(190, 18, 60, 0.35);
+  background: #fff5f7;
+  color: #9f1239;
 }
 
 .inventory-subsection {

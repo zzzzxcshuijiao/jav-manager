@@ -117,6 +117,15 @@ pub struct CommandResult<T> {
     pub data: T,
 }
 
+/// Summary returned after exporting a read-only inventory preview JSON file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InventoryExportResult {
+    pub path: String,
+    pub works: usize,
+    pub asset_candidates: usize,
+    pub orphans: usize,
+}
+
 #[tauri::command]
 pub fn configure_source_roots(
     paths: Vec<String>,
@@ -953,6 +962,25 @@ fn preview_inventory_from_paths(
     Ok(CommandResult { data: report })
 }
 
+/// Write the current inventory report JSON under the app-data inventory report directory.
+fn export_inventory_report_to_dir(
+    app_data_dir: &Path,
+    report: InventoryPreviewReport,
+) -> Result<InventoryExportResult, String> {
+    let export_dir = app_data_dir.join("inventory-reports");
+    fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let path = export_dir.join(format!("inventory-{timestamp}.json"));
+    let text = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(InventoryExportResult {
+        path: path.to_string_lossy().to_string(),
+        works: report.summary.works,
+        asset_candidates: report.summary.asset_candidates,
+        orphans: report.summary.orphans,
+    })
+}
+
 /// Build a read-only inventory preview from plain `AppState` for unit tests.
 #[cfg(test)]
 fn preview_inventory_in_state(
@@ -981,6 +1009,20 @@ pub async fn preview_inventory(
     .map_err(|error| error.to_string())?
     .map_err(|error| error.to_string())?;
     Ok(CommandResult { data: report })
+}
+
+/// Export the current read-only inventory report to app data for diagnostics and review.
+#[tauri::command]
+pub fn export_inventory_report_command(
+    app: tauri::AppHandle,
+    report: InventoryPreviewReport,
+) -> Result<CommandResult<InventoryExportResult>, String> {
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    let result = export_inventory_report_to_dir(&app_data, report)?;
+    Ok(CommandResult { data: result })
 }
 
 #[tauri::command]
@@ -1913,6 +1955,7 @@ pub fn build_app() -> Builder<tauri::Wry> {
             list_file_versions_for_work,
             list_work_actors,
             preview_inventory,
+            export_inventory_report_command,
             preview_archive_plan,
             execute_archive_plan,
             list_archive_action_logs,
@@ -2438,6 +2481,33 @@ mod tests {
         assert_eq!(work.target_dir, None);
         assert!(!work.actions.is_empty());
         assert!(work.actions.iter().all(|action| action.to_path.is_none()));
+    }
+
+    #[test]
+    fn inventory_export_command_writes_report_json_under_app_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let archive = tmp.path().join("archive");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("IPX-180.mp4"), b"video").unwrap();
+        std::fs::write(
+            root.join("IPX-180.nfo"),
+            br#"<movie><num>IPX-180</num></movie>"#,
+        )
+        .unwrap();
+        let report = preview_inventory_from_paths(vec![root], Some(archive))
+            .unwrap()
+            .data;
+
+        let exported = export_inventory_report_to_dir(tmp.path(), report).unwrap();
+
+        assert!(exported.path.ends_with(".json"));
+        assert!(exported.path.contains("inventory-reports"));
+        assert!(exported.works >= 1);
+        let text = std::fs::read_to_string(&exported.path).unwrap();
+        assert!(text.contains("\"IPX-180\""));
+        assert!(text.contains("\"resolution\""));
+        assert!(!text.contains("video</movie>"));
     }
 
     #[test]

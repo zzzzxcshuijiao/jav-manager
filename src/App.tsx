@@ -41,7 +41,6 @@ import type {
   InventoryPreviewReport,
   InventoryResource,
   InventoryResourceKind,
-  InventoryStatus,
   MigrationPlan,
   PipelineRun,
   PooledWork,
@@ -93,6 +92,11 @@ import {
   formatFileVersionSummary,
   formatHoldingReason,
   formatInventoryActionTarget,
+  filterInventoryWorks,
+  formatInventoryExportSummary,
+  formatInventoryResourceRole,
+  formatInventoryResolutionSummary,
+  formatInventoryReviewBucket,
   formatInventoryStatus,
   formatInventorySummary,
   inventoryOrphansForFilter,
@@ -118,6 +122,7 @@ import {
   shortEvidence,
   summarizeRunOnceReport,
   viewItemsForMode,
+  type InventoryFilter,
   type WorkStatusFilter,
   type WorkbenchView,
   workbenchViewTitle
@@ -190,18 +195,20 @@ const defaultRemoteScraperSettings: RemoteScraperSettings = {
   ]
 };
 
-const inventoryStatusFilters: Array<InventoryStatus | "all"> = [
-  "all",
-  "ready",
-  "missing_nfo",
-  "missing_video",
-  "multi_video",
-  "multi_nfo",
-  "code_conflict",
-  "duplicate_candidate",
-  "nfo_parse_error",
-  "asset_only",
-  "orphan"
+const inventoryFilters: Array<{ value: InventoryFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "review:auto_ready", label: "可自动整理" },
+  { value: "review:needs_review", label: "需人工确认" },
+  { value: "review:blocked", label: "阻断" },
+  { value: "review:asset_candidate", label: "素材候选" },
+  { value: "status:missing_nfo", label: "缺 NFO" },
+  { value: "status:missing_video", label: "缺视频" },
+  { value: "status:multi_video", label: "多视频" },
+  { value: "status:multi_nfo", label: "多 NFO" },
+  { value: "status:code_conflict", label: "番号冲突" },
+  { value: "status:duplicate_candidate", label: "疑似重复" },
+  { value: "status:nfo_parse_error", label: "NFO 解析失败" },
+  { value: "orphan", label: "孤儿资源" }
 ];
 
 const inventoryImageKinds = new Set<InventoryResourceKind>(["poster", "fanart", "thumb", "screenshot", "gif", "image"]);
@@ -282,9 +289,11 @@ export function App() {
   const [selfCheckReport, setSelfCheckReport] = useState<SelfCheckReport | null>(null);
   const [selfCheckBusy, setSelfCheckBusy] = useState(false);
   const [inventoryRootsText, setInventoryRootsText] = useState("");
+  const [inventoryArchiveRoot, setInventoryArchiveRoot] = useState(archiveRoot);
   const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [inventoryExportBusy, setInventoryExportBusy] = useState(false);
   const [inventoryReport, setInventoryReport] = useState<InventoryPreviewReport | null>(null);
-  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryStatus | "all">("all");
+  const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryFilter>("all");
   const [selectedInventoryCode, setSelectedInventoryCode] = useState<string | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
   const [aria2GidsText, setAria2GidsText] = useState("");
@@ -379,17 +388,20 @@ export function App() {
     () => findIngestItemForWork(items, selectedLibraryWork),
     [items, selectedLibraryWork]
   );
-  const filteredInventoryWorks = inventoryReport
-    ? inventoryStatusFilter === "asset_only"
+  const inventoryWorkSource = inventoryReport
+    ? inventoryStatusFilter === "review:asset_candidate"
       ? inventoryReport.asset_candidates
-      : inventoryStatusFilter === "all"
-        ? inventoryReport.works
-        : inventoryReport.works.filter((work) => work.statuses.includes(inventoryStatusFilter))
+      : inventoryReport.works
     : [];
+  const filteredInventoryWorks = filterInventoryWorks(inventoryWorkSource, inventoryStatusFilter);
   const visibleInventoryOrphans = inventoryOrphansForFilter(inventoryReport, inventoryStatusFilter);
   const inventoryListItemCount = filteredInventoryWorks.length + visibleInventoryOrphans.length;
   const selectedInventoryWork =
     filteredInventoryWorks.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
+  const selectedInventoryRoleByPath = useMemo(
+    () => new Map(selectedInventoryWork?.resource_roles.map((role) => [role.path, role]) ?? []),
+    [selectedInventoryWork]
+  );
   const showArchiveControls = activeView === "ingest" || activeView === "review" || activeView === "archive";
 
   useEffect(() => {
@@ -421,6 +433,7 @@ export function App() {
         }
         if (storedArchiveRoot) {
           setArchiveRoot(storedArchiveRoot);
+          setInventoryArchiveRoot((current) => (current.trim() && current !== "H:/Archive" ? current : storedArchiveRoot));
         }
         setMetadataProviderEnabled(storedMetadataProviderEnabled);
         try {
@@ -733,6 +746,22 @@ export function App() {
     }
   }
 
+  /** 选择存量整理预览使用的目标根目录，只影响盘点预览和导出结果。 */
+  async function pickInventoryArchiveRoot() {
+    try {
+      const selected = await openDialog({ directory: true, multiple: false });
+      const pickedRoot = Array.isArray(selected) ? selected[0] : selected;
+      if (typeof pickedRoot !== "string" || pickedRoot.trim().length === 0) {
+        return;
+      }
+      setInventoryArchiveRoot(pickedRoot);
+      setActiveView("inventory");
+      setStatus(`已设置盘点整理目标：${pickedRoot}`);
+    } catch (error) {
+      setStatus(`选择盘点整理目标失败：${String(error)}`);
+    }
+  }
+
   function switchView(view: WorkbenchView) {
     setActiveView(view);
     if (view === "ingest" || view === "review") {
@@ -862,6 +891,7 @@ export function App() {
   async function generateInventoryPreview() {
     if (inventoryBusy) return;
     const roots = inventoryRootsFromText();
+    const targetRoot = inventoryArchiveRoot.trim();
     if (roots.length === 0) {
       setStatus("请先填写至少一个存量扫描根目录。");
       return;
@@ -873,7 +903,7 @@ export function App() {
     setSelectedInventoryCode(null);
     setStatus(`正在扫描 ${roots.length} 个存量根目录...`);
     try {
-      const report = await api.previewInventory(roots, null);
+      const report = await api.previewInventory(roots, targetRoot.length > 0 ? targetRoot : null);
       const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       setInventoryReport(report);
       setInventoryStatusFilter("all");
@@ -885,6 +915,23 @@ export function App() {
       setStatus(`存量整理预览失败：${String(error)}`);
     } finally {
       setInventoryBusy(false);
+    }
+  }
+
+  /** 导出当前盘点预览 JSON，便于人工复核或发给协作者排查。 */
+  async function exportInventoryPreview() {
+    if (!inventoryReport || inventoryExportBusy) {
+      return;
+    }
+    setInventoryExportBusy(true);
+    setStatus("正在导出盘点结果...");
+    try {
+      const result = await api.exportInventoryReport(inventoryReport);
+      setStatus(formatInventoryExportSummary(result));
+    } catch (error) {
+      setStatus(`导出盘点结果失败：${String(error)}`);
+    } finally {
+      setInventoryExportBusy(false);
     }
   }
 
@@ -1713,15 +1760,31 @@ export function App() {
                   rows={4}
                   value={inventoryRootsText}
                   onChange={(event) => setInventoryRootsText(event.target.value)}
+                  disabled={inventoryBusy}
                   placeholder={"H:\\video\nH:\\AV"}
+                />
+              </label>
+              <label className="inventory-roots-field">
+                整理目标目录
+                <input
+                  value={inventoryArchiveRoot}
+                  onChange={(event) => setInventoryArchiveRoot(event.target.value)}
+                  disabled={inventoryBusy}
+                  placeholder={"D:\\mm-7a-test\\archive"}
                 />
               </label>
               <div className="daemon-actions">
                 <button type="button" onClick={pickInventoryRoots} disabled={inventoryBusy || !hasBackend}>
                   <FolderOpen size={16} /> 选择目录
                 </button>
+                <button type="button" onClick={pickInventoryArchiveRoot} disabled={inventoryBusy || !hasBackend}>
+                  <FolderInput size={16} /> 选择目标
+                </button>
                 <button className="primary" type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || !hasBackend}>
                   <Search size={16} /> {inventoryBusy ? "盘点中" : "开始盘点"}
+                </button>
+                <button type="button" onClick={exportInventoryPreview} disabled={!inventoryReport || inventoryBusy || inventoryExportBusy || !hasBackend}>
+                  <Archive size={16} /> {inventoryExportBusy ? "导出中" : "导出 JSON"}
                 </button>
               </div>
               <span className="inventory-status-line">
@@ -1742,6 +1805,18 @@ export function App() {
                     <div>
                       <span>素材候选</span>
                       <strong>{inventoryReport.summary.asset_candidates}</strong>
+                    </div>
+                    <div>
+                      <span>可自动</span>
+                      <strong>{inventoryReport.summary.auto_ready}</strong>
+                    </div>
+                    <div>
+                      <span>需确认</span>
+                      <strong>{inventoryReport.summary.needs_review}</strong>
+                    </div>
+                    <div>
+                      <span>阻断</span>
+                      <strong>{inventoryReport.summary.blocked}</strong>
                     </div>
                     <div>
                       <span>可整理</span>
@@ -1775,17 +1850,17 @@ export function App() {
                   </div>
 
                   <div className="inventory-filter">
-                    {inventoryStatusFilters.map((filterValue) => (
+                    {inventoryFilters.map((filter) => (
                       <button
                         type="button"
-                        key={filterValue}
-                        className={inventoryStatusFilter === filterValue ? "active" : ""}
+                        key={filter.value}
+                        className={inventoryStatusFilter === filter.value ? "active" : ""}
                         onClick={() => {
-                          setInventoryStatusFilter(filterValue);
+                          setInventoryStatusFilter(filter.value);
                           setSelectedInventoryCode(null);
                         }}
                       >
-                        {filterValue === "all" ? "全部" : formatInventoryStatus(filterValue)}
+                        {filter.label}
                       </button>
                     ))}
                   </div>
@@ -1805,7 +1880,7 @@ export function App() {
                     <div className="inventory-work-list">
                       <div className="inventory-section-head">
                         <strong>
-                          {inventoryStatusFilter === "asset_only"
+                          {inventoryStatusFilter === "review:asset_candidate"
                             ? "素材候选"
                             : inventoryStatusFilter === "orphan"
                               ? "资源列表"
@@ -1825,7 +1900,8 @@ export function App() {
                               onClick={() => setSelectedInventoryCode(work.code)}
                             >
                               <strong>{work.code}</strong>
-                              <span>{work.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                              <span>{formatInventoryResolutionSummary(work)}</span>
+                              <small>{work.statuses.map(formatInventoryStatus).join(" · ")}</small>
                               <small>{summarizeInventoryResources(work.resources)}</small>
                               <small>{work.target_dir ?? inventoryReport.archive_root ?? "未设置整理目标"}</small>
                             </button>
@@ -1855,11 +1931,45 @@ export function App() {
                         <>
                           <div className="inventory-section-head">
                             <strong>{selectedInventoryWork.code}</strong>
-                            <span>{selectedInventoryWork.statuses.map(formatInventoryStatus).join(" · ")}</span>
+                            <span>{formatInventoryReviewBucket(selectedInventoryWork.resolution.bucket)}</span>
                           </div>
                           <div className="inventory-target">
                             <span>目标目录</span>
                             <strong>{selectedInventoryWork.target_dir ?? inventoryReport.archive_root ?? "未设置整理目标"}</strong>
+                          </div>
+
+                          <div className="inventory-resolution">
+                            <div>
+                              <span>配对建议</span>
+                              <strong>{formatInventoryResolutionSummary(selectedInventoryWork)}</strong>
+                            </div>
+                            {selectedInventoryWork.resolution.primary_video ? (
+                              <small>主视频：{selectedInventoryWork.resolution.primary_video}</small>
+                            ) : null}
+                            {selectedInventoryWork.resolution.primary_nfo ? (
+                              <small>主 NFO：{selectedInventoryWork.resolution.primary_nfo}</small>
+                            ) : null}
+                            {selectedInventoryWork.resolution.reasons.length > 0 ? (
+                              <div className="inventory-resolution-notes">
+                                {selectedInventoryWork.resolution.reasons.map((reason, index) => (
+                                  <span key={`${selectedInventoryWork.code}-reason-${index}`}>{reason}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {selectedInventoryWork.resolution.warnings.length > 0 ? (
+                              <div className="inventory-resolution-notes warn">
+                                {selectedInventoryWork.resolution.warnings.map((warning, index) => (
+                                  <span key={`${selectedInventoryWork.code}-warning-${index}`}>{warning}</span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {selectedInventoryWork.resolution.blockers.length > 0 ? (
+                              <div className="inventory-resolution-notes block">
+                                {selectedInventoryWork.resolution.blockers.map((blocker, index) => (
+                                  <span key={`${selectedInventoryWork.code}-blocker-${index}`}>{blocker}</span>
+                                ))}
+                              </div>
+                            ) : null}
                           </div>
 
                           <div className="inventory-subsection">
@@ -1867,20 +1977,30 @@ export function App() {
                             {selectedInventoryWork.resources.length === 0 ? (
                               <span className="empty-text">暂无资源</span>
                             ) : (
-                              selectedInventoryWork.resources.map((resource) => (
-                                <div className="inventory-resource-row" key={resource.path}>
-                                  <strong>{resource.kind} · {resource.file_name}</strong>
-                                  <span>{formatBytes(resource.size_bytes)} · {resource.code ?? "未识别番号"}</span>
-                                  <small>{resource.path}</small>
-                                  {resource.warnings.length > 0 ? (
-                                    <div className="inventory-resource-warnings">
-                                      {resource.warnings.map((warning, index) => (
-                                        <span key={`${resource.path}-warning-${index}`}>{warning}</span>
-                                      ))}
-                                    </div>
-                                  ) : null}
-                                </div>
-                              ))
+                              selectedInventoryWork.resources.map((resource) => {
+                                const role = selectedInventoryRoleByPath.get(resource.path);
+                                return (
+                                  <div className="inventory-resource-row" key={resource.path}>
+                                    <strong>{resource.kind} · {resource.file_name}</strong>
+                                    {role ? (
+                                      <span>
+                                        {formatInventoryResourceRole(role.role)} · {role.reason}
+                                        {role.selected ? " · 已选中" : ""}
+                                        {role.needs_review ? " · 需确认" : ""}
+                                      </span>
+                                    ) : null}
+                                    <span>{formatBytes(resource.size_bytes)} · {resource.code ?? "未识别番号"}</span>
+                                    <small>{resource.path}</small>
+                                    {resource.warnings.length > 0 ? (
+                                      <div className="inventory-resource-warnings">
+                                        {resource.warnings.map((warning, index) => (
+                                          <span key={`${resource.path}-warning-${index}`}>{warning}</span>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                );
+                              })
                             )}
                           </div>
 
