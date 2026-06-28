@@ -16,6 +16,7 @@ struct FakeMoveStrategy {
     same_volume: bool,
     available_space: u64,
     space_queries: Mutex<Vec<PathBuf>>,
+    source_replacement_before_delete: Mutex<Option<Vec<u8>>>,
 }
 
 impl FakeMoveStrategy {
@@ -25,6 +26,21 @@ impl FakeMoveStrategy {
             same_volume,
             available_space,
             space_queries: Mutex::new(Vec::new()),
+            source_replacement_before_delete: Mutex::new(None),
+        }
+    }
+
+    /// Build a fake strategy that rewrites the source after target publication.
+    fn replacing_source_before_delete(
+        same_volume: bool,
+        available_space: u64,
+        contents: Vec<u8>,
+    ) -> Self {
+        Self {
+            same_volume,
+            available_space,
+            space_queries: Mutex::new(Vec::new()),
+            source_replacement_before_delete: Mutex::new(Some(contents)),
         }
     }
 
@@ -42,6 +58,13 @@ impl InventoryMoveStrategy for FakeMoveStrategy {
     fn available_space(&self, path: &Path) -> anyhow::Result<u64> {
         self.space_queries.lock().unwrap().push(path.to_path_buf());
         Ok(self.available_space)
+    }
+
+    fn before_delete_source(&self, from_path: &Path, _to_path: &Path) -> anyhow::Result<()> {
+        if let Some(contents) = self.source_replacement_before_delete.lock().unwrap().take() {
+            fs::write(from_path, contents)?;
+        }
+        Ok(())
     }
 }
 
@@ -279,6 +302,64 @@ fn inventory_move_execution_stops_before_cross_volume_copy_when_space_is_low() {
 }
 
 #[test]
+fn inventory_move_execution_reports_retained_target_when_source_changes_after_publish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-704.mp4");
+    let nfo = root.join("IPX-704.nfo");
+    write_file(&video, b"video");
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-704</num><title>Ready</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let move_strategy = FakeMoveStrategy::replacing_source_before_delete(
+        false,
+        u64::MAX,
+        b"changed-after-copy".to_vec(),
+    );
+    let options = InventoryExecutionOptions {
+        move_strategy: &move_strategy,
+    };
+
+    let execution =
+        execute_inventory_report_with_options(&report, &move_all_request(), &options).unwrap();
+    let archive_video = archive.join("IPX-704").join("IPX-704.mp4");
+    let archive_nfo = archive.join("IPX-704").join("IPX-704.nfo");
+
+    assert_eq!(execution.executed_works, 0);
+    assert_eq!(execution.moved_actions, 1);
+    assert_eq!(execution.cross_volume_actions, 1);
+    assert_eq!(execution.failed_actions, 1);
+    assert_eq!(execution.rollback_failed_actions, 1);
+    assert_eq!(fs::read(&video).unwrap(), b"changed-after-copy");
+    assert_eq!(fs::read(&archive_video).unwrap(), b"video");
+    assert!(
+        nfo.exists(),
+        "later action must not run after retained-target failure"
+    );
+    assert!(!archive_nfo.exists());
+    assert!(execution.logs.iter().any(|log| {
+        log.status == InventoryExecutionActionStatus::Failed
+            && log
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("源文件迁移期间发生变化")
+    }));
+    assert!(execution.logs.iter().any(|log| {
+        log.status == InventoryExecutionActionStatus::RollbackFailed
+            && log
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("迁移目标已保留")
+    }));
+}
+
+#[test]
 fn inventory_move_execution_moves_sources_into_archive() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
@@ -326,7 +407,7 @@ fn inventory_move_execution_moves_sources_into_archive() {
     assert!(execution
         .logs
         .iter()
-        .all(|log| log.message.as_deref() == Some("rename")));
+        .all(|log| log.message.as_deref() == Some("same_volume_link_delete")));
 }
 
 #[test]

@@ -127,7 +127,7 @@ function makeInventoryExecutionReport(): InventoryExecutionReport {
         from_path: "D:\\inventory-inbox\\IPX-201.mp4",
         to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
         status: "moved",
-        message: "rename",
+        message: "same_volume_link_delete",
         bytes: 5
       }
     ]

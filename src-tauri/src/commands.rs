@@ -1029,7 +1029,7 @@ pub fn export_inventory_report_command(
     Ok(CommandResult { data: result })
 }
 
-/// Execute the safe inventory plan from a preview report in copy-only mode.
+/// Execute the safe inventory plan from a preview report in the requested file mode.
 #[tauri::command]
 pub async fn execute_inventory_plan(
     report: InventoryPreviewReport,

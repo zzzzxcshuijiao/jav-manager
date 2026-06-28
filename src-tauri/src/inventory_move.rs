@@ -1,6 +1,8 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::error::Error;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -16,6 +18,11 @@ pub trait InventoryMoveStrategy: Sync {
 
     /// Return currently available bytes for the filesystem containing `path`.
     fn available_space(&self, path: &Path) -> Result<u64>;
+
+    /// Test seam invoked after a target is verified but before source removal.
+    fn before_delete_source(&self, _from_path: &Path, _to_path: &Path) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Production move strategy backed by the host operating system filesystem APIs.
@@ -51,6 +58,21 @@ pub struct InventoryMovedFile {
     pub bytes: u64,
     pub sha256: Option<String>,
 }
+
+/// Error payload returned when a target was created but source removal could not complete.
+#[derive(Debug, Clone)]
+pub struct InventoryMoveRetainedTarget {
+    pub moved: InventoryMovedFile,
+    pub message: String,
+}
+
+impl fmt::Display for InventoryMoveRetainedTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for InventoryMoveRetainedTarget {}
 
 /// Internal same-volume move failure used to distinguish cross-device fallback.
 enum SameVolumeMoveError {
@@ -177,27 +199,23 @@ fn try_move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> SameVolumeM
             from_path.to_string_lossy()
         )));
     }
-    if let Err(error) = fs::remove_file(from_path) {
-        let _ = fs::remove_file(to_path);
+    let target_sha256 = file_sha256(to_path).map_err(SameVolumeMoveError::Failed)?;
+    if let Err(error) =
+        delete_verified_source_via_quarantine(from_path, to_path, source_size, &target_sha256)
+    {
+        let moved = InventoryMovedFile {
+            from_path: from_path.to_path_buf(),
+            to_path: to_path.to_path_buf(),
+            method: InventoryMoveMethod::SameVolume,
+            bytes: source_size,
+            sha256: Some(target_sha256),
+        };
         return Err(SameVolumeMoveError::Failed(anyhow!(
-            "删除源文件失败：{}: {}",
-            from_path.to_string_lossy(),
-            error
+            InventoryMoveRetainedTarget {
+                moved,
+                message: error.to_string(),
+            }
         )));
-    }
-    ensure_source_path_removed_after_move(from_path, to_path)
-        .map_err(SameVolumeMoveError::Failed)?;
-    Ok(())
-}
-
-/// Confirm the source path is gone after move while retaining the migrated target on doubt.
-fn ensure_source_path_removed_after_move(from_path: &Path, to_path: &Path) -> Result<()> {
-    if from_path.exists() {
-        bail!(
-            "集中迁移后源路径仍存在：{}；迁移目标已保留以避免数据丢失：{}",
-            from_path.to_string_lossy(),
-            to_path.to_string_lossy()
-        );
     }
     Ok(())
 }
@@ -257,18 +275,27 @@ pub fn move_cross_volume_verify_delete(
     persist_temp_without_clobber(&temp_path, to_path)
         .with_context(|| format!("提交跨盘迁移结果失败：{}", to_path.to_string_lossy()))?;
     verify_final_target(to_path, source_size, &source_sha256)?;
-    ensure_source_unchanged_before_delete(from_path, to_path, source_size, &source_sha256)?;
-    fs::remove_file(from_path)
-        .with_context(|| format!("删除源文件失败：{}", from_path.to_string_lossy()))?;
-    ensure_source_path_removed_after_move(from_path, to_path)?;
-
-    Ok(InventoryMovedFile {
+    strategy.before_delete_source(from_path, to_path)?;
+    let moved = InventoryMovedFile {
         from_path: from_path.to_path_buf(),
         to_path: to_path.to_path_buf(),
         method: InventoryMoveMethod::CrossVolume,
         bytes: source_size,
         sha256: Some(source_sha256),
-    })
+    };
+    if let Err(error) = delete_verified_source_via_quarantine(
+        from_path,
+        to_path,
+        moved.bytes,
+        moved.sha256.as_deref().unwrap_or_default(),
+    ) {
+        return Err(anyhow!(InventoryMoveRetainedTarget {
+            moved,
+            message: error.to_string(),
+        }));
+    }
+
+    Ok(moved)
 }
 
 /// Return the parent directory for a target path.
@@ -447,38 +474,126 @@ fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Confirm the source has not changed since the copied bytes were hashed.
-fn ensure_source_unchanged_before_delete(
+/// Delete a source only after moving the exact path to a quarantine file.
+fn delete_verified_source_via_quarantine(
     from_path: &Path,
     to_path: &Path,
     expected_size: u64,
     expected_sha256: &str,
 ) -> Result<()> {
-    let current_size = match fs::metadata(from_path) {
-        Ok(metadata) => metadata.len(),
-        Err(error) => bail!(
-            "源文件迁移期间发生变化：无法重新读取源文件 {}；迁移目标已保留：{} ({})",
+    let quarantine_path = temporary_source_delete_path(from_path)?;
+    fs::rename(from_path, &quarantine_path).with_context(|| {
+        format!(
+            "隔离源文件失败：{}；迁移目标已保留：{}",
             from_path.to_string_lossy(),
-            to_path.to_string_lossy(),
-            error
-        ),
+            to_path.to_string_lossy()
+        )
+    })?;
+    let current_size = match fs::metadata(&quarantine_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            let restore = restore_quarantined_source(&quarantine_path, from_path);
+            bail!(
+                "源文件迁移期间发生变化：无法重新读取隔离源文件 {}；迁移目标已保留：{} ({})；{}",
+                quarantine_path.to_string_lossy(),
+                to_path.to_string_lossy(),
+                error,
+                restore
+            );
+        }
     };
     if current_size != expected_size {
+        let restore = restore_quarantined_source(&quarantine_path, from_path);
         bail!(
-            "源文件迁移期间发生变化：大小 {} -> {}；迁移目标已保留：{}",
+            "源文件迁移期间发生变化：大小 {} -> {}；迁移目标已保留：{}；{}",
             expected_size,
             current_size,
-            to_path.to_string_lossy()
+            to_path.to_string_lossy(),
+            restore
         );
     }
-    let current_sha256 = file_sha256(from_path)?;
+    let current_sha256 = match file_sha256(&quarantine_path) {
+        Ok(hash) => hash,
+        Err(error) => {
+            let restore = restore_quarantined_source(&quarantine_path, from_path);
+            bail!(
+                "源文件迁移期间发生变化：无法校验隔离源文件 {}；迁移目标已保留：{} ({})；{}",
+                quarantine_path.to_string_lossy(),
+                to_path.to_string_lossy(),
+                error,
+                restore
+            );
+        }
+    };
     if current_sha256 != expected_sha256 {
+        let restore = restore_quarantined_source(&quarantine_path, from_path);
         bail!(
-            "源文件迁移期间发生变化：哈希不一致；迁移目标已保留：{}",
+            "源文件迁移期间发生变化：哈希不一致；迁移目标已保留：{}；{}",
+            to_path.to_string_lossy(),
+            restore
+        );
+    }
+    if let Err(error) = fs::remove_file(&quarantine_path) {
+        let restore = restore_quarantined_source(&quarantine_path, from_path);
+        bail!(
+            "删除源文件失败：{}；迁移目标已保留：{} ({})；{}",
+            from_path.to_string_lossy(),
+            to_path.to_string_lossy(),
+            error,
+            restore
+        );
+    }
+    if from_path.exists() {
+        bail!(
+            "集中迁移后源路径出现新文件：{}；迁移目标已保留：{}",
+            from_path.to_string_lossy(),
             to_path.to_string_lossy()
         );
     }
     Ok(())
+}
+
+/// Build a same-directory quarantine path for source deletion.
+fn temporary_source_delete_path(from_path: &Path) -> Result<PathBuf> {
+    let parent = from_path
+        .parent()
+        .ok_or_else(|| anyhow!("源路径没有父目录：{}", from_path.to_string_lossy()))?;
+    let file_name = from_path
+        .file_name()
+        .ok_or_else(|| anyhow!("源路径没有文件名：{}", from_path.to_string_lossy()))?
+        .to_string_lossy();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or_default();
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{file_name}.mm-source-delete-{}-{timestamp}-{attempt}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("无法生成源文件隔离路径：{}", from_path.to_string_lossy());
+}
+
+/// Restore a quarantined source to its original path when deletion safety checks fail.
+fn restore_quarantined_source(quarantine_path: &Path, from_path: &Path) -> String {
+    if from_path.exists() {
+        return format!(
+            "源文件保留在隔离路径：{}",
+            quarantine_path.to_string_lossy()
+        );
+    }
+    match fs::rename(quarantine_path, from_path) {
+        Ok(()) => format!("源文件已恢复：{}", from_path.to_string_lossy()),
+        Err(error) => format!(
+            "源文件保留在隔离路径：{}；恢复失败：{}",
+            quarantine_path.to_string_lossy(),
+            error
+        ),
+    }
 }
 
 /// Return true when a hard-link failure indicates the paths are on different volumes.
@@ -612,17 +727,18 @@ mod tests {
     }
 
     #[test]
-    fn source_still_visible_after_remove_keeps_moved_target() {
+    fn quarantine_delete_removes_only_verified_source() {
         let tmp = tempfile::tempdir().unwrap();
         let from_path = tmp.path().join("source.mp4");
         let to_path = tmp.path().join("target.mp4");
-        fs::write(&from_path, b"recreated").unwrap();
-        fs::write(&to_path, b"moved").unwrap();
+        fs::write(&from_path, b"original").unwrap();
+        fs::write(&to_path, b"original").unwrap();
+        let expected_sha256 = file_sha256(&from_path).unwrap();
 
-        let error = ensure_source_path_removed_after_move(&from_path, &to_path).unwrap_err();
+        delete_verified_source_via_quarantine(&from_path, &to_path, 8, &expected_sha256).unwrap();
 
-        assert!(error.to_string().contains("迁移目标已保留以避免数据丢失"));
-        assert_eq!(fs::read(&to_path).unwrap(), b"moved");
+        assert!(!from_path.exists());
+        assert_eq!(fs::read(&to_path).unwrap(), b"original");
     }
 
     #[test]
@@ -648,12 +764,13 @@ mod tests {
         fs::write(&from_path, b"changed-after-copy").unwrap();
 
         let error =
-            ensure_source_unchanged_before_delete(&from_path, &to_path, 8, &expected_sha256)
+            delete_verified_source_via_quarantine(&from_path, &to_path, 8, &expected_sha256)
                 .unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("源文件迁移期间发生变化"));
         assert!(message.contains("迁移目标已保留"));
+        assert!(message.contains("源文件已恢复"));
         assert_eq!(fs::read(&from_path).unwrap(), b"changed-after-copy");
         assert_eq!(fs::read(&to_path).unwrap(), b"original");
     }

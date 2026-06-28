@@ -3,7 +3,8 @@ use crate::inventory::{
     InventoryWorkPreview,
 };
 use crate::inventory_move::{
-    move_file_no_clobber, InventoryMoveMethod, InventoryMoveStrategy, SystemInventoryMoveStrategy,
+    move_file_no_clobber, InventoryMoveMethod, InventoryMoveRetainedTarget, InventoryMoveStrategy,
+    InventoryMovedFile, SystemInventoryMoveStrategy,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
@@ -222,9 +223,33 @@ pub fn execute_inventory_report_with_options(
                 });
             }
             Err(error) => {
+                let retained_move = error
+                    .downcast_ref::<InventoryMoveRetainedTarget>()
+                    .map(|retained| (retained.moved.clone(), retained.message.clone()));
                 let error_message = error.to_string();
                 if error_message.contains("目标磁盘剩余空间不足") {
                     space_blocked_actions += 1;
+                }
+                if let Some((moved, _retained_message)) = retained_move {
+                    let created = created_move_target(action, moved);
+                    if let CreatedInventoryOperation::Moved(method) = created.operation {
+                        moved_actions += 1;
+                        bytes_moved += created.bytes;
+                        match method {
+                            InventoryMoveMethod::SameVolume => same_volume_actions += 1,
+                            InventoryMoveMethod::CrossVolume => cross_volume_actions += 1,
+                        }
+                    }
+                    logs.push(InventoryExecutionActionLog {
+                        code: action.code.clone(),
+                        kind: action.kind.clone(),
+                        from_path: action.from_path.clone(),
+                        to_path: action.to_path.clone(),
+                        status: InventoryExecutionActionStatus::Moved,
+                        message: created.message.clone(),
+                        bytes: created.bytes,
+                    });
+                    created_targets.push(created);
                 }
                 failed_actions += 1;
                 logs.push(InventoryExecutionActionLog {
@@ -462,7 +487,7 @@ fn execute_prepared_action(
     }
 }
 
-/// Move one validated action into the archive using same-volume rename or cross-volume copy.
+/// Move one validated action using same-volume link/delete or cross-volume copy/delete.
 fn move_prepared_action(
     action: &PreparedInventoryAction,
     archive_root_canonical: &Path,
@@ -472,11 +497,19 @@ fn move_prepared_action(
         bail!("目标路径位于整理目标目录之外");
     }
     let moved = move_file_no_clobber(&action.from_path, &action.to_path, move_strategy)?;
+    Ok(created_move_target(action, moved))
+}
+
+/// Convert moved file metadata into an execution target record.
+fn created_move_target(
+    action: &PreparedInventoryAction,
+    moved: InventoryMovedFile,
+) -> CreatedInventoryTarget {
     let message = match moved.method {
-        InventoryMoveMethod::SameVolume => Some("rename".to_string()),
+        InventoryMoveMethod::SameVolume => Some("same_volume_link_delete".to_string()),
         InventoryMoveMethod::CrossVolume => Some("copy_verify_delete".to_string()),
     };
-    Ok(CreatedInventoryTarget {
+    CreatedInventoryTarget {
         code: action.code.clone(),
         kind: action.kind.clone(),
         operation: CreatedInventoryOperation::Moved(moved.method),
@@ -485,7 +518,7 @@ fn move_prepared_action(
         bytes: moved.bytes,
         sha256: moved.sha256,
         message,
-    })
+    }
 }
 
 /// Create a no-clobber hard link for a validated video action without copying video bytes.
