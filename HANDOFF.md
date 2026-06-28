@@ -86,7 +86,7 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test inventory_execution -j 1`（8 tests）
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（245 tests）
-- `npm test`（64 tests）
+- `npm test`（65 tests）
 - `npx tsc --noEmit`
 - `npm run build`
 
@@ -134,7 +134,7 @@ orphan 明细上限 follow-up 之后额外通过：
 - `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`（28 tests）
 - `cargo test --manifest-path src-tauri/Cargo.toml -j 1`（245 tests）
 - `npm test -- src/viewModel.test.ts src/App.inventory.test.tsx`（55 tests）
-- `npm test`（64 tests）
+- `npm test`（65 tests）
 - `npx tsc --noEmit`
 - `npm run build`
 
@@ -393,6 +393,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 - 新增后端回归：`inventory_low_space_execution_hardlinks_video_and_copies_small_assets`，证明修改源视频会同步反映到目标硬链接，而修改源 NFO 不会影响已复制目标。
 - 前端类型支持 `low_space` / `linked`，盘点页按钮改为“低空间整理”，确认框说明“视频硬链接，小资源复制，源文件不删除”。
 - 执行摘要显示硬链接数量、复制数量、链接视频字节数和复制小文件字节数；最近执行日志显示“已硬链接”。
+- 灰色按钮 follow-up：低空间整理现在只在 `summary.works > works.length` 时禁用；如果只是素材候选/孤儿资源明细截断，仍允许执行完整的作品安全计划。
 - 完整 gate 通过 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`。历史 `resource_pool.rs` warning 仍存在。
 
 ## 阶段 6A 交付物

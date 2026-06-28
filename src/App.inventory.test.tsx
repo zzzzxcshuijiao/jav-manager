@@ -317,4 +317,29 @@ describe("inventory page wiring", () => {
     expect(buttonContaining("低空间整理").disabled).toBe(true);
     expect(document.body.textContent).toContain("报告明细已截断，不能低空间整理全部作品");
   });
+
+  it("allows low-space execution when only non-work inventory details are truncated", async () => {
+    const report = makeInventoryReport();
+    report.truncated = true;
+    report.summary.asset_candidates = 1001;
+    vi.spyOn(api, "previewInventory").mockResolvedValue(report);
+
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("盘点").click();
+    });
+
+    const rootsField = document.querySelector(".inventory-roots-field textarea") as HTMLTextAreaElement;
+    const targetField = document.querySelector(".inventory-roots-field input") as HTMLInputElement;
+    await act(async () => {
+      setTextFieldValue(rootsField, "D:\\inventory-inbox");
+      setTextFieldValue(targetField, "D:\\inventory-archive");
+      buttonContaining("开始盘点").click();
+    });
+
+    expect(buttonContaining("低空间整理").disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("报告明细已截断，不能低空间整理全部作品");
+  });
 });

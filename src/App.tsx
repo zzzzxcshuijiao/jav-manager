@@ -407,7 +407,7 @@ export function App() {
   const inventoryExecutableCount =
     inventoryReport?.works.filter((work) => work.resolution.bucket === "auto_ready" && work.resolution.execution_plan.ready).length ?? 0;
   const inventoryExecutionBlockedByTruncation =
-    Boolean(inventoryReport && (inventoryReport.truncated || inventoryReport.summary.works > inventoryReport.works.length));
+    Boolean(inventoryReport && inventoryReport.summary.works > inventoryReport.works.length);
   const selectedInventoryRoleByPath = useMemo(
     () => new Map(selectedInventoryWork?.resource_roles.map((role) => [role.path, role]) ?? []),
     [selectedInventoryWork]
