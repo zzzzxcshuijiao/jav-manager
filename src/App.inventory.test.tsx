@@ -73,7 +73,20 @@ function makeInventoryReport(): InventoryPreviewReport {
           reasons: ["主视频和主 NFO 已匹配"],
           warnings: [],
           blockers: [],
-          confidence: "high"
+          confidence: "high",
+          execution_plan: {
+            ready: true,
+            actions: [
+              {
+                from_path: "D:\\inventory-inbox\\IPX-201.mp4",
+                to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
+                kind: "video",
+                conflict: null
+              }
+            ],
+            conflicts: [],
+            notes: ["已从重复目标候选中选择安全动作"]
+          }
         },
         resource_roles: []
       }
@@ -184,5 +197,29 @@ describe("inventory page wiring", () => {
     });
 
     expect(exportSpy).toHaveBeenCalledWith(report);
+  });
+
+  it("shows the selected safe execution plan separately from raw candidate actions", async () => {
+    const report = makeInventoryReport();
+    vi.spyOn(api, "previewInventory").mockResolvedValue(report);
+
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("盘点").click();
+    });
+
+    const rootsField = document.querySelector(".inventory-roots-field textarea") as HTMLTextAreaElement;
+    const targetField = document.querySelector(".inventory-roots-field input") as HTMLInputElement;
+    await act(async () => {
+      setTextFieldValue(rootsField, "D:\\inventory-inbox");
+      setTextFieldValue(targetField, "D:\\inventory-archive");
+      buttonContaining("开始盘点").click();
+    });
+
+    expect(document.body.textContent).toContain("安全执行计划");
+    expect(document.body.textContent).toContain("安全计划可执行：1 个动作。");
+    expect(document.body.textContent).toContain("候选动作预览");
   });
 });

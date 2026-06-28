@@ -560,13 +560,14 @@ fn inventory_preview_keeps_missing_roots_as_warnings() {
 fn inventory_resolution_buckets_clean_work_as_auto_ready() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
     write_file(&root.join("IPX-170.mp4"), b"video");
     write_file(
         &root.join("IPX-170.nfo"),
         br#"<movie><num>IPX-170</num><title>Ready</title></movie>"#,
     );
 
-    let report = preview_inventory_roots(&[root], None).unwrap();
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
 
     assert_eq!(report.summary.auto_ready, 1);
     assert_eq!(report.summary.needs_review, 0);
@@ -578,6 +579,188 @@ fn inventory_resolution_buckets_clean_work_as_auto_ready() {
         .unwrap();
     assert_eq!(work.resolution.bucket, InventoryReviewBucket::AutoReady);
     assert_eq!(work.resolution.recommended, "可自动整理");
+}
+
+#[test]
+fn execution_plan_selects_unique_safe_actions_from_duplicate_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-290.mp4"), b"video");
+    write_file(
+        &root.join("IPX-290.nfo"),
+        br#"<movie><num>IPX-290</num><title>Main</title></movie>"#,
+    );
+    write_file(
+        &root.join("metadata-copy.nfo"),
+        br#"<movie><num>IPX-290</num><title>Copy</title></movie>"#,
+    );
+    write_file(&root.join("IPX-290-cover.jpg"), b"cover-a");
+    write_file(&root.join("IPX-290-poster.jpg"), b"cover-b");
+
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-290")
+        .unwrap();
+
+    assert!(work.actions.iter().any(|action| action
+        .conflict
+        .as_deref()
+        .unwrap_or_default()
+        .contains("target_duplicate")));
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::AutoReady);
+    assert!(work.resolution.execution_plan.ready);
+    assert!(work.resolution.execution_plan.conflicts.is_empty());
+    assert!(work
+        .resolution
+        .execution_plan
+        .actions
+        .iter()
+        .all(|action| !action
+            .conflict
+            .as_deref()
+            .unwrap_or_default()
+            .contains("target_duplicate")));
+    assert_eq!(
+        work.resolution
+            .execution_plan
+            .actions
+            .iter()
+            .filter(|action| action.kind == InventoryResourceKind::Nfo)
+            .count(),
+        1
+    );
+    assert_eq!(
+        work.resolution
+            .execution_plan
+            .actions
+            .iter()
+            .filter(|action| action.kind == InventoryResourceKind::Poster)
+            .count(),
+        1
+    );
+    assert!(work
+        .resolution
+        .execution_plan
+        .notes
+        .iter()
+        .any(|note| note.contains("重复目标")));
+}
+
+#[test]
+fn execution_plan_requires_review_for_multi_video_even_when_primary_is_selected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-291.mp4"), b"main-video");
+    write_file(&root.join("IPX-291-CD2.mkv"), b"second-part");
+    write_file(
+        &root.join("IPX-291.nfo"),
+        br#"<movie><num>IPX-291</num><title>Multi video</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-291")
+        .unwrap();
+
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::NeedsReview);
+    assert!(!work.resolution.execution_plan.ready);
+    assert!(work
+        .resolution
+        .execution_plan
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.contains("多视频")));
+}
+
+#[test]
+fn execution_plan_blocks_existing_selected_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-292.mp4"), b"video");
+    write_file(
+        &root.join("IPX-292.nfo"),
+        br#"<movie><num>IPX-292</num><title>Existing target</title></movie>"#,
+    );
+    write_file(&archive.join("IPX-292").join("IPX-292.mp4"), b"existing");
+
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-292")
+        .unwrap();
+
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::Blocked);
+    assert!(!work.resolution.execution_plan.ready);
+    assert!(work
+        .resolution
+        .execution_plan
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.contains("目标路径已存在")));
+    assert!(work
+        .resolution
+        .execution_plan
+        .actions
+        .iter()
+        .any(|action| action
+            .conflict
+            .as_deref()
+            .unwrap_or_default()
+            .contains("target_exists")));
+}
+
+#[test]
+fn execution_plan_blocks_existing_candidate_targets_outside_selected_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    write_file(&root.join("IPX-293.mp4"), b"primary-video");
+    write_file(&root.join("IPX-293-CD2.mkv"), b"second-part");
+    write_file(
+        &root.join("IPX-293.nfo"),
+        br#"<movie><num>IPX-293</num><title>Existing secondary target</title></movie>"#,
+    );
+    write_file(
+        &archive.join("IPX-293").join("IPX-293-v2.mkv"),
+        b"existing-secondary",
+    );
+
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
+    let work = report
+        .works
+        .iter()
+        .find(|work| work.code == "IPX-293")
+        .unwrap();
+
+    assert!(work.actions.iter().any(|action| action
+        .from_path
+        .ends_with("IPX-293-CD2.mkv")
+        && action
+            .conflict
+            .as_deref()
+            .unwrap_or_default()
+            .contains("target_exists")));
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::Blocked);
+    assert!(!work.resolution.execution_plan.ready);
+    assert!(work
+        .resolution
+        .execution_plan
+        .conflicts
+        .iter()
+        .any(|conflict| conflict.contains("目标路径已存在")));
+    assert!(work
+        .resolution
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("目标路径已存在")));
 }
 
 #[test]
@@ -686,6 +869,7 @@ fn inventory_resolution_marks_same_size_non_primary_video_as_duplicate_role() {
 fn inventory_resolution_selects_bare_video_and_matching_nfo_as_primary() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
     write_file(&root.join("IPX-159-CD2.mkv"), b"part2");
     write_file(&root.join("IPX-159.mp4"), b"main-video");
     write_file(
@@ -693,7 +877,7 @@ fn inventory_resolution_selects_bare_video_and_matching_nfo_as_primary() {
         br#"<movie><num>IPX-159</num><title>Main</title></movie>"#,
     );
 
-    let report = preview_inventory_roots(&[root], None).unwrap();
+    let report = preview_inventory_roots(&[root], Some(&archive)).unwrap();
     let work = report
         .works
         .iter()
@@ -724,8 +908,9 @@ fn inventory_resolution_selects_bare_video_and_matching_nfo_as_primary() {
     );
     assert_eq!(
         work.resolution.confidence,
-        media_manager::inventory::InventoryConfidence::High
+        media_manager::inventory::InventoryConfidence::Medium
     );
+    assert_eq!(work.resolution.bucket, InventoryReviewBucket::NeedsReview);
     assert!(work
         .resolution
         .reasons

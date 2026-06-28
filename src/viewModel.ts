@@ -15,6 +15,7 @@ import type {
   IngestItem,
   IngestItemFilters,
   InventoryConfidence,
+  InventoryExecutionPlan,
   InventoryExportResult,
   InventoryPreviewAction,
   InventoryPreviewReport,
@@ -510,6 +511,20 @@ export function formatInventoryResourceRole(role: InventoryResourceRoleKind): st
 /** Summarize one work's read-only pairing recommendation. */
 export function formatInventoryResolutionSummary(work: InventoryWorkPreview): string {
   return `${work.resolution.recommended} · 置信度 ${formatInventoryConfidence(work.resolution.confidence)}`;
+}
+
+/** Summarize the selected execution plan separately from raw candidate actions. */
+export function formatInventoryExecutionPlanSummary(plan: InventoryExecutionPlan): string {
+  if (plan.ready) {
+    return `安全计划可执行：${plan.actions.length} 个动作。`;
+  }
+  if (plan.conflicts.length > 0) {
+    return `安全计划需复核：${plan.conflicts.join("；")}。`;
+  }
+  if (plan.actions.length === 0) {
+    return "安全计划不可执行：暂无动作。";
+  }
+  return `安全计划需复核：${plan.actions.length} 个动作待确认。`;
 }
 
 /** Filter inventory work previews by Stage 7B review bucket or existing Stage 7A status. */

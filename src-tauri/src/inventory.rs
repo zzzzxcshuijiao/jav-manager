@@ -112,6 +112,15 @@ pub struct InventoryResourceRole {
     pub needs_review: bool,
 }
 
+/// Selected, de-duplicated action set that a future execution stage may consume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryExecutionPlan {
+    pub ready: bool,
+    pub actions: Vec<InventoryPreviewAction>,
+    pub conflicts: Vec<String>,
+    pub notes: Vec<String>,
+}
+
 /// Work-level read-only pairing decision used by the review UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryResolution {
@@ -123,6 +132,7 @@ pub struct InventoryResolution {
     pub warnings: Vec<String>,
     pub blockers: Vec<String>,
     pub confidence: InventoryConfidence,
+    pub execution_plan: InventoryExecutionPlan,
 }
 
 /// A planned target path. Stage 7A describes actions but never executes them.
@@ -422,9 +432,10 @@ fn build_resolution(
         reasons.push(reason);
     }
 
+    let execution_plan = build_execution_plan(statuses, actions, primary_video, primary_nfo);
     let warnings = resolution_warnings(primary_video, primary_nfo, statuses);
     let blockers = resolution_blockers(statuses, actions);
-    let bucket = resolution_bucket(statuses, primary_video, primary_nfo, &warnings, &blockers);
+    let bucket = resolution_bucket(statuses, &execution_plan, &blockers);
     let confidence = resolution_confidence(&bucket, primary_video, primary_nfo);
     let recommended = resolution_recommendation(&bucket, primary_video, primary_nfo);
     let roles = build_resource_roles(resources, primary_video, primary_nfo);
@@ -439,9 +450,163 @@ fn build_resolution(
             warnings,
             blockers,
             confidence,
+            execution_plan,
         },
         roles,
     )
+}
+
+// Build the execution-facing subset of candidate actions without mutating the raw preview list.
+fn build_execution_plan(
+    statuses: &[InventoryStatus],
+    actions: &[InventoryPreviewAction],
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> InventoryExecutionPlan {
+    let mut selected_actions = Vec::new();
+    let mut selected_targets = BTreeSet::new();
+    let mut notes = Vec::new();
+    let saw_duplicate_candidates = actions.iter().any(|action| {
+        conflict_tokens(action)
+            .iter()
+            .any(|token| *token == "target_duplicate")
+    });
+
+    for action in actions {
+        if !execution_candidate_selected(action, primary_video, primary_nfo) {
+            continue;
+        }
+        if let Some(to_path) = &action.to_path {
+            let target_key = duplicate_target_key(to_path);
+            if !selected_targets.insert(target_key) {
+                continue;
+            }
+        }
+        selected_actions.push(execution_action_from_candidate(action));
+    }
+
+    if saw_duplicate_candidates {
+        notes.push("已从重复目标候选中选择安全动作，其余候选仅供复核".to_string());
+    }
+
+    let conflicts = execution_plan_conflicts(
+        statuses,
+        actions,
+        &selected_actions,
+        primary_video,
+        primary_nfo,
+    );
+    let ready = !selected_actions.is_empty() && conflicts.is_empty();
+
+    InventoryExecutionPlan {
+        ready,
+        actions: selected_actions,
+        conflicts,
+        notes,
+    }
+}
+
+// Decide whether a raw candidate action is eligible for the selected execution plan.
+fn execution_candidate_selected(
+    action: &InventoryPreviewAction,
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> bool {
+    match action.kind {
+        InventoryResourceKind::Video => primary_video
+            .map(|resource| resource.path == action.from_path)
+            .unwrap_or(false),
+        InventoryResourceKind::Nfo => primary_nfo
+            .map(|resource| resource.path == action.from_path)
+            .unwrap_or(false),
+        InventoryResourceKind::Poster
+        | InventoryResourceKind::Fanart
+        | InventoryResourceKind::Thumb
+        | InventoryResourceKind::Screenshot
+        | InventoryResourceKind::Gif
+        | InventoryResourceKind::Image
+        | InventoryResourceKind::Other => true,
+    }
+}
+
+// Copy a raw candidate action into the execution plan while dropping candidate-only duplicate flags.
+fn execution_action_from_candidate(action: &InventoryPreviewAction) -> InventoryPreviewAction {
+    InventoryPreviewAction {
+        from_path: action.from_path.clone(),
+        to_path: action.to_path.clone(),
+        kind: action.kind.clone(),
+        conflict: action_conflict_without(action, "target_duplicate"),
+    }
+}
+
+// Remove one conflict token from the compact comma-separated action conflict string.
+fn action_conflict_without(action: &InventoryPreviewAction, removed: &str) -> Option<String> {
+    let tokens: Vec<&str> = conflict_tokens(action)
+        .into_iter()
+        .filter(|token| *token != removed)
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(","))
+    }
+}
+
+// Collect user-facing reasons that prevent the selected plan from being auto-executable.
+fn execution_plan_conflicts(
+    statuses: &[InventoryStatus],
+    raw_actions: &[InventoryPreviewAction],
+    selected_actions: &[InventoryPreviewAction],
+    primary_video: Option<&InventoryResource>,
+    primary_nfo: Option<&InventoryResource>,
+) -> Vec<String> {
+    let mut conflicts = Vec::new();
+    if statuses.contains(&InventoryStatus::AssetOnly) {
+        push_unique_conflict(&mut conflicts, "素材候选缺少视频或 NFO 锚点");
+    } else {
+        if primary_video.is_none() {
+            push_unique_conflict(&mut conflicts, "缺少主视频");
+        }
+        if primary_nfo.is_none() {
+            push_unique_conflict(&mut conflicts, "缺少主 NFO");
+        }
+    }
+    if statuses.contains(&InventoryStatus::CodeConflict) {
+        push_unique_conflict(&mut conflicts, "番号证据冲突");
+    }
+    if statuses.contains(&InventoryStatus::NfoParseError) {
+        push_unique_conflict(&mut conflicts, "NFO 解析失败");
+    }
+    if statuses.contains(&InventoryStatus::MultiVideo) {
+        push_unique_conflict(&mut conflicts, "多视频需要人工确认");
+    }
+    if statuses.contains(&InventoryStatus::DuplicateCandidate) {
+        push_unique_conflict(&mut conflicts, "疑似重复视频需要人工确认");
+    }
+    if selected_actions.is_empty() {
+        push_unique_conflict(&mut conflicts, "没有可执行动作");
+    }
+    if selected_actions.iter().any(|action| action.to_path.is_none()) {
+        push_unique_conflict(&mut conflicts, "未配置整理目标目录");
+    }
+    if actions_have_conflict(raw_actions, "target_exists") {
+        push_unique_conflict(&mut conflicts, "目标路径已存在");
+    }
+    for action in selected_actions {
+        for token in conflict_tokens(action) {
+            if token != "target_exists" {
+                push_unique_conflict(&mut conflicts, &format!("存在动作冲突：{token}"));
+            }
+        }
+    }
+    conflicts
+}
+
+// Append a conflict once while preserving the first-seen explanation order.
+fn push_unique_conflict(conflicts: &mut Vec<String>, conflict: &str) {
+    if !conflicts.iter().any(|existing| existing == conflict) {
+        conflicts.push(conflict.to_string());
+    }
 }
 
 // Return videos in primary-selection order while keeping deterministic path fallback.
@@ -614,11 +779,10 @@ fn resolution_blockers(
     if statuses.contains(&InventoryStatus::CodeConflict) {
         blockers.push("番号证据冲突".to_string());
     }
-    if actions.iter().any(|action| {
-        conflict_tokens(action)
-            .iter()
-            .any(|token| *token == "target_exists")
-    }) {
+    if statuses.contains(&InventoryStatus::NfoParseError) {
+        blockers.push("NFO 解析失败".to_string());
+    }
+    if actions_have_conflict(actions, "target_exists") {
         blockers.push("目标路径已存在".to_string());
     }
     blockers
@@ -638,12 +802,19 @@ fn conflict_tokens(action: &InventoryPreviewAction) -> Vec<&str> {
         .unwrap_or_default()
 }
 
+// Check action conflict tokens without depending on localized conflict messages.
+fn actions_have_conflict(actions: &[InventoryPreviewAction], expected: &str) -> bool {
+    actions.iter().any(|action| {
+        conflict_tokens(action)
+            .iter()
+            .any(|token| *token == expected)
+    })
+}
+
 // Assign the review bucket that drives the Stage 7B manual review queues.
 fn resolution_bucket(
     statuses: &[InventoryStatus],
-    primary_video: Option<&InventoryResource>,
-    primary_nfo: Option<&InventoryResource>,
-    warnings: &[String],
+    execution_plan: &InventoryExecutionPlan,
     blockers: &[String],
 ) -> InventoryReviewBucket {
     if statuses.contains(&InventoryStatus::AssetOnly) {
@@ -652,11 +823,7 @@ fn resolution_bucket(
     if !blockers.is_empty() {
         return InventoryReviewBucket::Blocked;
     }
-    if statuses.contains(&InventoryStatus::Ready)
-        && primary_video.is_some()
-        && primary_nfo.is_some()
-        && warnings.is_empty()
-    {
+    if execution_plan.ready {
         return InventoryReviewBucket::AutoReady;
     }
     InventoryReviewBucket::NeedsReview
