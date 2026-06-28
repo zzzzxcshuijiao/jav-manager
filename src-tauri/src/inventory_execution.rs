@@ -2,6 +2,9 @@ use crate::inventory::{
     InventoryPreviewAction, InventoryPreviewReport, InventoryResourceKind, InventoryReviewBucket,
     InventoryWorkPreview,
 };
+use crate::inventory_move::{
+    move_file_no_clobber, InventoryMoveMethod, InventoryMoveStrategy, SystemInventoryMoveStrategy,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -96,6 +99,7 @@ struct PreparedInventoryExecution {
 enum CreatedInventoryOperation {
     Copied,
     Linked,
+    Moved(InventoryMoveMethod),
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +110,8 @@ struct CreatedInventoryTarget {
     source_path: PathBuf,
     path: PathBuf,
     bytes: u64,
-    sha256: String,
+    sha256: Option<String>,
+    message: Option<String>,
 }
 
 /// Rollback summary for targets created before an execution failure.
@@ -116,15 +121,35 @@ struct InventoryRollbackCounts {
     rollback_failed: usize,
 }
 
+/// Optional execution dependencies used by tests to force move strategy branches.
+pub struct InventoryExecutionOptions<'a> {
+    pub move_strategy: &'a dyn InventoryMoveStrategy,
+}
+
+impl<'a> InventoryExecutionOptions<'a> {
+    /// Build production execution options backed by the real filesystem.
+    pub fn system() -> Self {
+        static SYSTEM_MOVE_STRATEGY: SystemInventoryMoveStrategy = SystemInventoryMoveStrategy;
+        Self {
+            move_strategy: &SYSTEM_MOVE_STRATEGY,
+        }
+    }
+}
+
 /// Execute a preview report's safe inventory plan.
 pub fn execute_inventory_report(
     report: &InventoryPreviewReport,
     request: &InventoryExecutionRequest,
 ) -> Result<InventoryExecutionReport> {
-    if request.mode == InventoryExecutionMode::Move {
-        bail!("集中迁移执行尚未启用");
-    }
+    execute_inventory_report_with_options(report, request, &InventoryExecutionOptions::system())
+}
 
+/// Execute a preview report with explicit filesystem dependencies for branch testing.
+pub fn execute_inventory_report_with_options(
+    report: &InventoryPreviewReport,
+    request: &InventoryExecutionRequest,
+    options: &InventoryExecutionOptions<'_>,
+) -> Result<InventoryExecutionReport> {
     let prepared = prepare_inventory_execution(report, request)?;
     let started_at = Utc::now().to_rfc3339();
     let run_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_micros());
@@ -134,16 +159,16 @@ pub fn execute_inventory_report(
     let mut planned_counts_by_code: BTreeMap<String, usize> = BTreeMap::new();
     let mut linked_actions = 0;
     let mut copied_actions = 0;
-    let moved_actions = 0;
+    let mut moved_actions = 0;
     let mut failed_actions = 0;
     let mut rolled_back_actions = 0;
     let mut rollback_failed_actions = 0;
-    let same_volume_actions = 0;
-    let cross_volume_actions = 0;
+    let mut same_volume_actions = 0;
+    let mut cross_volume_actions = 0;
     let space_blocked_actions = 0;
     let mut bytes_linked = 0;
     let mut bytes_copied = 0;
-    let bytes_moved = 0;
+    let mut bytes_moved = 0;
 
     for action in &prepared.actions {
         *planned_counts_by_code
@@ -158,6 +183,7 @@ pub fn execute_inventory_report(
             &prepared.archive_root_canonical,
             &run_id,
             index,
+            options,
         ) {
             Ok(created) => {
                 let status = match created.operation {
@@ -171,6 +197,15 @@ pub fn execute_inventory_report(
                         bytes_linked += created.bytes;
                         InventoryExecutionActionStatus::Linked
                     }
+                    CreatedInventoryOperation::Moved(method) => {
+                        moved_actions += 1;
+                        bytes_moved += created.bytes;
+                        match method {
+                            InventoryMoveMethod::SameVolume => same_volume_actions += 1,
+                            InventoryMoveMethod::CrossVolume => cross_volume_actions += 1,
+                        }
+                        InventoryExecutionActionStatus::Moved
+                    }
                 };
                 created_targets.push(created.clone());
                 *successful_counts_by_code
@@ -182,7 +217,7 @@ pub fn execute_inventory_report(
                     from_path: action.from_path.clone(),
                     to_path: action.to_path.clone(),
                     status,
-                    message: None,
+                    message: created.message.clone(),
                     bytes: created.bytes,
                 });
             }
@@ -197,7 +232,12 @@ pub fn execute_inventory_report(
                     message: Some(error.to_string()),
                     bytes: 0,
                 });
-                let rollback = rollback_created_targets(&created_targets, &mut logs);
+                let current_work_created_targets = created_targets
+                    .iter()
+                    .filter(|target| target.code == action.code)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let rollback = rollback_created_targets(&current_work_created_targets, &mut logs);
                 rolled_back_actions += rollback.rolled_back;
                 rollback_failed_actions += rollback.rollback_failed;
                 break;
@@ -205,16 +245,12 @@ pub fn execute_inventory_report(
         }
     }
 
-    let executed_works = if failed_actions == 0 {
-        planned_counts_by_code
-            .iter()
-            .filter(|(code, planned_count)| {
-                successful_counts_by_code.get(*code).copied().unwrap_or(0) == **planned_count
-            })
-            .count()
-    } else {
-        0
-    };
+    let executed_works = planned_counts_by_code
+        .iter()
+        .filter(|(code, planned_count)| {
+            successful_counts_by_code.get(*code).copied().unwrap_or(0) == **planned_count
+        })
+        .count();
 
     Ok(InventoryExecutionReport {
         mode: request.mode,
@@ -409,14 +445,43 @@ fn execute_prepared_action(
     archive_root_canonical: &Path,
     run_id: &str,
     index: usize,
+    options: &InventoryExecutionOptions<'_>,
 ) -> Result<CreatedInventoryTarget> {
     match (mode, &action.kind) {
-        (InventoryExecutionMode::Move, _) => bail!("集中迁移执行尚未启用"),
+        (InventoryExecutionMode::Move, _) => {
+            move_prepared_action(action, archive_root_canonical, options.move_strategy)
+        }
         (InventoryExecutionMode::LowSpace, InventoryResourceKind::Video) => {
             link_prepared_video_action(action, archive_root_canonical)
         }
         _ => copy_prepared_action(action, archive_root_canonical, run_id, index),
     }
+}
+
+/// Move one validated action into the archive using no-copy same-volume semantics.
+fn move_prepared_action(
+    action: &PreparedInventoryAction,
+    archive_root_canonical: &Path,
+    move_strategy: &dyn InventoryMoveStrategy,
+) -> Result<CreatedInventoryTarget> {
+    if !target_existing_parent_is_inside_root(&action.to_path, archive_root_canonical)? {
+        bail!("目标路径位于整理目标目录之外");
+    }
+    let moved = move_file_no_clobber(&action.from_path, &action.to_path, move_strategy)?;
+    let message = match moved.method {
+        InventoryMoveMethod::SameVolume => Some("rename".to_string()),
+        InventoryMoveMethod::CrossVolume => None,
+    };
+    Ok(CreatedInventoryTarget {
+        code: action.code.clone(),
+        kind: action.kind.clone(),
+        operation: CreatedInventoryOperation::Moved(moved.method),
+        source_path: moved.from_path,
+        path: moved.to_path,
+        bytes: moved.bytes,
+        sha256: moved.sha256,
+        message,
+    })
 }
 
 /// Create a no-clobber hard link for a validated video action without copying video bytes.
@@ -450,7 +515,8 @@ fn link_prepared_video_action(
         source_path: action.from_path.clone(),
         path: action.to_path.clone(),
         bytes: source_size,
-        sha256: String::new(),
+        sha256: None,
+        message: None,
     })
 }
 
@@ -491,7 +557,8 @@ fn copy_prepared_action(
         source_path: action.from_path.clone(),
         path: action.to_path.clone(),
         bytes: source_size,
-        sha256,
+        sha256: Some(sha256),
+        message: None,
     })
 }
 
@@ -596,7 +663,7 @@ fn copy_temp_to_new_target(temp_path: &Path, to_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove files created earlier in the same run after a runtime failure.
+/// Remove rollback-safe files created earlier in the same run after a runtime failure.
 fn rollback_created_targets(
     created_targets: &[CreatedInventoryTarget],
     logs: &mut Vec<InventoryExecutionActionLog>,
@@ -604,12 +671,30 @@ fn rollback_created_targets(
     let mut rolled_back = 0;
     let mut rollback_failed = 0;
     for target in created_targets.iter().rev() {
+        if let CreatedInventoryOperation::Moved(_) = target.operation {
+            rollback_failed += 1;
+            logs.push(InventoryExecutionActionLog {
+                code: target.code.clone(),
+                kind: target.kind.clone(),
+                from_path: target.path.clone(),
+                to_path: target.path.clone(),
+                status: InventoryExecutionActionStatus::RollbackFailed,
+                message: Some(
+                    "回滚跳过：迁移目标已保留，避免删除唯一副本；后续阶段恢复源路径".to_string(),
+                ),
+                bytes: 0,
+            });
+            continue;
+        }
         match created_target_still_matches(target) {
             Ok(true) if fs::remove_file(&target.path).is_ok() => {
                 rolled_back += 1;
                 let message = match target.operation {
                     CreatedInventoryOperation::Copied => "执行失败后已删除本轮复制目标文件",
                     CreatedInventoryOperation::Linked => "执行失败后已删除本轮生成的硬链接目标",
+                    CreatedInventoryOperation::Moved(_) => {
+                        unreachable!("moved targets are retained")
+                    }
                 };
                 logs.push(InventoryExecutionActionLog {
                     code: target.code.clone(),
@@ -655,10 +740,12 @@ fn rollback_created_targets(
 
 /// Confirm that a rollback target still has the bytes and hash created by this run.
 fn created_target_still_matches(target: &CreatedInventoryTarget) -> Result<bool> {
-    if target.operation == CreatedInventoryOperation::Linked {
-        return linked_target_still_removable(target);
+    match target.operation {
+        CreatedInventoryOperation::Copied => copied_target_still_matches(target),
+        CreatedInventoryOperation::Linked | CreatedInventoryOperation::Moved(_) => {
+            linked_target_still_removable(target)
+        }
     }
-    copied_target_still_matches(target)
 }
 
 /// Confirm that a copied rollback target still has the bytes and hash created by this run.
@@ -670,7 +757,12 @@ fn copied_target_still_matches(target: &CreatedInventoryTarget) -> Result<bool> 
     if !metadata.is_file() || metadata.len() != target.bytes {
         return Ok(false);
     }
-    Ok(file_sha256(&target.path)? == target.sha256)
+    Ok(target
+        .sha256
+        .as_deref()
+        .map(|sha256| file_sha256(&target.path).map(|actual| actual == sha256))
+        .transpose()?
+        .unwrap_or(false))
 }
 
 /// Confirm that a linked rollback target can be removed without touching the source path.
@@ -832,7 +924,8 @@ mod tests {
             source_path,
             path: target_path,
             bytes: 1,
-            sha256: "not-the-target-hash".to_string(),
+            sha256: Some("not-the-target-hash".to_string()),
+            message: None,
         };
         let mut logs = Vec::new();
 
@@ -840,6 +933,9 @@ mod tests {
 
         assert_eq!(rollback.rolled_back, 0);
         assert_eq!(rollback.rollback_failed, 1);
-        assert_eq!(logs[0].status, InventoryExecutionActionStatus::RollbackFailed);
+        assert_eq!(
+            logs[0].status,
+            InventoryExecutionActionStatus::RollbackFailed
+        );
     }
 }

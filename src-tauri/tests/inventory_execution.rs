@@ -2,11 +2,26 @@ use media_manager::inventory::{
     preview_inventory_roots, InventoryPreviewAction, InventoryResourceKind, InventoryReviewBucket,
 };
 use media_manager::inventory_execution::{
-    execute_inventory_report, InventoryExecutionActionStatus, InventoryExecutionMode,
+    execute_inventory_report, execute_inventory_report_with_options,
+    InventoryExecutionActionStatus, InventoryExecutionMode, InventoryExecutionOptions,
     InventoryExecutionReport, InventoryExecutionRequest,
 };
+use media_manager::inventory_move::InventoryMoveStrategy;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Test move strategy that forces the cross-volume branch without extra disks.
+struct ForcedCrossVolumeMoveStrategy;
+
+impl InventoryMoveStrategy for ForcedCrossVolumeMoveStrategy {
+    fn is_same_volume(&self, _from_path: &Path, _to_path: &Path) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    fn available_space(&self, _path: &Path) -> anyhow::Result<u64> {
+        Ok(u64::MAX)
+    }
+}
 
 /// Write a small test file, creating parent directories as needed.
 fn write_file(path: &Path, contents: &[u8]) {
@@ -28,6 +43,14 @@ fn copy_all_request() -> InventoryExecutionRequest {
 fn low_space_all_request() -> InventoryExecutionRequest {
     InventoryExecutionRequest {
         mode: InventoryExecutionMode::LowSpace,
+        selected_codes: Vec::new(),
+    }
+}
+
+/// Build a centralized move request for integration tests.
+fn move_all_request() -> InventoryExecutionRequest {
+    InventoryExecutionRequest {
+        mode: InventoryExecutionMode::Move,
         selected_codes: Vec::new(),
     }
 }
@@ -90,7 +113,7 @@ fn inventory_execution_report_serializes_move_contract() {
 }
 
 #[test]
-fn inventory_move_execution_is_not_enabled_before_move_task() {
+fn inventory_move_execution_rejects_cross_volume_before_task4() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let archive = tmp.path().join("archive");
@@ -103,18 +126,208 @@ fn inventory_move_execution_is_not_enabled_before_move_task() {
     );
 
     let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
-    let request = InventoryExecutionRequest {
-        mode: InventoryExecutionMode::Move,
-        selected_codes: Vec::new(),
+    let move_strategy = ForcedCrossVolumeMoveStrategy;
+    let options = InventoryExecutionOptions {
+        move_strategy: &move_strategy,
     };
 
-    let error = execute_inventory_report(&report, &request).unwrap_err();
+    let execution =
+        execute_inventory_report_with_options(&report, &move_all_request(), &options).unwrap();
 
-    assert!(error.to_string().contains("集中迁移执行尚未启用"));
-    assert!(video.exists(), "disabled move mode must keep the source video");
-    assert!(nfo.exists(), "disabled move mode must keep the source NFO");
+    assert_eq!(execution.executed_works, 0);
+    assert_eq!(execution.moved_actions, 0);
+    assert_eq!(execution.same_volume_actions, 0);
+    assert_eq!(execution.cross_volume_actions, 0);
+    assert_eq!(execution.failed_actions, 1);
+    assert!(execution.logs.iter().any(|log| {
+        log.status == InventoryExecutionActionStatus::Failed
+            && log
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("跨盘集中迁移尚未启用")
+    }));
+    assert!(
+        video.exists(),
+        "cross-volume move must keep the source video"
+    );
+    assert!(nfo.exists(), "cross-volume move must keep the source NFO");
     assert!(!archive.join("IPX-701").join("IPX-701.mp4").exists());
     assert!(!archive.join("IPX-701").join("IPX-701.nfo").exists());
+}
+
+#[test]
+fn inventory_move_execution_moves_sources_into_archive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-601.mp4");
+    let nfo = root.join("IPX-601.nfo");
+    let poster = root.join("IPX-601-cover.jpg");
+    let nfo_contents = br#"<movie><num>IPX-601</num><title>Ready</title></movie>"#;
+    write_file(&video, b"video");
+    write_file(&nfo, nfo_contents);
+    write_file(&poster, b"poster");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let execution = execute_inventory_report(&report, &move_all_request()).unwrap();
+
+    assert_eq!(execution.mode, InventoryExecutionMode::Move);
+    assert_eq!(execution.executed_works, 1);
+    assert_eq!(execution.moved_actions, 3);
+    assert_eq!(execution.same_volume_actions, 3);
+    assert_eq!(execution.cross_volume_actions, 0);
+    assert_eq!(execution.failed_actions, 0);
+    assert_eq!(execution.bytes_moved, 5 + nfo_contents.len() as u64 + 6);
+    assert!(!video.exists(), "move mode must remove the source video");
+    assert!(!nfo.exists(), "move mode must remove the source NFO");
+    assert!(
+        !poster.exists(),
+        "move mode must remove the selected poster"
+    );
+    assert_eq!(
+        fs::read(archive.join("IPX-601").join("IPX-601.mp4")).unwrap(),
+        b"video"
+    );
+    assert_eq!(
+        fs::read(archive.join("IPX-601").join("IPX-601.nfo")).unwrap(),
+        nfo_contents
+    );
+    assert_eq!(
+        fs::read(archive.join("IPX-601").join("poster.jpg")).unwrap(),
+        b"poster"
+    );
+    assert!(execution
+        .logs
+        .iter()
+        .all(|log| log.status == InventoryExecutionActionStatus::Moved));
+    assert!(execution
+        .logs
+        .iter()
+        .all(|log| log.message.as_deref() == Some("rename")));
+}
+
+#[test]
+fn inventory_move_execution_rejects_existing_target_without_touching_source_or_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-609.mp4");
+    let nfo = root.join("IPX-609.nfo");
+    let existing_target = archive.join("IPX-609").join("IPX-609.mp4");
+    write_file(&video, b"video");
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-609</num><title>Ready</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    write_file(&existing_target, b"existing");
+    let error = execute_inventory_report(&report, &move_all_request()).unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("目标路径已存在"));
+    assert_eq!(fs::read(&video).unwrap(), b"video");
+    assert_eq!(fs::read(&existing_target).unwrap(), b"existing");
+}
+
+#[test]
+fn inventory_move_execution_keeps_moved_target_when_later_action_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-606.mp4");
+    let nfo = root.join("IPX-606.nfo");
+    write_file(&video, b"video");
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-606</num><title>Ready</title></movie>"#,
+    );
+
+    let mut report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let work = report
+        .works
+        .iter_mut()
+        .find(|work| work.code == "IPX-606")
+        .unwrap();
+    work.resolution
+        .execution_plan
+        .actions
+        .iter_mut()
+        .find(|action| action.kind == InventoryResourceKind::Nfo)
+        .unwrap()
+        .from_path = video.clone();
+
+    let execution = execute_inventory_report(&report, &move_all_request()).unwrap();
+    let archive_video = archive.join("IPX-606").join("IPX-606.mp4");
+    let archive_nfo = archive.join("IPX-606").join("IPX-606.nfo");
+
+    assert_eq!(execution.failed_actions, 1);
+    assert_eq!(execution.rolled_back_actions, 0);
+    assert_eq!(execution.rollback_failed_actions, 1);
+    assert!(!video.exists(), "source video was already moved");
+    assert_eq!(fs::read(&archive_video).unwrap(), b"video");
+    assert!(
+        !archive_nfo.exists(),
+        "failed NFO action must not create target"
+    );
+    assert!(execution.logs.iter().any(|log| {
+        log.status == InventoryExecutionActionStatus::RollbackFailed
+            && log
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("迁移目标已保留")
+    }));
+}
+
+#[test]
+fn inventory_move_execution_counts_completed_work_and_rolls_back_only_failed_work_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let first_video = root.join("IPX-607.mp4");
+    let first_nfo = root.join("IPX-607.nfo");
+    let second_video = root.join("IPX-608.mp4");
+    let second_nfo = root.join("IPX-608.nfo");
+    write_file(&first_video, b"first-video");
+    write_file(
+        &first_nfo,
+        br#"<movie><num>IPX-607</num><title>First</title></movie>"#,
+    );
+    write_file(&second_video, b"second-video");
+    write_file(
+        &second_nfo,
+        br#"<movie><num>IPX-608</num><title>Second</title></movie>"#,
+    );
+
+    let mut report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let second_work = report
+        .works
+        .iter_mut()
+        .find(|work| work.code == "IPX-608")
+        .unwrap();
+    second_work
+        .resolution
+        .execution_plan
+        .actions
+        .iter_mut()
+        .find(|action| action.kind == InventoryResourceKind::Nfo)
+        .unwrap()
+        .from_path = second_video.clone();
+
+    let execution = execute_inventory_report(&report, &move_all_request()).unwrap();
+
+    assert_eq!(execution.executed_works, 1);
+    assert_eq!(execution.failed_actions, 1);
+    assert_eq!(execution.rollback_failed_actions, 1);
+    assert!(archive.join("IPX-607").join("IPX-607.mp4").exists());
+    assert!(archive.join("IPX-607").join("IPX-607.nfo").exists());
+    assert!(archive.join("IPX-608").join("IPX-608.mp4").exists());
+    assert!(!archive.join("IPX-608").join("IPX-608.nfo").exists());
+    assert!(!execution.logs.iter().any(|log| {
+        log.code == "IPX-607" && log.status == InventoryExecutionActionStatus::RollbackFailed
+    }));
 }
 
 #[test]

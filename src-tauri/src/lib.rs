@@ -12,6 +12,7 @@ pub mod identifier;
 pub mod ingest;
 pub mod inventory;
 pub mod inventory_execution;
+pub mod inventory_move;
 pub mod matcher;
 pub mod migration;
 pub mod nfo;
