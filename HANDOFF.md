@@ -61,6 +61,9 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 7D（低空间存量整理执行）已实现并验证。** 当前工作分支：`codex/stage7d-low-space-execution`。
 阶段 7D 把 7C 的默认真实执行入口改成适合大视频库的低空间模式：前端“复制整理”改为“低空间整理”，显式调用 `low_space`；视频动作不复制内容，而是在同一文件系统内对源视频创建硬链接；NFO、poster、fanart、thumb、screenshot、GIF、image、other 等小资源继续走 7C 的临时文件 + no-clobber 复制流程。执行报告新增 `linked_actions` / `bytes_linked` 与 `linked` 日志状态，摘要会区分“硬链接视频”和“复制小文件”。硬链接失败不会 fallback 成复制视频，避免真实媒体库意外占满磁盘；源文件仍不删除、不移动，不写 SQLite，不执行人工复核项。
 
+**M1（存量资源集中迁移）设计已固化。** 当前工作分支：`codex/m1-inventory-centralized-migration`。
+M1 是用户真实需求的主线修正：不再把默认目标停留在复制或硬链接，而是把散落在多个目录的视频、NFO、图片、GIF 等资源，按既定 `archive_root/CODE/` 布局直接集中迁移。设计要求同卷直接移动；跨卷逐文件复制、校验、提交目标后删除源文件；每个跨卷文件迁移前检查目标卷剩余空间；目标已存在永不覆盖；源文件只在目标校验成功后删除。M1 仍以 `resolution.execution_plan.actions` 为唯一自动执行输入，不执行需人工复核项、不处理孤儿资源、不写 SQLite。下一步应先写 TDD 实施计划，再进入后端执行器和前端入口开发。
+
 验证已通过：
 
 - `cargo test --manifest-path src-tauri/Cargo.toml --test inventory -j 1`
@@ -199,6 +202,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 30. **`docs/superpowers/plans/2026-06-28-media-manager-stage7b-pairing-rules.md`** — 阶段 7B plan（已完成，含 TDD 步骤、评审记录和验收）。
 31. **`docs/superpowers/specs/2026-06-28-media-manager-stage7b1-safe-execution-plan-design.md`** — 阶段 7B.1 盘点执行计划安全化设计（已完成）。
 32. **`docs/superpowers/plans/2026-06-28-media-manager-stage7b1-safe-execution-plan.md`** — 阶段 7B.1 plan（已完成，含 TDD 步骤与验收）。
+33. **`docs/superpowers/specs/2026-06-28-media-manager-stage7c-inventory-copy-execution-design.md`** — 阶段 7C 存量复制整理执行设计（已完成）。
+34. **`docs/superpowers/plans/2026-06-28-media-manager-stage7c-inventory-copy-execution.md`** — 阶段 7C plan（已完成，含 TDD 步骤与验收）。
+35. **`docs/superpowers/specs/2026-06-28-media-manager-stage7d-low-space-inventory-execution-design.md`** — 阶段 7D 低空间存量整理执行设计（已完成）。
+36. **`docs/superpowers/plans/2026-06-28-media-manager-stage7d-low-space-inventory-execution.md`** — 阶段 7D plan（已完成，含 TDD 步骤与验收）。
+37. **`docs/superpowers/specs/2026-06-28-media-manager-m1-centralized-inventory-migration-design.md`** — M1 存量资源集中迁移设计（当前主线，下一步写实施计划）。
 
 ## 阶段 1 交付物
 
@@ -418,7 +426,9 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-如果先做实际环境验证，重点测阶段 7D 的“盘点预览 + 低空间整理”：
+当前主线已经切到 **M1：存量资源集中迁移**。下一步不要继续围绕 7D 的硬链接整理扩展，先用 `writing-plans` 为 M1 写 TDD 实施计划，计划输入是 `docs/superpowers/specs/2026-06-28-media-manager-m1-centralized-inventory-migration-design.md`。
+
+如果先做实际环境验证，阶段 7D 仍可作为只增不删的保守验证路径：
 
 1. 用户在自己的交互桌面终端运行 `npm run dev`，用浏览器打开 `http://localhost:1420`；Codex 不启动 WebView2/Tauri GUI。
 2. 设置页 → 自动管线 → 可先跑“一键自检”确认基础链路。
@@ -430,7 +440,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 8. 整理后重新点击“开始盘点”验证目标状态；如果目标已存在，后续报告应把对应目标冲突识别出来。
 9. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。
 
-如果继续做 Codex 可编码工作，下一阶段建议是 **7E：低空间整理后的闭环校验与入库同步**。范围可以包括：目标目录回读校验、硬链接/复制结果的可导出执行明细、SQLite 库入库同步、人工复核项执行、移动/删除源文件的二次确认策略、可重试队列，以及整理后的浏览库体验。7E 仍不应直接消费 `InventoryWorkPreview.actions`；必须继续以 `resolution.execution_plan.actions` 或人工确认后的新执行计划为准。aria2 下载任务管理、常驻轮询、WebSocket/callback、托盘、自启仍是后续增强，不进入 7E 主线。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，优先进入 M1 实施：新增 `move` 执行模式、同卷直接移动、跨卷逐文件复制校验删除、空间检查、作品级回滚、执行报告和“一键盘点”主按钮切换。迁移结果入库同步、目标库重建、人工复核项执行和旧迁移入口清理放到 M1 之后。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；Codex 验证继续用 `cargo test --manifest-path src-tauri/Cargo.toml -j 1`、`npm test`、`npx tsc --noEmit`、`npm run build`，视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 
