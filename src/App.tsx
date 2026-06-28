@@ -947,34 +947,34 @@ export function App() {
     }
   }
 
-  /** 复制执行当前盘点报告中的安全执行计划，源文件保持不变。 */
+  /** 低空间执行当前盘点报告中的安全执行计划，视频硬链接，小资源复制。 */
   async function executeInventoryPreview() {
     if (!inventoryReport || inventoryExecuteBusy) {
       return;
     }
     if (inventoryExecutableCount === 0) {
-      setStatus("当前盘点结果没有可复制整理的安全计划。");
+      setStatus("当前盘点结果没有可低空间整理的安全计划。");
       return;
     }
     if (inventoryExecutionBlockedByTruncation) {
-      setStatus("报告明细已截断，不能复制整理全部作品；请缩小入口目录后重新盘点。");
+      setStatus("报告明细已截断，不能低空间整理全部作品；请缩小入口目录后重新盘点。");
       return;
     }
     const targetRoot = inventoryReport.archive_root ?? inventoryArchiveRoot.trim();
-    const confirmed = window.confirm(`将复制整理 ${inventoryExecutableCount} 部作品到 ${targetRoot || "未设置目标"}，源文件不会删除。是否继续？`);
+    const confirmed = window.confirm(`将低空间整理 ${inventoryExecutableCount} 部作品到 ${targetRoot || "未设置目标"}。视频会创建硬链接，不复制大视频；NFO、图片和 GIF 等小资源会复制；源文件不会删除。是否继续？`);
     if (!confirmed) {
-      setStatus("已取消复制整理。");
+      setStatus("已取消低空间整理。");
       return;
     }
     setInventoryExecuteBusy(true);
     setInventoryExecutionReport(null);
-    setStatus(`正在复制整理 ${inventoryExecutableCount} 部作品...`);
+    setStatus(`正在低空间整理 ${inventoryExecutableCount} 部作品...`);
     try {
-      const result = await api.executeInventoryPlan(inventoryReport, [], "copy");
+      const result = await api.executeInventoryPlan(inventoryReport, [], "low_space");
       setInventoryExecutionReport(result);
       setStatus(`${formatInventoryExecutionSummary(result)} 建议重新盘点验证目标状态。`);
     } catch (error) {
-      setStatus(`复制整理失败：${String(error)}`);
+      setStatus(`低空间整理失败：${String(error)}`);
     } finally {
       setInventoryExecuteBusy(false);
     }
@@ -1832,14 +1832,14 @@ export function App() {
                   <Archive size={16} /> {inventoryExportBusy ? "导出中" : "导出 JSON"}
                 </button>
                 <button type="button" onClick={executeInventoryPreview} disabled={!inventoryReport || inventoryExecutableCount === 0 || inventoryExecutionBlockedByTruncation || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || !hasBackend}>
-                  <Copy size={16} /> {inventoryExecuteBusy ? "复制中" : "复制整理"}
+                  <Copy size={16} /> {inventoryExecuteBusy ? "整理中" : "低空间整理"}
                 </button>
               </div>
               <span className="inventory-status-line">
                 {inventoryBusy
                   ? "正在递归盘点资源..."
                   : inventoryExecuteBusy
-                    ? "正在复制安全执行计划..."
+                    ? "正在低空间整理安全执行计划..."
                     : hasBackend
                       ? "读取视频、NFO、图片和 GIF，生成整理预览。"
                       : "桌面后端不可用，需在 Tauri 环境中盘点真实目录。"}
@@ -1902,7 +1902,7 @@ export function App() {
                   {inventoryExecutionReport ? (
                     <div className="inventory-execution-report">
                       <div className="inventory-section-head">
-                        <strong>最近复制整理</strong>
+                        <strong>最近低空间整理</strong>
                         <span>{formatInventoryExecutionSummary(inventoryExecutionReport)}</span>
                       </div>
                       <div className="inventory-execution-log">
@@ -1910,7 +1910,7 @@ export function App() {
                           <div className={`inventory-execution-log-row ${log.status}`} key={`${log.to_path}-${index}`}>
                             <strong>{log.code || "回滚清理"}</strong>
                             <span>
-                              {log.status === "copied" ? "已复制" : log.status === "rolled_back" ? "已回滚" : "失败"} · {log.kind} · {formatBytes(log.bytes)}
+                              {log.status === "linked" ? "已硬链接" : log.status === "copied" ? "已复制" : log.status === "rolled_back" ? "已回滚" : "失败"} · {log.kind} · {formatBytes(log.bytes)}
                             </span>
                             <small>{log.to_path}</small>
                             {log.message ? <small>{log.message}</small> : null}
@@ -1949,7 +1949,7 @@ export function App() {
 
                   {inventoryExecutionBlockedByTruncation ? (
                     <div className="inventory-warnings">
-                      <span>报告明细已截断，不能复制整理全部作品；请缩小入口目录后重新盘点。</span>
+                      <span>报告明细已截断，不能低空间整理全部作品；请缩小入口目录后重新盘点。</span>
                     </div>
                   ) : null}
 

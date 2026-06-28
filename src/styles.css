@@ -829,6 +829,12 @@ h2 {
   overflow-wrap: anywhere;
 }
 
+.inventory-execution-log-row.linked,
+.inventory-execution-log-row.copied {
+  border-color: rgba(22, 101, 52, 0.28);
+  background: #f6fff8;
+}
+
 .inventory-execution-log-row.failed,
 .inventory-execution-log-row.rolled_back {
   border-color: rgba(190, 18, 60, 0.35);

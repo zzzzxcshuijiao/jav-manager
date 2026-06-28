@@ -16,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 #[serde(rename_all = "snake_case")]
 pub enum InventoryExecutionMode {
     Copy,
+    LowSpace,
 }
 
 /// User request for executing a previously generated inventory preview report.
@@ -29,6 +30,7 @@ pub struct InventoryExecutionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InventoryExecutionActionStatus {
+    Linked,
     Copied,
     Failed,
     RolledBack,
@@ -56,9 +58,11 @@ pub struct InventoryExecutionReport {
     pub executed_works: usize,
     pub skipped_works: usize,
     pub planned_actions: usize,
+    pub linked_actions: usize,
     pub copied_actions: usize,
     pub failed_actions: usize,
     pub rolled_back_actions: usize,
+    pub bytes_linked: u64,
     pub bytes_copied: u64,
     pub logs: Vec<InventoryExecutionActionLog>,
 }
@@ -79,10 +83,18 @@ struct PreparedInventoryExecution {
     actions: Vec<PreparedInventoryAction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatedInventoryOperation {
+    Copied,
+    Linked,
+}
+
 #[derive(Debug, Clone)]
 struct CreatedInventoryTarget {
     code: String,
     kind: InventoryResourceKind,
+    operation: CreatedInventoryOperation,
+    source_path: PathBuf,
     path: PathBuf,
     bytes: u64,
     sha256: String,
@@ -98,11 +110,13 @@ pub fn execute_inventory_report(
     let run_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_micros());
     let mut logs = Vec::new();
     let mut created_targets = Vec::new();
-    let mut copied_counts_by_code: BTreeMap<String, usize> = BTreeMap::new();
+    let mut successful_counts_by_code: BTreeMap<String, usize> = BTreeMap::new();
     let mut planned_counts_by_code: BTreeMap<String, usize> = BTreeMap::new();
+    let mut linked_actions = 0;
     let mut copied_actions = 0;
     let mut failed_actions = 0;
     let mut rolled_back_actions = 0;
+    let mut bytes_linked = 0;
     let mut bytes_copied = 0;
 
     for action in &prepared.actions {
@@ -112,12 +126,28 @@ pub fn execute_inventory_report(
     }
 
     for (index, action) in prepared.actions.iter().enumerate() {
-        match copy_prepared_action(action, &prepared.archive_root_canonical, &run_id, index) {
+        match execute_prepared_action(
+            action,
+            request.mode,
+            &prepared.archive_root_canonical,
+            &run_id,
+            index,
+        ) {
             Ok(created) => {
-                copied_actions += 1;
-                bytes_copied += created.bytes;
+                let status = match created.operation {
+                    CreatedInventoryOperation::Copied => {
+                        copied_actions += 1;
+                        bytes_copied += created.bytes;
+                        InventoryExecutionActionStatus::Copied
+                    }
+                    CreatedInventoryOperation::Linked => {
+                        linked_actions += 1;
+                        bytes_linked += created.bytes;
+                        InventoryExecutionActionStatus::Linked
+                    }
+                };
                 created_targets.push(created.clone());
-                *copied_counts_by_code
+                *successful_counts_by_code
                     .entry(action.code.clone())
                     .or_default() += 1;
                 logs.push(InventoryExecutionActionLog {
@@ -125,7 +155,7 @@ pub fn execute_inventory_report(
                     kind: action.kind.clone(),
                     from_path: action.from_path.clone(),
                     to_path: action.to_path.clone(),
-                    status: InventoryExecutionActionStatus::Copied,
+                    status,
                     message: None,
                     bytes: created.bytes,
                 });
@@ -151,7 +181,7 @@ pub fn execute_inventory_report(
         planned_counts_by_code
             .iter()
             .filter(|(code, planned_count)| {
-                copied_counts_by_code.get(*code).copied().unwrap_or(0) == **planned_count
+                successful_counts_by_code.get(*code).copied().unwrap_or(0) == **planned_count
             })
             .count()
     } else {
@@ -166,9 +196,11 @@ pub fn execute_inventory_report(
         executed_works,
         skipped_works: prepared.skipped_works,
         planned_actions: prepared.actions.len(),
+        linked_actions,
         copied_actions,
         failed_actions,
         rolled_back_actions,
+        bytes_linked,
         bytes_copied,
         logs,
     })
@@ -180,7 +212,7 @@ fn prepare_inventory_execution(
     request: &InventoryExecutionRequest,
 ) -> Result<PreparedInventoryExecution> {
     match request.mode {
-        InventoryExecutionMode::Copy => {}
+        InventoryExecutionMode::Copy | InventoryExecutionMode::LowSpace => {}
     }
 
     let archive_root = report
@@ -194,7 +226,7 @@ fn prepare_inventory_execution(
 
     let selected_works = select_inventory_works(report, &selected_codes)?;
     if selected_works.is_empty() {
-        bail!("没有可复制整理的作品");
+        bail!("没有可执行整理的作品");
     }
 
     let skipped_works = if selected_codes.is_empty() {
@@ -222,7 +254,7 @@ fn prepare_inventory_execution(
         }
     }
     if actions.is_empty() {
-        bail!("安全执行计划没有可复制动作");
+        bail!("安全执行计划没有可执行动作");
     }
 
     Ok(PreparedInventoryExecution {
@@ -321,7 +353,7 @@ fn validate_inventory_action(
     let target_key = normalized_path_key(&to_path)?;
     if !target_keys.insert(target_key) {
         bail!(
-            "同一批复制中存在重复目标路径：{}",
+            "同一批执行中存在重复目标路径：{}",
             to_path.to_string_lossy()
         );
     }
@@ -331,6 +363,57 @@ fn validate_inventory_action(
         kind: action.kind.clone(),
         from_path: action.from_path.clone(),
         to_path,
+    })
+}
+
+/// Execute one validated action according to the selected inventory execution mode.
+fn execute_prepared_action(
+    action: &PreparedInventoryAction,
+    mode: InventoryExecutionMode,
+    archive_root_canonical: &Path,
+    run_id: &str,
+    index: usize,
+) -> Result<CreatedInventoryTarget> {
+    match (mode, &action.kind) {
+        (InventoryExecutionMode::LowSpace, InventoryResourceKind::Video) => {
+            link_prepared_video_action(action, archive_root_canonical)
+        }
+        _ => copy_prepared_action(action, archive_root_canonical, run_id, index),
+    }
+}
+
+/// Create a no-clobber hard link for a validated video action without copying video bytes.
+fn link_prepared_video_action(
+    action: &PreparedInventoryAction,
+    archive_root_canonical: &Path,
+) -> Result<CreatedInventoryTarget> {
+    let parent = action
+        .to_path
+        .parent()
+        .ok_or_else(|| anyhow!("目标路径没有父目录：{}", action.to_path.to_string_lossy()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建目标目录失败：{}", parent.to_string_lossy()))?;
+    if !target_existing_parent_is_inside_root(&action.to_path, archive_root_canonical)? {
+        bail!("目标路径位于整理目标目录之外");
+    }
+    let source_size = fs::metadata(&action.from_path)
+        .with_context(|| format!("读取源文件失败：{}", action.from_path.to_string_lossy()))?
+        .len();
+    fs::hard_link(&action.from_path, &action.to_path).with_context(|| {
+        format!(
+            "视频硬链接失败：{} -> {}",
+            action.from_path.to_string_lossy(),
+            action.to_path.to_string_lossy()
+        )
+    })?;
+    Ok(CreatedInventoryTarget {
+        code: action.code.clone(),
+        kind: action.kind.clone(),
+        operation: CreatedInventoryOperation::Linked,
+        source_path: action.from_path.clone(),
+        path: action.to_path.clone(),
+        bytes: source_size,
+        sha256: String::new(),
     })
 }
 
@@ -367,6 +450,8 @@ fn copy_prepared_action(
     Ok(CreatedInventoryTarget {
         code: action.code.clone(),
         kind: action.kind.clone(),
+        operation: CreatedInventoryOperation::Copied,
+        source_path: action.from_path.clone(),
         path: action.to_path.clone(),
         bytes: source_size,
         sha256,
@@ -484,13 +569,17 @@ fn rollback_created_targets(
         match created_target_still_matches(target) {
             Ok(true) if fs::remove_file(&target.path).is_ok() => {
                 rolled_back += 1;
+                let message = match target.operation {
+                    CreatedInventoryOperation::Copied => "执行失败后已删除本轮复制目标文件",
+                    CreatedInventoryOperation::Linked => "执行失败后已删除本轮生成的硬链接目标",
+                };
                 logs.push(InventoryExecutionActionLog {
                     code: target.code.clone(),
                     kind: target.kind.clone(),
                     from_path: target.path.clone(),
                     to_path: target.path.clone(),
                     status: InventoryExecutionActionStatus::RolledBack,
-                    message: Some("复制失败后已删除本轮生成的目标文件".to_string()),
+                    message: Some(message.to_string()),
                     bytes: 0,
                 });
             }
@@ -523,6 +612,14 @@ fn rollback_created_targets(
 
 /// Confirm that a rollback target still has the bytes and hash created by this run.
 fn created_target_still_matches(target: &CreatedInventoryTarget) -> Result<bool> {
+    if target.operation == CreatedInventoryOperation::Linked {
+        return linked_target_still_removable(target);
+    }
+    copied_target_still_matches(target)
+}
+
+/// Confirm that a copied rollback target still has the bytes and hash created by this run.
+fn copied_target_still_matches(target: &CreatedInventoryTarget) -> Result<bool> {
     let metadata = match fs::metadata(&target.path) {
         Ok(metadata) => metadata,
         Err(_) => return Ok(false),
@@ -531,6 +628,21 @@ fn created_target_still_matches(target: &CreatedInventoryTarget) -> Result<bool>
         return Ok(false);
     }
     Ok(file_sha256(&target.path)? == target.sha256)
+}
+
+/// Confirm that a linked rollback target can be removed without touching the source path.
+fn linked_target_still_removable(target: &CreatedInventoryTarget) -> Result<bool> {
+    let metadata = match fs::metadata(&target.path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(false),
+    };
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    if normalized_path_key(&target.path)? == normalized_path_key(&target.source_path)? {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Compute a file SHA-256 hash for rollback identity checks.

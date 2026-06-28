@@ -466,8 +466,8 @@ export interface InventoryExportResult {
   orphans: number;
 }
 
-export type InventoryExecutionMode = "copy";
-export type InventoryExecutionActionStatus = "copied" | "failed" | "rolled_back";
+export type InventoryExecutionMode = "copy" | "low_space";
+export type InventoryExecutionActionStatus = "linked" | "copied" | "failed" | "rolled_back";
 
 export interface InventoryExecutionActionLog {
   code: string;
@@ -487,9 +487,11 @@ export interface InventoryExecutionReport {
   executed_works: number;
   skipped_works: number;
   planned_actions: number;
+  linked_actions: number;
   copied_actions: number;
   failed_actions: number;
   rolled_back_actions: number;
+  bytes_linked: number;
   bytes_copied: number;
   logs: InventoryExecutionActionLog[];
 }

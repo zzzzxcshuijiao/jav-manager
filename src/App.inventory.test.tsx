@@ -98,27 +98,29 @@ function makeInventoryReport(): InventoryPreviewReport {
   };
 }
 
-/** Minimal Stage 7C execution report used to verify copy execution UI wiring. */
+/** Minimal Stage 7D execution report used to verify low-space execution UI wiring. */
 function makeInventoryExecutionReport(): InventoryExecutionReport {
   return {
-    mode: "copy",
+    mode: "low_space",
     started_at: "2026-06-28T12:01:00Z",
     finished_at: "2026-06-28T12:02:00Z",
     requested_works: 1,
     executed_works: 1,
     skipped_works: 0,
     planned_actions: 1,
-    copied_actions: 1,
+    linked_actions: 1,
+    copied_actions: 0,
     failed_actions: 0,
     rolled_back_actions: 0,
-    bytes_copied: 5,
+    bytes_linked: 5,
+    bytes_copied: 0,
     logs: [
       {
         code: "IPX-201",
         kind: "video",
         from_path: "D:\\inventory-inbox\\IPX-201.mp4",
         to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
-        status: "copied",
+        status: "linked",
         message: null,
         bytes: 5
       }
@@ -251,7 +253,7 @@ describe("inventory page wiring", () => {
     expect(document.body.textContent).toContain("候选动作预览");
   });
 
-  it("executes the current safe inventory plan with loading feedback", async () => {
+  it("executes the current safe inventory plan with low-space loading feedback", async () => {
     const report = makeInventoryReport();
     const executionReport = makeInventoryExecutionReport();
     vi.spyOn(api, "previewInventory").mockResolvedValue(report);
@@ -275,18 +277,19 @@ describe("inventory page wiring", () => {
     });
 
     await act(async () => {
-      buttonContaining("复制整理").click();
+      buttonContaining("低空间整理").click();
     });
 
-    expect(executeSpy).toHaveBeenCalledWith(report, [], "copy");
-    expect(buttonContaining("复制中").disabled).toBe(true);
+    expect(executeSpy).toHaveBeenCalledWith(report, [], "low_space");
+    expect(buttonContaining("整理中").disabled).toBe(true);
 
     await act(async () => {
       pendingExecution.resolve(executionReport);
       await pendingExecution.promise;
     });
 
-    expect(document.body.textContent).toContain("复制整理完成：作品 1/1，动作 1/1，失败 0，回滚 0");
+    expect(document.body.textContent).toContain("低空间整理完成：作品 1/1，硬链接 1，复制 0，失败 0，回滚 0");
+    expect(document.body.textContent).toContain("已硬链接");
     expect(document.body.textContent).toContain("IPX-201");
   });
 
@@ -311,7 +314,7 @@ describe("inventory page wiring", () => {
       buttonContaining("开始盘点").click();
     });
 
-    expect(buttonContaining("复制整理").disabled).toBe(true);
-    expect(document.body.textContent).toContain("报告明细已截断，不能复制整理全部作品");
+    expect(buttonContaining("低空间整理").disabled).toBe(true);
+    expect(document.body.textContent).toContain("报告明细已截断，不能低空间整理全部作品");
   });
 });

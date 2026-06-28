@@ -24,6 +24,60 @@ fn copy_all_request() -> InventoryExecutionRequest {
     }
 }
 
+/// Build a low-space inventory execution request for integration tests.
+fn low_space_all_request() -> InventoryExecutionRequest {
+    InventoryExecutionRequest {
+        mode: InventoryExecutionMode::LowSpace,
+        selected_codes: Vec::new(),
+    }
+}
+
+#[test]
+fn inventory_low_space_execution_hardlinks_video_and_copies_small_assets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-501.mp4");
+    let nfo = root.join("IPX-501.nfo");
+    let poster = root.join("IPX-501-cover.jpg");
+    let nfo_contents = br#"<movie><num>IPX-501</num><title>Ready</title></movie>"#;
+    write_file(&video, b"video");
+    write_file(&nfo, nfo_contents);
+    write_file(&poster, b"poster");
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let execution = execute_inventory_report(&report, &low_space_all_request()).unwrap();
+    let archive_video = archive.join("IPX-501").join("IPX-501.mp4");
+    let archive_nfo = archive.join("IPX-501").join("IPX-501.nfo");
+    let archive_poster = archive.join("IPX-501").join("poster.jpg");
+
+    assert_eq!(execution.mode, InventoryExecutionMode::LowSpace);
+    assert_eq!(execution.requested_works, 1);
+    assert_eq!(execution.executed_works, 1);
+    assert_eq!(execution.planned_actions, 3);
+    assert_eq!(execution.linked_actions, 1);
+    assert_eq!(execution.copied_actions, 2);
+    assert_eq!(execution.failed_actions, 0);
+    assert_eq!(execution.bytes_linked, 5);
+    assert_eq!(execution.bytes_copied, nfo_contents.len() as u64 + 6);
+    assert!(execution
+        .logs
+        .iter()
+        .any(|log| log.status == InventoryExecutionActionStatus::Linked));
+    assert!(archive_video.exists());
+    assert!(archive_nfo.exists());
+    assert!(archive_poster.exists());
+
+    write_file(&video, b"changed-video");
+    assert_eq!(fs::read(&archive_video).unwrap(), b"changed-video");
+
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-501</num><title>Changed</title></movie>"#,
+    );
+    assert_eq!(fs::read(&archive_nfo).unwrap(), nfo_contents);
+}
+
 #[test]
 fn inventory_copy_execution_copies_auto_ready_plan_actions_and_preserves_sources() {
     let tmp = tempfile::tempdir().unwrap();
