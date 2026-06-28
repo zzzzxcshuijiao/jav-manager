@@ -98,36 +98,36 @@ function makeInventoryReport(): InventoryPreviewReport {
   };
 }
 
-/** Minimal Stage 7D execution report used to verify low-space execution UI wiring. */
+/** Minimal M1 execution report used to verify centralized migration UI wiring. */
 function makeInventoryExecutionReport(): InventoryExecutionReport {
   return {
-    mode: "low_space",
+    mode: "move",
     started_at: "2026-06-28T12:01:00Z",
     finished_at: "2026-06-28T12:02:00Z",
     requested_works: 1,
     executed_works: 1,
     skipped_works: 0,
     planned_actions: 1,
-    linked_actions: 1,
+    linked_actions: 0,
     copied_actions: 0,
-    moved_actions: 0,
+    moved_actions: 1,
     failed_actions: 0,
     rolled_back_actions: 0,
     rollback_failed_actions: 0,
-    same_volume_actions: 0,
+    same_volume_actions: 1,
     cross_volume_actions: 0,
     space_blocked_actions: 0,
-    bytes_linked: 5,
+    bytes_linked: 0,
     bytes_copied: 0,
-    bytes_moved: 0,
+    bytes_moved: 5,
     logs: [
       {
         code: "IPX-201",
         kind: "video",
         from_path: "D:\\inventory-inbox\\IPX-201.mp4",
         to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
-        status: "linked",
-        message: null,
+        status: "moved",
+        message: "rename",
         bytes: 5
       }
     ]
@@ -259,13 +259,13 @@ describe("inventory page wiring", () => {
     expect(document.body.textContent).toContain("候选动作预览");
   });
 
-  it("executes the current safe inventory plan with low-space loading feedback", async () => {
+  it("executes the current safe inventory plan with centralized migration feedback", async () => {
     const report = makeInventoryReport();
     const executionReport = makeInventoryExecutionReport();
     vi.spyOn(api, "previewInventory").mockResolvedValue(report);
     const pendingExecution = deferred<InventoryExecutionReport>();
     const executeSpy = vi.spyOn(api, "executeInventoryPlan").mockReturnValue(pendingExecution.promise);
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     await act(async () => {
       root?.render(<App />);
@@ -283,23 +283,26 @@ describe("inventory page wiring", () => {
     });
 
     await act(async () => {
-      buttonContaining("低空间整理").click();
+      buttonContaining("集中迁移").click();
     });
 
-    expect(executeSpy).toHaveBeenCalledWith(report, [], "low_space");
-    expect(buttonContaining("整理中").disabled).toBe(true);
+    expect(executeSpy).toHaveBeenCalledWith(report, [], "move");
+    const confirmText = String(confirmSpy.mock.calls[0]?.[0]);
+    expect(confirmText).toContain("成功后源路径不再保留");
+    expect(confirmText).toContain("跨盘会逐文件复制校验后删除源文件");
+    expect(buttonContaining("迁移中").disabled).toBe(true);
 
     await act(async () => {
       pendingExecution.resolve(executionReport);
       await pendingExecution.promise;
     });
 
-    expect(document.body.textContent).toContain("低空间整理完成：作品 1/1，硬链接 1，复制 0，失败 0，回滚 0");
-    expect(document.body.textContent).toContain("已硬链接");
+    expect(document.body.textContent).toContain("集中迁移完成：作品 1/1，迁移 1/1，失败 0，回滚 0，同盘 1，跨盘 0");
+    expect(document.body.textContent).toContain("已迁移");
     expect(document.body.textContent).toContain("IPX-201");
   });
 
-  it("blocks copy execution when the inventory report details are truncated", async () => {
+  it("blocks centralized migration when the inventory report details are truncated", async () => {
     const report = makeInventoryReport();
     report.truncated = true;
     report.summary.works = 1001;
@@ -320,11 +323,11 @@ describe("inventory page wiring", () => {
       buttonContaining("开始盘点").click();
     });
 
-    expect(buttonContaining("低空间整理").disabled).toBe(true);
-    expect(document.body.textContent).toContain("报告明细已截断，不能低空间整理全部作品");
+    expect(buttonContaining("集中迁移").disabled).toBe(true);
+    expect(document.body.textContent).toContain("报告明细已截断，不能集中迁移全部作品");
   });
 
-  it("allows low-space execution when only non-work inventory details are truncated", async () => {
+  it("allows centralized migration when only non-work inventory details are truncated", async () => {
     const report = makeInventoryReport();
     report.truncated = true;
     report.summary.asset_candidates = 1001;
@@ -345,7 +348,7 @@ describe("inventory page wiring", () => {
       buttonContaining("开始盘点").click();
     });
 
-    expect(buttonContaining("低空间整理").disabled).toBe(false);
-    expect(document.body.textContent).not.toContain("报告明细已截断，不能低空间整理全部作品");
+    expect(buttonContaining("集中迁移").disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("报告明细已截断，不能集中迁移全部作品");
   });
 });
