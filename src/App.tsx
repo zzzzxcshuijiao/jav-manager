@@ -398,6 +398,10 @@ export function App() {
   const inventoryListItemCount = filteredInventoryWorks.length + visibleInventoryOrphans.length;
   const selectedInventoryWork =
     filteredInventoryWorks.find((work) => work.code === selectedInventoryCode) ?? filteredInventoryWorks[0] ?? null;
+  const selectedInventoryRoleByPath = useMemo(
+    () => new Map(selectedInventoryWork?.resource_roles.map((role) => [role.path, role]) ?? []),
+    [selectedInventoryWork]
+  );
   const showArchiveControls = activeView === "ingest" || activeView === "review" || activeView === "archive";
 
   useEffect(() => {
@@ -1756,6 +1760,7 @@ export function App() {
                   rows={4}
                   value={inventoryRootsText}
                   onChange={(event) => setInventoryRootsText(event.target.value)}
+                  disabled={inventoryBusy}
                   placeholder={"H:\\video\nH:\\AV"}
                 />
               </label>
@@ -1764,7 +1769,8 @@ export function App() {
                 <input
                   value={inventoryArchiveRoot}
                   onChange={(event) => setInventoryArchiveRoot(event.target.value)}
-                  placeholder="D:\mm-7a-test\archive"
+                  disabled={inventoryBusy}
+                  placeholder={"D:\\mm-7a-test\\archive"}
                 />
               </label>
               <div className="daemon-actions">
@@ -1972,7 +1978,7 @@ export function App() {
                               <span className="empty-text">暂无资源</span>
                             ) : (
                               selectedInventoryWork.resources.map((resource) => {
-                                const role = selectedInventoryWork.resource_roles.find((candidate) => candidate.path === resource.path);
+                                const role = selectedInventoryRoleByPath.get(resource.path);
                                 return (
                                   <div className="inventory-resource-row" key={resource.path}>
                                     <strong>{resource.kind} · {resource.file_name}</strong>
