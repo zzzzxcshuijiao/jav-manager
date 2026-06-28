@@ -377,18 +377,58 @@ export interface InventoryPreviewAction {
   conflict?: string | null;
 }
 
+export type InventoryReviewBucket = "auto_ready" | "needs_review" | "blocked" | "asset_candidate";
+export type InventoryConfidence = "high" | "medium" | "low";
+export type InventoryResourceRoleKind =
+  | "primary_video"
+  | "secondary_video"
+  | "duplicate_video"
+  | "primary_nfo"
+  | "secondary_nfo"
+  | "poster"
+  | "fanart"
+  | "thumb"
+  | "screenshot"
+  | "gif"
+  | "image"
+  | "other";
+
+export interface InventoryResolution {
+  bucket: InventoryReviewBucket;
+  primary_video?: string | null;
+  primary_nfo?: string | null;
+  recommended: string;
+  reasons: string[];
+  warnings: string[];
+  blockers: string[];
+  confidence: InventoryConfidence;
+}
+
+export interface InventoryResourceRole {
+  path: string;
+  role: InventoryResourceRoleKind;
+  reason: string;
+  selected: boolean;
+  needs_review: boolean;
+}
+
 export interface InventoryWorkPreview {
   code: string;
   statuses: InventoryStatus[];
   resources: InventoryResource[];
   target_dir?: string | null;
   actions: InventoryPreviewAction[];
+  resolution: InventoryResolution;
+  resource_roles: InventoryResourceRole[];
 }
 
 export interface InventorySummary {
   total_files: number;
   works: number;
   asset_candidates: number;
+  auto_ready: number;
+  needs_review: number;
+  blocked: number;
   ready: number;
   missing_nfo: number;
   missing_video: number;
@@ -409,6 +449,13 @@ export interface InventoryPreviewReport {
   orphans: InventoryResource[];
   warnings: string[];
   truncated: boolean;
+}
+
+export interface InventoryExportResult {
+  path: string;
+  works: number;
+  asset_candidates: number;
+  orphans: number;
 }
 
 export interface UnifiedMigrationWorkPlan {
@@ -536,6 +583,9 @@ export const api = {
   /** Preview inventory grouping and archive targets without moving files. */
   previewInventory(roots: string[], archiveRoot?: string | null) {
     return command<InventoryPreviewReport>("preview_inventory", { roots, archiveRoot });
+  },
+  exportInventoryReport(report: InventoryPreviewReport) {
+    return command<InventoryExportResult>("export_inventory_report_command", { report });
   },
   configureMetadataProviderEnabled(enabled: boolean) {
     return command<boolean>("configure_metadata_provider_enabled", { enabled });

@@ -14,10 +14,15 @@ import type {
   IngestDecision,
   IngestItem,
   IngestItemFilters,
+  InventoryConfidence,
+  InventoryExportResult,
   InventoryPreviewAction,
   InventoryPreviewReport,
   InventoryResource,
+  InventoryResourceRoleKind,
+  InventoryReviewBucket,
   InventoryStatus,
+  InventoryWorkPreview,
   RebuildReport,
   RemoteScraperSettings,
   ReviewReason,
@@ -32,7 +37,8 @@ export type ReviewReasonFilter = ReviewReason | "All";
 export type CodePresenceFilter = "All" | "HasCode" | "MissingCode";
 export type WorkbenchView = "ingest" | "review" | "archive" | "inventory" | "settings" | "library";
 export type WorkStatusFilter = Work["watch_status"] | "All";
-export type InventoryStatusFilter = InventoryStatus | "all";
+export type InventoryFilter = "all" | `status:${InventoryStatus}` | `review:${InventoryReviewBucket}` | "orphan";
+export type InventoryStatusFilter = InventoryFilter;
 
 export interface DashboardStats {
   total: number;
@@ -461,6 +467,72 @@ export function formatInventoryStatus(status: InventoryStatus): string {
   return labels[status];
 }
 
+/** Format a Stage 7B inventory review bucket for filter buttons and detail headers. */
+export function formatInventoryReviewBucket(bucket: InventoryReviewBucket): string {
+  const labels: Record<InventoryReviewBucket, string> = {
+    auto_ready: "可自动整理",
+    needs_review: "需人工确认",
+    blocked: "阻断",
+    asset_candidate: "素材候选"
+  };
+  return labels[bucket];
+}
+
+/** Format the confidence label for the inventory resolution panel. */
+export function formatInventoryConfidence(confidence: InventoryConfidence): string {
+  const labels: Record<InventoryConfidence, string> = {
+    high: "高",
+    medium: "中",
+    low: "低"
+  };
+  return labels[confidence];
+}
+
+/** Format a resource pairing role assigned by the inventory resolver. */
+export function formatInventoryResourceRole(role: InventoryResourceRoleKind): string {
+  const labels: Record<InventoryResourceRoleKind, string> = {
+    primary_video: "主视频",
+    secondary_video: "副视频",
+    duplicate_video: "疑似重复视频",
+    primary_nfo: "主 NFO",
+    secondary_nfo: "副 NFO",
+    poster: "封面",
+    fanart: "背景图",
+    thumb: "缩略图",
+    screenshot: "截图",
+    gif: "GIF",
+    image: "图片",
+    other: "其他资源"
+  };
+  return labels[role];
+}
+
+/** Summarize one work's read-only pairing recommendation. */
+export function formatInventoryResolutionSummary(work: InventoryWorkPreview): string {
+  return `${work.resolution.recommended} · 置信度 ${formatInventoryConfidence(work.resolution.confidence)}`;
+}
+
+/** Filter inventory work previews by Stage 7B review bucket or existing Stage 7A status. */
+export function filterInventoryWorks(works: InventoryWorkPreview[], filter: InventoryFilter): InventoryWorkPreview[] {
+  if (filter === "all") {
+    return works;
+  }
+  if (filter === "orphan") {
+    return [];
+  }
+  if (filter.startsWith("review:")) {
+    const bucket = filter.slice("review:".length) as InventoryReviewBucket;
+    return works.filter((work) => work.resolution.bucket === bucket);
+  }
+  const status = filter.slice("status:".length) as InventoryStatus;
+  return works.filter((work) => work.statuses.includes(status));
+}
+
+/** Format inventory export output for the global status line. */
+export function formatInventoryExportSummary(result: InventoryExportResult): string {
+  return `已导出盘点结果：${result.path}（作品 ${result.works}，素材候选 ${result.asset_candidates}，孤儿 ${result.orphans}）。`;
+}
+
 /** Return orphan resources that should remain visible for the current inventory status filter. */
 export function inventoryOrphansForFilter(
   report: InventoryPreviewReport | null,
@@ -476,7 +548,7 @@ export function inventoryOrphansForFilter(
 export function formatInventorySummary(report: InventoryPreviewReport): string {
   const s = report.summary;
   const suffix = report.truncated ? " 结果过多，作品、素材候选和孤儿资源明细各最多展示 1000 项。" : "";
-  return `识别 ${s.works} 部作品，素材候选 ${s.asset_candidates} 组：可整理 ${s.ready}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
+  return `识别 ${s.works} 部作品，素材候选 ${s.asset_candidates} 组：可自动整理 ${s.auto_ready}，需人工确认 ${s.needs_review}，阻断 ${s.blocked}，缺 NFO ${s.missing_nfo}，缺视频 ${s.missing_video}，冲突 ${s.code_conflict}，孤儿 ${s.orphans}。${suffix}`;
 }
 
 /** Format the planned target path and comma-separated conflict tokens for one inventory preview action. */
