@@ -165,7 +165,7 @@ pub fn execute_inventory_report_with_options(
     let mut rollback_failed_actions = 0;
     let mut same_volume_actions = 0;
     let mut cross_volume_actions = 0;
-    let space_blocked_actions = 0;
+    let mut space_blocked_actions = 0;
     let mut bytes_linked = 0;
     let mut bytes_copied = 0;
     let mut bytes_moved = 0;
@@ -222,6 +222,10 @@ pub fn execute_inventory_report_with_options(
                 });
             }
             Err(error) => {
+                let error_message = error.to_string();
+                if error_message.contains("目标磁盘剩余空间不足") {
+                    space_blocked_actions += 1;
+                }
                 failed_actions += 1;
                 logs.push(InventoryExecutionActionLog {
                     code: action.code.clone(),
@@ -229,7 +233,7 @@ pub fn execute_inventory_report_with_options(
                     from_path: action.from_path.clone(),
                     to_path: action.to_path.clone(),
                     status: InventoryExecutionActionStatus::Failed,
-                    message: Some(error.to_string()),
+                    message: Some(error_message),
                     bytes: 0,
                 });
                 let current_work_created_targets = created_targets
@@ -458,7 +462,7 @@ fn execute_prepared_action(
     }
 }
 
-/// Move one validated action into the archive using no-copy same-volume semantics.
+/// Move one validated action into the archive using same-volume rename or cross-volume copy.
 fn move_prepared_action(
     action: &PreparedInventoryAction,
     archive_root_canonical: &Path,
@@ -470,7 +474,7 @@ fn move_prepared_action(
     let moved = move_file_no_clobber(&action.from_path, &action.to_path, move_strategy)?;
     let message = match moved.method {
         InventoryMoveMethod::SameVolume => Some("rename".to_string()),
-        InventoryMoveMethod::CrossVolume => None,
+        InventoryMoveMethod::CrossVolume => Some("copy_verify_delete".to_string()),
     };
     Ok(CreatedInventoryTarget {
         code: action.code.clone(),

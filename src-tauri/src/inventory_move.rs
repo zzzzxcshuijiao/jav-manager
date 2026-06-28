@@ -1,8 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::io;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Reserved destination free-space margin for future cross-volume move verification.
 pub const CROSS_VOLUME_SPACE_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
@@ -25,8 +27,10 @@ impl InventoryMoveStrategy for SystemInventoryMoveStrategy {
     }
 
     fn available_space(&self, path: &Path) -> Result<u64> {
-        fs2::available_space(path)
-            .with_context(|| format!("读取可用空间失败：{}", path.to_string_lossy()))
+        let probe = nearest_existing_ancestor(path)
+            .ok_or_else(|| anyhow!("目标空间探测路径不存在：{}", path.to_string_lossy()))?;
+        fs2::available_space(&probe)
+            .with_context(|| format!("读取可用空间失败：{}", probe.to_string_lossy()))
     }
 }
 
@@ -48,17 +52,46 @@ pub struct InventoryMovedFile {
     pub sha256: Option<String>,
 }
 
+/// Internal same-volume move failure used to distinguish cross-device fallback.
+enum SameVolumeMoveError {
+    CrossVolume,
+    Failed(anyhow::Error),
+}
+
+impl SameVolumeMoveError {
+    /// Convert an internal same-volume failure into a user-facing error.
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            SameVolumeMoveError::CrossVolume => anyhow!("同盘硬链接跨卷，需要使用跨盘迁移"),
+            SameVolumeMoveError::Failed(error) => error,
+        }
+    }
+}
+
+type SameVolumeMoveResult = std::result::Result<(), SameVolumeMoveError>;
+
 /// Move one file without replacing an existing target path.
 pub fn move_file_no_clobber(
     from_path: &Path,
     to_path: &Path,
     strategy: &dyn InventoryMoveStrategy,
 ) -> Result<InventoryMovedFile> {
-    let parent = to_path
-        .parent()
-        .ok_or_else(|| anyhow!("目标路径没有父目录：{}", to_path.to_string_lossy()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建目标目录失败：{}", parent.to_string_lossy()))?;
+    move_file_no_clobber_with_same_volume_attempt(
+        from_path,
+        to_path,
+        strategy,
+        try_move_same_volume_no_copy,
+    )
+}
+
+/// Move one file while allowing tests to force same-volume cross-device fallback.
+fn move_file_no_clobber_with_same_volume_attempt(
+    from_path: &Path,
+    to_path: &Path,
+    strategy: &dyn InventoryMoveStrategy,
+    same_volume_move: impl FnOnce(&Path, &Path) -> SameVolumeMoveResult,
+) -> Result<InventoryMovedFile> {
+    let _parent = target_parent(to_path)?;
     if to_path.exists() {
         bail!("目标路径已存在：{}", to_path.to_string_lossy());
     }
@@ -67,14 +100,19 @@ pub fn move_file_no_clobber(
         .len();
 
     if strategy.is_same_volume(from_path, to_path)? {
-        move_same_volume_no_copy(from_path, to_path)?;
-        return Ok(InventoryMovedFile {
-            from_path: from_path.to_path_buf(),
-            to_path: to_path.to_path_buf(),
-            method: InventoryMoveMethod::SameVolume,
-            bytes: source_size,
-            sha256: None,
-        });
+        match same_volume_move(from_path, to_path) {
+            Ok(()) => {
+                return Ok(InventoryMovedFile {
+                    from_path: from_path.to_path_buf(),
+                    to_path: to_path.to_path_buf(),
+                    method: InventoryMoveMethod::SameVolume,
+                    bytes: source_size,
+                    sha256: None,
+                });
+            }
+            Err(SameVolumeMoveError::CrossVolume) => {}
+            Err(SameVolumeMoveError::Failed(error)) => return Err(error),
+        }
     }
 
     move_cross_volume_verify_delete(from_path, to_path, strategy)
@@ -82,42 +120,73 @@ pub fn move_file_no_clobber(
 
 /// Move one same-volume file via hard link creation followed by source removal.
 pub fn move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> Result<()> {
+    try_move_same_volume_no_copy(from_path, to_path).map_err(SameVolumeMoveError::into_anyhow)
+}
+
+/// Try the same-volume hard-link move and preserve cross-device classification.
+fn try_move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> SameVolumeMoveResult {
     let parent = to_path
         .parent()
-        .ok_or_else(|| anyhow!("目标路径没有父目录：{}", to_path.to_string_lossy()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("创建目标目录失败：{}", parent.to_string_lossy()))?;
+        .ok_or_else(|| anyhow!("目标路径没有父目录：{}", to_path.to_string_lossy()))
+        .map_err(SameVolumeMoveError::Failed)?;
+    fs::create_dir_all(parent).map_err(|error| {
+        SameVolumeMoveError::Failed(anyhow!(
+            "创建目标目录失败：{}: {}",
+            parent.to_string_lossy(),
+            error
+        ))
+    })?;
     if to_path.exists() {
-        bail!("目标路径已存在：{}", to_path.to_string_lossy());
+        return Err(SameVolumeMoveError::Failed(anyhow!(
+            "目标路径已存在：{}",
+            to_path.to_string_lossy()
+        )));
     }
     let source_size = fs::metadata(from_path)
-        .with_context(|| format!("读取源文件失败：{}", from_path.to_string_lossy()))?
+        .map_err(|error| {
+            SameVolumeMoveError::Failed(anyhow!(
+                "读取源文件失败：{}: {}",
+                from_path.to_string_lossy(),
+                error
+            ))
+        })?
         .len();
     if let Err(error) = fs::hard_link(from_path, to_path) {
         if hard_link_error_is_cross_volume(&error) {
-            bail!("跨盘集中迁移尚未启用");
+            return Err(SameVolumeMoveError::CrossVolume);
         }
-        return Err(error).with_context(|| {
-            format!(
-                "同盘集中迁移硬链接失败：{} -> {}",
-                from_path.to_string_lossy(),
-                to_path.to_string_lossy()
-            )
-        });
+        return Err(SameVolumeMoveError::Failed(anyhow!(
+            "同盘集中迁移硬链接失败：{} -> {}",
+            from_path.to_string_lossy(),
+            to_path.to_string_lossy()
+        )));
     }
     let target_size = fs::metadata(to_path)
-        .with_context(|| format!("读取目标文件失败：{}", to_path.to_string_lossy()))?
+        .map_err(|error| {
+            SameVolumeMoveError::Failed(anyhow!(
+                "读取目标文件失败：{}: {}",
+                to_path.to_string_lossy(),
+                error
+            ))
+        })?
         .len();
     if target_size != source_size {
         let _ = fs::remove_file(to_path);
-        bail!("同盘集中迁移大小校验失败：{}", from_path.to_string_lossy());
+        return Err(SameVolumeMoveError::Failed(anyhow!(
+            "同盘集中迁移大小校验失败：{}",
+            from_path.to_string_lossy()
+        )));
     }
     if let Err(error) = fs::remove_file(from_path) {
         let _ = fs::remove_file(to_path);
-        return Err(error)
-            .with_context(|| format!("删除源文件失败：{}", from_path.to_string_lossy()));
+        return Err(SameVolumeMoveError::Failed(anyhow!(
+            "删除源文件失败：{}: {}",
+            from_path.to_string_lossy(),
+            error
+        )));
     }
-    ensure_source_path_removed_after_move(from_path, to_path)?;
+    ensure_source_path_removed_after_move(from_path, to_path)
+        .map_err(SameVolumeMoveError::Failed)?;
     Ok(())
 }
 
@@ -125,7 +194,7 @@ pub fn move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> Result<()> 
 fn ensure_source_path_removed_after_move(from_path: &Path, to_path: &Path) -> Result<()> {
     if from_path.exists() {
         bail!(
-            "同盘集中迁移后源路径仍存在：{}；迁移目标已保留以避免数据丢失：{}",
+            "集中迁移后源路径仍存在：{}；迁移目标已保留以避免数据丢失：{}",
             from_path.to_string_lossy(),
             to_path.to_string_lossy()
         );
@@ -133,13 +202,283 @@ fn ensure_source_path_removed_after_move(from_path: &Path, to_path: &Path) -> Re
     Ok(())
 }
 
-/// Reject cross-volume moves until copy-verify-delete migration is explicitly enabled.
+/// Move one cross-volume file by copying, verifying, publishing, then deleting the source.
 pub fn move_cross_volume_verify_delete(
-    _from_path: &Path,
-    _to_path: &Path,
-    _strategy: &dyn InventoryMoveStrategy,
+    from_path: &Path,
+    to_path: &Path,
+    strategy: &dyn InventoryMoveStrategy,
 ) -> Result<InventoryMovedFile> {
-    bail!("跨盘集中迁移尚未启用")
+    let parent = target_parent(to_path)?;
+    if to_path.exists() {
+        bail!("目标路径已存在：{}", to_path.to_string_lossy());
+    }
+    let source_size = fs::metadata(from_path)
+        .with_context(|| format!("读取源文件失败：{}", from_path.to_string_lossy()))?
+        .len();
+    ensure_cross_volume_space(parent, source_size, strategy)?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("创建目标目录失败：{}", parent.to_string_lossy()))?;
+    if to_path.exists() {
+        bail!("目标路径已存在：{}", to_path.to_string_lossy());
+    }
+
+    let temp_path = temporary_move_path(to_path)?;
+    let (copied_size, source_sha256) = match copy_source_to_new_temp(from_path, &temp_path) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
+    let temp_size = match fs::metadata(&temp_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error)
+                .with_context(|| format!("读取临时迁移文件失败：{}", temp_path.to_string_lossy()));
+        }
+    };
+    if copied_size != source_size || temp_size != source_size {
+        let _ = fs::remove_file(&temp_path);
+        bail!("跨盘集中迁移大小校验失败：{}", from_path.to_string_lossy());
+    }
+    let temp_sha256 = match file_sha256(&temp_path) {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
+        }
+    };
+    if temp_sha256 != source_sha256 {
+        let _ = fs::remove_file(&temp_path);
+        bail!("跨盘集中迁移哈希校验失败：{}", from_path.to_string_lossy());
+    }
+
+    persist_temp_without_clobber(&temp_path, to_path)
+        .with_context(|| format!("提交跨盘迁移结果失败：{}", to_path.to_string_lossy()))?;
+    verify_final_target(to_path, source_size, &source_sha256)?;
+    ensure_source_unchanged_before_delete(from_path, to_path, source_size, &source_sha256)?;
+    fs::remove_file(from_path)
+        .with_context(|| format!("删除源文件失败：{}", from_path.to_string_lossy()))?;
+    ensure_source_path_removed_after_move(from_path, to_path)?;
+
+    Ok(InventoryMovedFile {
+        from_path: from_path.to_path_buf(),
+        to_path: to_path.to_path_buf(),
+        method: InventoryMoveMethod::CrossVolume,
+        bytes: source_size,
+        sha256: Some(source_sha256),
+    })
+}
+
+/// Return the parent directory for a target path.
+fn target_parent(path: &Path) -> Result<&Path> {
+    path.parent()
+        .ok_or_else(|| anyhow!("目标路径没有父目录：{}", path.to_string_lossy()))
+}
+
+/// Ensure the destination volume has enough free space before a cross-volume copy starts.
+fn ensure_cross_volume_space(
+    parent: &Path,
+    source_size: u64,
+    strategy: &dyn InventoryMoveStrategy,
+) -> Result<()> {
+    let probe = nearest_existing_ancestor(parent)
+        .ok_or_else(|| anyhow!("目标空间探测路径不存在：{}", parent.to_string_lossy()))?;
+    let required = source_size
+        .checked_add(CROSS_VOLUME_SPACE_MARGIN_BYTES)
+        .ok_or_else(|| anyhow!("跨盘迁移空间需求计算溢出"))?;
+    let available = strategy.available_space(&probe)?;
+    if available < required {
+        bail!("目标磁盘剩余空间不足：需要 {required} 字节，可用 {available} 字节");
+    }
+    Ok(())
+}
+
+/// Build a same-directory temp file path that avoids existing temp files.
+fn temporary_move_path(to_path: &Path) -> Result<PathBuf> {
+    let parent = target_parent(to_path)?;
+    let file_name = to_path
+        .file_name()
+        .ok_or_else(|| anyhow!("目标路径没有文件名：{}", to_path.to_string_lossy()))?
+        .to_string_lossy();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_micros())
+        .unwrap_or_default();
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{file_name}.mm-moving-{}-{timestamp}-{attempt}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    bail!("无法生成临时迁移文件名：{}", to_path.to_string_lossy());
+}
+
+/// Copy the source into a newly created temp file while hashing the source bytes.
+fn copy_source_to_new_temp(from_path: &Path, temp_path: &Path) -> Result<(u64, String)> {
+    let mut input = File::open(from_path)
+        .with_context(|| format!("打开源文件失败：{}", from_path.to_string_lossy()))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+        .with_context(|| format!("创建临时迁移文件失败：{}", temp_path.to_string_lossy()))?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .with_context(|| format!("读取源文件失败：{}", from_path.to_string_lossy()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        output
+            .write_all(&buffer[..read])
+            .with_context(|| format!("写入临时迁移文件失败：{}", temp_path.to_string_lossy()))?;
+        total += read as u64;
+    }
+    output
+        .sync_all()
+        .with_context(|| format!("同步临时迁移文件失败：{}", temp_path.to_string_lossy()))?;
+    let digest = hasher.finalize();
+    Ok((total, hex_digest(&digest)))
+}
+
+/// Make the verified temp file visible at the final path without overwriting a target.
+fn persist_temp_without_clobber(temp_path: &Path, to_path: &Path) -> Result<()> {
+    match fs::hard_link(temp_path, to_path) {
+        Ok(()) => {
+            let _ = fs::remove_file(temp_path);
+            Ok(())
+        }
+        Err(hard_link_error) => {
+            if to_path.exists() {
+                let _ = fs::remove_file(temp_path);
+                bail!("目标路径已存在：{}", to_path.to_string_lossy());
+            }
+            match copy_temp_to_new_target(temp_path, to_path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(temp_path);
+                    Ok(())
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(temp_path);
+                    Err(error).with_context(|| {
+                        format!("hard link fallback after failure: {hard_link_error}")
+                    })
+                }
+            }
+        }
+    }
+}
+
+/// Fallback for filesystems that cannot hard-link the temp file into place.
+fn copy_temp_to_new_target(temp_path: &Path, to_path: &Path) -> Result<()> {
+    let mut input = File::open(temp_path)
+        .with_context(|| format!("打开临时迁移文件失败：{}", temp_path.to_string_lossy()))?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to_path)
+        .with_context(|| format!("创建目标文件失败：{}", to_path.to_string_lossy()))?;
+    if let Err(error) = io::copy(&mut input, &mut output) {
+        let _ = fs::remove_file(to_path);
+        return Err(error)
+            .with_context(|| format!("写入目标文件失败：{}", to_path.to_string_lossy()));
+    }
+    if let Err(error) = output.sync_all() {
+        let _ = fs::remove_file(to_path);
+        return Err(error)
+            .with_context(|| format!("同步目标文件失败：{}", to_path.to_string_lossy()));
+    }
+    Ok(())
+}
+
+/// Verify the final published target still matches the source bytes before source deletion.
+fn verify_final_target(to_path: &Path, source_size: u64, source_sha256: &str) -> Result<()> {
+    let target_size = fs::metadata(to_path)
+        .with_context(|| format!("读取目标文件失败：{}", to_path.to_string_lossy()))?
+        .len();
+    if target_size != source_size {
+        let _ = fs::remove_file(to_path);
+        bail!(
+            "跨盘集中迁移目标大小校验失败：{}",
+            to_path.to_string_lossy()
+        );
+    }
+    let target_sha256 = file_sha256(to_path)?;
+    if target_sha256 != source_sha256 {
+        let _ = fs::remove_file(to_path);
+        bail!(
+            "跨盘集中迁移目标哈希校验失败：{}",
+            to_path.to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+/// Compute a file SHA-256 hash for cross-volume verification.
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut input =
+        File::open(path).with_context(|| format!("打开文件失败：{}", path.to_string_lossy()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = input
+            .read(&mut buffer)
+            .with_context(|| format!("读取文件失败：{}", path.to_string_lossy()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex_digest(&digest))
+}
+
+/// Format a digest as lowercase hexadecimal without adding another dependency.
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Confirm the source has not changed since the copied bytes were hashed.
+fn ensure_source_unchanged_before_delete(
+    from_path: &Path,
+    to_path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    let current_size = match fs::metadata(from_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => bail!(
+            "源文件迁移期间发生变化：无法重新读取源文件 {}；迁移目标已保留：{} ({})",
+            from_path.to_string_lossy(),
+            to_path.to_string_lossy(),
+            error
+        ),
+    };
+    if current_size != expected_size {
+        bail!(
+            "源文件迁移期间发生变化：大小 {} -> {}；迁移目标已保留：{}",
+            expected_size,
+            current_size,
+            to_path.to_string_lossy()
+        );
+    }
+    let current_sha256 = file_sha256(from_path)?;
+    if current_sha256 != expected_sha256 {
+        bail!(
+            "源文件迁移期间发生变化：哈希不一致；迁移目标已保留：{}",
+            to_path.to_string_lossy()
+        );
+    }
+    Ok(())
 }
 
 /// Return true when a hard-link failure indicates the paths are on different volumes.
@@ -211,9 +550,8 @@ fn absolute_lexical_path(path: &Path) -> Result<PathBuf> {
 }
 
 /// Find the closest existing ancestor for a target whose file may not exist yet.
-#[cfg(unix)]
 fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut candidate = path.parent().unwrap_or(path).to_path_buf();
+    let mut candidate = path.to_path_buf();
     loop {
         if candidate.exists() {
             return Some(candidate);
@@ -228,6 +566,37 @@ fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Test move strategy that forces cross-volume behavior with fixed capacity.
+    struct FakeCrossVolumeMoveStrategy {
+        available_space: u64,
+    }
+
+    impl InventoryMoveStrategy for FakeCrossVolumeMoveStrategy {
+        fn is_same_volume(&self, _from_path: &Path, _to_path: &Path) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn available_space(&self, _path: &Path) -> Result<u64> {
+            Ok(self.available_space)
+        }
+    }
+
+    /// Test move strategy that reports same-volume while still exposing capacity for fallback.
+    struct FakeSameVolumeMoveStrategy {
+        available_space: u64,
+    }
+
+    impl InventoryMoveStrategy for FakeSameVolumeMoveStrategy {
+        fn is_same_volume(&self, _from_path: &Path, _to_path: &Path) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn available_space(&self, _path: &Path) -> Result<u64> {
+            Ok(self.available_space)
+        }
+    }
 
     #[test]
     fn hard_link_cross_device_error_is_classified_as_cross_volume() {
@@ -254,5 +623,89 @@ mod tests {
 
         assert!(error.to_string().contains("迁移目标已保留以避免数据丢失"));
         assert_eq!(fs::read(&to_path).unwrap(), b"moved");
+    }
+
+    #[test]
+    fn nearest_existing_ancestor_returns_existing_path_itself() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("archive");
+        fs::create_dir_all(&archive).unwrap();
+
+        let ancestor = nearest_existing_ancestor(&archive).unwrap();
+
+        assert_eq!(ancestor, archive);
+    }
+
+    #[test]
+    fn source_change_before_delete_preserves_source_and_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from_path = tmp.path().join("source.mp4");
+        let to_path = tmp.path().join("archive").join("target.mp4");
+        fs::create_dir_all(to_path.parent().unwrap()).unwrap();
+        fs::write(&from_path, b"original").unwrap();
+        fs::write(&to_path, b"original").unwrap();
+        let expected_sha256 = file_sha256(&from_path).unwrap();
+        fs::write(&from_path, b"changed-after-copy").unwrap();
+
+        let error =
+            ensure_source_unchanged_before_delete(&from_path, &to_path, 8, &expected_sha256)
+                .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("源文件迁移期间发生变化"));
+        assert!(message.contains("迁移目标已保留"));
+        assert_eq!(fs::read(&from_path).unwrap(), b"changed-after-copy");
+        assert_eq!(fs::read(&to_path).unwrap(), b"original");
+    }
+
+    #[test]
+    fn cross_volume_move_returns_verified_hash_and_deletes_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from_path = tmp.path().join("source.mp4");
+        let to_path = tmp.path().join("archive").join("target.mp4");
+        fs::write(&from_path, b"cross-video").unwrap();
+        let strategy = FakeCrossVolumeMoveStrategy {
+            available_space: u64::MAX,
+        };
+
+        let moved = move_cross_volume_verify_delete(&from_path, &to_path, &strategy).unwrap();
+
+        assert_eq!(moved.method, InventoryMoveMethod::CrossVolume);
+        assert_eq!(moved.bytes, 11);
+        assert_eq!(
+            moved.sha256.as_deref(),
+            Some("c20cb4cfd91b5fffedc40d1d8ec88a99c0aac76bba564e8f9d3359904bbd15e8")
+        );
+        assert!(!from_path.exists());
+        assert_eq!(fs::read(&to_path).unwrap(), b"cross-video");
+    }
+
+    #[test]
+    fn same_volume_cross_device_attempt_falls_back_to_cross_volume_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from_path = tmp.path().join("source.mp4");
+        let to_path = tmp.path().join("archive").join("target.mp4");
+        fs::write(&from_path, b"fallback-video").unwrap();
+        let strategy = FakeSameVolumeMoveStrategy {
+            available_space: u64::MAX,
+        };
+        let attempted_same_volume = AtomicBool::new(false);
+
+        let moved = move_file_no_clobber_with_same_volume_attempt(
+            &from_path,
+            &to_path,
+            &strategy,
+            |_from_path, _to_path| {
+                attempted_same_volume.store(true, Ordering::SeqCst);
+                Err(SameVolumeMoveError::CrossVolume)
+            },
+        )
+        .unwrap();
+
+        assert!(attempted_same_volume.load(Ordering::SeqCst));
+        assert_eq!(moved.method, InventoryMoveMethod::CrossVolume);
+        assert!(!from_path.exists());
+        assert_eq!(fs::read(&to_path).unwrap(), b"fallback-video");
+        assert!(moved.sha256.is_some());
     }
 }

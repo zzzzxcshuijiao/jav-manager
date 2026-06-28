@@ -9,17 +9,39 @@ use media_manager::inventory_execution::{
 use media_manager::inventory_move::InventoryMoveStrategy;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-/// Test move strategy that forces the cross-volume branch without extra disks.
-struct ForcedCrossVolumeMoveStrategy;
+/// Test move strategy that forces volume and capacity branches without extra disks.
+struct FakeMoveStrategy {
+    same_volume: bool,
+    available_space: u64,
+    space_queries: Mutex<Vec<PathBuf>>,
+}
 
-impl InventoryMoveStrategy for ForcedCrossVolumeMoveStrategy {
-    fn is_same_volume(&self, _from_path: &Path, _to_path: &Path) -> anyhow::Result<bool> {
-        Ok(false)
+impl FakeMoveStrategy {
+    /// Build a fake move strategy and record every capacity probe path.
+    fn new(same_volume: bool, available_space: u64) -> Self {
+        Self {
+            same_volume,
+            available_space,
+            space_queries: Mutex::new(Vec::new()),
+        }
     }
 
-    fn available_space(&self, _path: &Path) -> anyhow::Result<u64> {
-        Ok(u64::MAX)
+    /// Return the recorded capacity probe paths.
+    fn recorded_space_queries(&self) -> Vec<PathBuf> {
+        self.space_queries.lock().unwrap().clone()
+    }
+}
+
+impl InventoryMoveStrategy for FakeMoveStrategy {
+    fn is_same_volume(&self, _from_path: &Path, _to_path: &Path) -> anyhow::Result<bool> {
+        Ok(self.same_volume)
+    }
+
+    fn available_space(&self, path: &Path) -> anyhow::Result<u64> {
+        self.space_queries.lock().unwrap().push(path.to_path_buf());
+        Ok(self.available_space)
     }
 }
 
@@ -113,20 +135,117 @@ fn inventory_execution_report_serializes_move_contract() {
 }
 
 #[test]
-fn inventory_move_execution_rejects_cross_volume_before_task4() {
+fn inventory_move_execution_cross_volume_copies_verifies_and_deletes_source() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("root");
     let archive = tmp.path().join("archive");
     let video = root.join("IPX-701.mp4");
     let nfo = root.join("IPX-701.nfo");
+    let nfo_contents = br#"<movie><num>IPX-701</num><title>Ready</title></movie>"#;
+    write_file(&video, b"video");
+    write_file(&nfo, nfo_contents);
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let move_strategy = FakeMoveStrategy::new(false, u64::MAX);
+    let options = InventoryExecutionOptions {
+        move_strategy: &move_strategy,
+    };
+
+    let execution =
+        execute_inventory_report_with_options(&report, &move_all_request(), &options).unwrap();
+
+    assert_eq!(execution.executed_works, 1);
+    assert_eq!(execution.moved_actions, 2);
+    assert_eq!(execution.same_volume_actions, 0);
+    assert_eq!(execution.cross_volume_actions, 2);
+    assert_eq!(execution.failed_actions, 0);
+    assert_eq!(execution.space_blocked_actions, 0);
+    assert_eq!(execution.bytes_moved, 5 + nfo_contents.len() as u64);
+    assert!(execution
+        .logs
+        .iter()
+        .all(|log| log.status == InventoryExecutionActionStatus::Moved));
+    assert!(execution
+        .logs
+        .iter()
+        .all(|log| log.message.as_deref() == Some("copy_verify_delete")));
+    assert!(
+        !video.exists(),
+        "cross-volume move must delete the source video"
+    );
+    assert!(
+        !nfo.exists(),
+        "cross-volume move must delete the source NFO"
+    );
+    assert_eq!(
+        fs::read(archive.join("IPX-701").join("IPX-701.mp4")).unwrap(),
+        b"video"
+    );
+    assert_eq!(
+        fs::read(archive.join("IPX-701").join("IPX-701.nfo")).unwrap(),
+        nfo_contents
+    );
+}
+
+#[test]
+fn inventory_move_execution_queries_existing_space_probe_before_creating_target_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-703.mp4");
+    let nfo = root.join("IPX-703.nfo");
     write_file(&video, b"video");
     write_file(
         &nfo,
-        br#"<movie><num>IPX-701</num><title>Ready</title></movie>"#,
+        br#"<movie><num>IPX-703</num><title>Ready</title></movie>"#,
     );
 
     let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
-    let move_strategy = ForcedCrossVolumeMoveStrategy;
+    let target_parent = archive.join("IPX-703");
+    assert!(
+        !target_parent.exists(),
+        "test setup requires a missing work target parent"
+    );
+    let move_strategy = FakeMoveStrategy::new(false, u64::MAX);
+    let options = InventoryExecutionOptions {
+        move_strategy: &move_strategy,
+    };
+
+    let execution =
+        execute_inventory_report_with_options(&report, &move_all_request(), &options).unwrap();
+
+    let space_queries = move_strategy.recorded_space_queries();
+    assert_eq!(execution.executed_works, 1);
+    assert!(
+        target_parent.exists(),
+        "successful migration must create the missing target parent"
+    );
+    assert_eq!(
+        space_queries.first(),
+        Some(&archive),
+        "first space probe must use the nearest existing archive root"
+    );
+    assert!(
+        space_queries.iter().all(|path| path.exists()),
+        "all space probes must receive existing filesystem paths"
+    );
+}
+
+#[test]
+fn inventory_move_execution_stops_before_cross_volume_copy_when_space_is_low() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-702.mp4");
+    let nfo = root.join("IPX-702.nfo");
+    write_file(&video, b"video");
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-702</num><title>Ready</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let move_strategy = FakeMoveStrategy::new(false, 16);
     let options = InventoryExecutionOptions {
         move_strategy: &move_strategy,
     };
@@ -139,21 +258,24 @@ fn inventory_move_execution_rejects_cross_volume_before_task4() {
     assert_eq!(execution.same_volume_actions, 0);
     assert_eq!(execution.cross_volume_actions, 0);
     assert_eq!(execution.failed_actions, 1);
+    assert_eq!(execution.space_blocked_actions, 1);
     assert!(execution.logs.iter().any(|log| {
         log.status == InventoryExecutionActionStatus::Failed
             && log
                 .message
                 .as_deref()
                 .unwrap_or_default()
-                .contains("跨盘集中迁移尚未启用")
+                .contains("目标磁盘剩余空间不足")
     }));
     assert!(
         video.exists(),
-        "cross-volume move must keep the source video"
+        "low-space cross-volume move must keep the source video"
     );
-    assert!(nfo.exists(), "cross-volume move must keep the source NFO");
-    assert!(!archive.join("IPX-701").join("IPX-701.mp4").exists());
-    assert!(!archive.join("IPX-701").join("IPX-701.nfo").exists());
+    assert!(
+        nfo.exists(),
+        "later action must not run after low-space stop"
+    );
+    assert!(!archive.join("IPX-702").exists());
 }
 
 #[test]
@@ -228,6 +350,7 @@ fn inventory_move_execution_rejects_existing_target_without_touching_source_or_t
     let message = error.to_string();
     assert!(message.contains("目标路径已存在"));
     assert_eq!(fs::read(&video).unwrap(), b"video");
+    assert!(nfo.exists(), "move preflight must not touch later sources");
     assert_eq!(fs::read(&existing_target).unwrap(), b"existing");
 }
 
