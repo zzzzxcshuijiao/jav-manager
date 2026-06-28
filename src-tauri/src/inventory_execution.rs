@@ -17,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 pub enum InventoryExecutionMode {
     Copy,
     LowSpace,
+    Move,
 }
 
 /// User request for executing a previously generated inventory preview report.
@@ -32,8 +33,10 @@ pub struct InventoryExecutionRequest {
 pub enum InventoryExecutionActionStatus {
     Linked,
     Copied,
+    Moved,
     Failed,
     RolledBack,
+    RollbackFailed,
 }
 
 /// One file-level execution log entry for a copied or rolled-back inventory action.
@@ -48,7 +51,7 @@ pub struct InventoryExecutionActionLog {
     pub bytes: u64,
 }
 
-/// Summary of a copy-only inventory execution run.
+/// Summary of an inventory execution run and its file-operation counters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryExecutionReport {
     pub mode: InventoryExecutionMode,
@@ -60,10 +63,16 @@ pub struct InventoryExecutionReport {
     pub planned_actions: usize,
     pub linked_actions: usize,
     pub copied_actions: usize,
+    pub moved_actions: usize,
     pub failed_actions: usize,
     pub rolled_back_actions: usize,
+    pub rollback_failed_actions: usize,
+    pub same_volume_actions: usize,
+    pub cross_volume_actions: usize,
+    pub space_blocked_actions: usize,
     pub bytes_linked: u64,
     pub bytes_copied: u64,
+    pub bytes_moved: u64,
     pub logs: Vec<InventoryExecutionActionLog>,
 }
 
@@ -100,11 +109,22 @@ struct CreatedInventoryTarget {
     sha256: String,
 }
 
-/// Execute a preview report's safe inventory plan in copy-only mode.
+/// Rollback summary for targets created before an execution failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InventoryRollbackCounts {
+    rolled_back: usize,
+    rollback_failed: usize,
+}
+
+/// Execute a preview report's safe inventory plan.
 pub fn execute_inventory_report(
     report: &InventoryPreviewReport,
     request: &InventoryExecutionRequest,
 ) -> Result<InventoryExecutionReport> {
+    if request.mode == InventoryExecutionMode::Move {
+        bail!("集中迁移执行尚未启用");
+    }
+
     let prepared = prepare_inventory_execution(report, request)?;
     let started_at = Utc::now().to_rfc3339();
     let run_id = format!("{}-{}", std::process::id(), Utc::now().timestamp_micros());
@@ -114,10 +134,16 @@ pub fn execute_inventory_report(
     let mut planned_counts_by_code: BTreeMap<String, usize> = BTreeMap::new();
     let mut linked_actions = 0;
     let mut copied_actions = 0;
+    let moved_actions = 0;
     let mut failed_actions = 0;
     let mut rolled_back_actions = 0;
+    let mut rollback_failed_actions = 0;
+    let same_volume_actions = 0;
+    let cross_volume_actions = 0;
+    let space_blocked_actions = 0;
     let mut bytes_linked = 0;
     let mut bytes_copied = 0;
+    let bytes_moved = 0;
 
     for action in &prepared.actions {
         *planned_counts_by_code
@@ -171,7 +197,9 @@ pub fn execute_inventory_report(
                     message: Some(error.to_string()),
                     bytes: 0,
                 });
-                rolled_back_actions += rollback_created_targets(&created_targets, &mut logs);
+                let rollback = rollback_created_targets(&created_targets, &mut logs);
+                rolled_back_actions += rollback.rolled_back;
+                rollback_failed_actions += rollback.rollback_failed;
                 break;
             }
         }
@@ -198,10 +226,16 @@ pub fn execute_inventory_report(
         planned_actions: prepared.actions.len(),
         linked_actions,
         copied_actions,
+        moved_actions,
         failed_actions,
         rolled_back_actions,
+        rollback_failed_actions,
+        same_volume_actions,
+        cross_volume_actions,
+        space_blocked_actions,
         bytes_linked,
         bytes_copied,
+        bytes_moved,
         logs,
     })
 }
@@ -212,7 +246,9 @@ fn prepare_inventory_execution(
     request: &InventoryExecutionRequest,
 ) -> Result<PreparedInventoryExecution> {
     match request.mode {
-        InventoryExecutionMode::Copy | InventoryExecutionMode::LowSpace => {}
+        InventoryExecutionMode::Copy
+        | InventoryExecutionMode::LowSpace
+        | InventoryExecutionMode::Move => {}
     }
 
     let archive_root = report
@@ -375,6 +411,7 @@ fn execute_prepared_action(
     index: usize,
 ) -> Result<CreatedInventoryTarget> {
     match (mode, &action.kind) {
+        (InventoryExecutionMode::Move, _) => bail!("集中迁移执行尚未启用"),
         (InventoryExecutionMode::LowSpace, InventoryResourceKind::Video) => {
             link_prepared_video_action(action, archive_root_canonical)
         }
@@ -563,8 +600,9 @@ fn copy_temp_to_new_target(temp_path: &Path, to_path: &Path) -> Result<()> {
 fn rollback_created_targets(
     created_targets: &[CreatedInventoryTarget],
     logs: &mut Vec<InventoryExecutionActionLog>,
-) -> usize {
+) -> InventoryRollbackCounts {
     let mut rolled_back = 0;
+    let mut rollback_failed = 0;
     for target in created_targets.iter().rev() {
         match created_target_still_matches(target) {
             Ok(true) if fs::remove_file(&target.path).is_ok() => {
@@ -584,30 +622,35 @@ fn rollback_created_targets(
                 });
             }
             Ok(true) => {
+                rollback_failed += 1;
                 logs.push(InventoryExecutionActionLog {
                     code: target.code.clone(),
                     kind: target.kind.clone(),
                     from_path: target.path.clone(),
                     to_path: target.path.clone(),
-                    status: InventoryExecutionActionStatus::Failed,
+                    status: InventoryExecutionActionStatus::RollbackFailed,
                     message: Some("回滚失败：无法删除本轮生成的目标文件".to_string()),
                     bytes: 0,
                 });
             }
             Ok(false) | Err(_) => {
+                rollback_failed += 1;
                 logs.push(InventoryExecutionActionLog {
                     code: target.code.clone(),
                     kind: target.kind.clone(),
                     from_path: target.path.clone(),
                     to_path: target.path.clone(),
-                    status: InventoryExecutionActionStatus::Failed,
+                    status: InventoryExecutionActionStatus::RollbackFailed,
                     message: Some("回滚跳过：目标文件已不存在或已被外部修改".to_string()),
                     bytes: 0,
                 });
             }
         }
     }
-    rolled_back
+    InventoryRollbackCounts {
+        rolled_back,
+        rollback_failed,
+    }
 }
 
 /// Confirm that a rollback target still has the bytes and hash created by this run.
@@ -769,4 +812,34 @@ fn normalize_lexical_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_created_targets_marks_modified_target_as_rollback_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_path = tmp.path().join("source.mp4");
+        let target_path = tmp.path().join("target.mp4");
+        fs::write(&source_path, b"source").unwrap();
+        fs::write(&target_path, b"modified-target").unwrap();
+        let target = CreatedInventoryTarget {
+            code: "IPX-801".to_string(),
+            kind: InventoryResourceKind::Video,
+            operation: CreatedInventoryOperation::Copied,
+            source_path,
+            path: target_path,
+            bytes: 1,
+            sha256: "not-the-target-hash".to_string(),
+        };
+        let mut logs = Vec::new();
+
+        let rollback = rollback_created_targets(&[target], &mut logs);
+
+        assert_eq!(rollback.rolled_back, 0);
+        assert_eq!(rollback.rollback_failed, 1);
+        assert_eq!(logs[0].status, InventoryExecutionActionStatus::RollbackFailed);
+    }
 }

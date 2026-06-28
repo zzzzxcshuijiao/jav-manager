@@ -3,10 +3,10 @@ use media_manager::inventory::{
 };
 use media_manager::inventory_execution::{
     execute_inventory_report, InventoryExecutionActionStatus, InventoryExecutionMode,
-    InventoryExecutionRequest,
+    InventoryExecutionReport, InventoryExecutionRequest,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Write a small test file, creating parent directories as needed.
 fn write_file(path: &Path, contents: &[u8]) {
@@ -30,6 +30,91 @@ fn low_space_all_request() -> InventoryExecutionRequest {
         mode: InventoryExecutionMode::LowSpace,
         selected_codes: Vec::new(),
     }
+}
+
+#[test]
+fn inventory_execution_report_serializes_move_contract() {
+    let report = InventoryExecutionReport {
+        mode: InventoryExecutionMode::Move,
+        started_at: "2026-06-28T00:00:00Z".to_string(),
+        finished_at: "2026-06-28T00:00:01Z".to_string(),
+        requested_works: 2,
+        executed_works: 1,
+        skipped_works: 0,
+        planned_actions: 3,
+        linked_actions: 0,
+        copied_actions: 0,
+        moved_actions: 2,
+        failed_actions: 0,
+        rolled_back_actions: 0,
+        rollback_failed_actions: 1,
+        same_volume_actions: 1,
+        cross_volume_actions: 1,
+        space_blocked_actions: 1,
+        bytes_linked: 0,
+        bytes_copied: 0,
+        bytes_moved: 123,
+        logs: vec![
+            media_manager::inventory_execution::InventoryExecutionActionLog {
+                code: "IPX-601".to_string(),
+                kind: InventoryResourceKind::Video,
+                from_path: PathBuf::from("from-video.mp4"),
+                to_path: PathBuf::from("archive/IPX-601.mp4"),
+                status: InventoryExecutionActionStatus::Moved,
+                message: None,
+                bytes: 100,
+            },
+            media_manager::inventory_execution::InventoryExecutionActionLog {
+                code: "IPX-602".to_string(),
+                kind: InventoryResourceKind::Poster,
+                from_path: PathBuf::from("from-poster.jpg"),
+                to_path: PathBuf::from("archive/poster.jpg"),
+                status: InventoryExecutionActionStatus::RollbackFailed,
+                message: Some("rollback failed".to_string()),
+                bytes: 23,
+            },
+        ],
+    };
+
+    let json = serde_json::to_value(report).unwrap();
+
+    assert_eq!(json["mode"], "move");
+    assert_eq!(json["logs"][0]["status"], "moved");
+    assert_eq!(json["logs"][1]["status"], "rollback_failed");
+    assert_eq!(json["moved_actions"], 2);
+    assert_eq!(json["rollback_failed_actions"], 1);
+    assert_eq!(json["same_volume_actions"], 1);
+    assert_eq!(json["cross_volume_actions"], 1);
+    assert_eq!(json["space_blocked_actions"], 1);
+    assert_eq!(json["bytes_moved"], 123);
+}
+
+#[test]
+fn inventory_move_execution_is_not_enabled_before_move_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let archive = tmp.path().join("archive");
+    let video = root.join("IPX-701.mp4");
+    let nfo = root.join("IPX-701.nfo");
+    write_file(&video, b"video");
+    write_file(
+        &nfo,
+        br#"<movie><num>IPX-701</num><title>Ready</title></movie>"#,
+    );
+
+    let report = preview_inventory_roots(&[root.clone()], Some(&archive)).unwrap();
+    let request = InventoryExecutionRequest {
+        mode: InventoryExecutionMode::Move,
+        selected_codes: Vec::new(),
+    };
+
+    let error = execute_inventory_report(&report, &request).unwrap_err();
+
+    assert!(error.to_string().contains("集中迁移执行尚未启用"));
+    assert!(video.exists(), "disabled move mode must keep the source video");
+    assert!(nfo.exists(), "disabled move mode must keep the source NFO");
+    assert!(!archive.join("IPX-701").join("IPX-701.mp4").exists());
+    assert!(!archive.join("IPX-701").join("IPX-701.nfo").exists());
 }
 
 #[test]
@@ -57,9 +142,15 @@ fn inventory_low_space_execution_hardlinks_video_and_copies_small_assets() {
     assert_eq!(execution.planned_actions, 3);
     assert_eq!(execution.linked_actions, 1);
     assert_eq!(execution.copied_actions, 2);
+    assert_eq!(execution.moved_actions, 0);
     assert_eq!(execution.failed_actions, 0);
+    assert_eq!(execution.rollback_failed_actions, 0);
+    assert_eq!(execution.same_volume_actions, 0);
+    assert_eq!(execution.cross_volume_actions, 0);
+    assert_eq!(execution.space_blocked_actions, 0);
     assert_eq!(execution.bytes_linked, 5);
     assert_eq!(execution.bytes_copied, nfo_contents.len() as u64 + 6);
+    assert_eq!(execution.bytes_moved, 0);
     assert!(execution
         .logs
         .iter()
@@ -115,8 +206,14 @@ fn inventory_copy_execution_copies_auto_ready_plan_actions_and_preserves_sources
     assert_eq!(execution.skipped_works, 0);
     assert_eq!(execution.planned_actions, 3);
     assert_eq!(execution.copied_actions, 3);
+    assert_eq!(execution.moved_actions, 0);
     assert_eq!(execution.failed_actions, 0);
     assert_eq!(execution.rolled_back_actions, 0);
+    assert_eq!(execution.rollback_failed_actions, 0);
+    assert_eq!(execution.same_volume_actions, 0);
+    assert_eq!(execution.cross_volume_actions, 0);
+    assert_eq!(execution.space_blocked_actions, 0);
+    assert_eq!(execution.bytes_moved, 0);
     assert!(execution
         .logs
         .iter()
