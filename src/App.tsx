@@ -44,6 +44,9 @@ import type {
   InventoryResourceKind,
   MigrationPlan,
   PipelineRun,
+  PostMigrationGroupKind,
+  PostMigrationExecutionReport,
+  PostMigrationReviewReport,
   PooledWork,
   ResourcePool,
   ReviewReason,
@@ -105,6 +108,8 @@ import {
   inventoryOrphansForFilter,
   formatMediaInfo,
   formatPipelineStatus,
+  formatPostMigrationExecutionSummary,
+  formatPostMigrationSummary,
   formatRemoteScraperSettingsSummary,
   formatSelfCheckSeverity,
   formatSelfCheckSummary,
@@ -214,6 +219,13 @@ const inventoryFilters: Array<{ value: InventoryFilter; label: string }> = [
   { value: "orphan", label: "孤儿资源" }
 ];
 
+const postMigrationGroupLabels: Record<PostMigrationGroupKind, string> = {
+  quarantine: "隔离残留",
+  multi_video: "多视频",
+  asset_only: "素材补迁",
+  external_asset: "外部素材"
+};
+
 const inventoryImageKinds = new Set<InventoryResourceKind>(["poster", "fanart", "thumb", "screenshot", "gif", "image"]);
 
 /** 汇总存量预览资源数量，保持作品列表可扫读。 */
@@ -298,6 +310,10 @@ export function App() {
   const [inventoryReport, setInventoryReport] = useState<InventoryPreviewReport | null>(null);
   const [inventoryExecuteBusy, setInventoryExecuteBusy] = useState(false);
   const [inventoryExecutionReport, setInventoryExecutionReport] = useState<InventoryExecutionReport | null>(null);
+  const [postMigrationBusy, setPostMigrationBusy] = useState(false);
+  const [postMigrationExecuteBusy, setPostMigrationExecuteBusy] = useState(false);
+  const [postMigrationReport, setPostMigrationReport] = useState<PostMigrationReviewReport | null>(null);
+  const [postMigrationExecutionReport, setPostMigrationExecutionReport] = useState<PostMigrationExecutionReport | null>(null);
   const [inventoryStatusFilter, setInventoryStatusFilter] = useState<InventoryFilter>("all");
   const [selectedInventoryCode, setSelectedInventoryCode] = useState<string | null>(null);
   const [aria2Settings, setAria2Settings] = useState<Aria2Settings>(defaultAria2Settings);
@@ -407,6 +423,7 @@ export function App() {
     inventoryReport?.works.filter((work) => work.resolution.bucket === "auto_ready" && work.resolution.execution_plan.ready).length ?? 0;
   const inventoryExecutionBlockedByTruncation =
     Boolean(inventoryReport && inventoryReport.summary.works > inventoryReport.works.length);
+  const postMigrationReadyActionCount = postMigrationReport?.summary.ready_actions ?? 0;
   const selectedInventoryRoleByPath = useMemo(
     () => new Map(selectedInventoryWork?.resource_roles.map((role) => [role.path, role]) ?? []),
     [selectedInventoryWork]
@@ -909,6 +926,8 @@ export function App() {
     setInventoryBusy(true);
     setInventoryReport(null);
     setInventoryExecutionReport(null);
+    setPostMigrationReport(null);
+    setPostMigrationExecutionReport(null);
     setInventoryStatusFilter("all");
     setSelectedInventoryCode(null);
     setStatus(`正在扫描 ${roots.length} 个存量根目录...`);
@@ -922,6 +941,8 @@ export function App() {
     } catch (error) {
       setInventoryReport(null);
       setInventoryExecutionReport(null);
+      setPostMigrationReport(null);
+      setPostMigrationExecutionReport(null);
       setSelectedInventoryCode(null);
       setStatus(`存量整理预览失败：${String(error)}`);
     } finally {
@@ -976,6 +997,72 @@ export function App() {
       setStatus(`集中迁移失败：${String(error)}`);
     } finally {
       setInventoryExecuteBusy(false);
+    }
+  }
+
+  /** 生成迁移后复盘报告，用于补迁素材、多视频残留和隔离临时文件。 */
+  async function generatePostMigrationReview() {
+    if (postMigrationBusy || postMigrationExecuteBusy) {
+      return;
+    }
+    const roots = inventoryRootsFromText();
+    const targetRoot = inventoryArchiveRoot.trim();
+    if (roots.length === 0) {
+      setStatus("请先填写至少一个源目录，再进行迁移后复盘。");
+      return;
+    }
+    if (targetRoot.length === 0) {
+      setStatus("请先填写整理目标目录，再进行迁移后复盘。");
+      return;
+    }
+    const startedAt = Date.now();
+    setPostMigrationBusy(true);
+    setPostMigrationReport(null);
+    setPostMigrationExecutionReport(null);
+    setStatus(`正在复盘 ${roots.length} 个源目录的迁移残留...`);
+    try {
+      const report = await api.previewPostMigrationReview(roots, targetRoot);
+      const elapsedSeconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      setPostMigrationReport(report);
+      setStatus(`${formatPostMigrationSummary(report)} 用时 ${elapsedSeconds} 秒。`);
+    } catch (error) {
+      setPostMigrationReport(null);
+      setPostMigrationExecutionReport(null);
+      setStatus(`迁移后复盘失败：${String(error)}`);
+    } finally {
+      setPostMigrationBusy(false);
+    }
+  }
+
+  /** 执行迁移后复盘报告中的无冲突补迁/清理动作。 */
+  async function executePostMigrationReview() {
+    if (!postMigrationReport || postMigrationExecuteBusy) {
+      return;
+    }
+    if (postMigrationReadyActionCount === 0) {
+      setStatus("当前复盘报告没有可执行的补迁/清理动作。");
+      return;
+    }
+    if (postMigrationReport.truncated) {
+      setStatus("复盘报告明细已截断，不能执行补迁；请缩小入口目录后重新复盘。");
+      return;
+    }
+    const confirmed = window.confirm(`将执行 ${postMigrationReadyActionCount} 个补迁/清理/恢复动作。会移动素材/多视频残留，删除已被目标文件验证覆盖的隔离临时文件，或把目标缺失的隔离文件恢复回源目录；目标已存在不会覆盖。是否继续？`);
+    if (!confirmed) {
+      setStatus("已取消补迁执行。");
+      return;
+    }
+    setPostMigrationExecuteBusy(true);
+    setPostMigrationExecutionReport(null);
+    setStatus(`正在执行 ${postMigrationReadyActionCount} 个补迁/清理动作...`);
+    try {
+      const result = await api.executePostMigrationPlan(postMigrationReport.roots, postMigrationReport.archive_root, []);
+      setPostMigrationExecutionReport(result);
+      setStatus(formatPostMigrationExecutionSummary(result));
+    } catch (error) {
+      setStatus(`补迁执行失败：${String(error)}`);
+    } finally {
+      setPostMigrationExecuteBusy(false);
     }
   }
 
@@ -1804,7 +1891,7 @@ export function App() {
                   rows={4}
                   value={inventoryRootsText}
                   onChange={(event) => setInventoryRootsText(event.target.value)}
-                  disabled={inventoryBusy || inventoryExecuteBusy}
+                  disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy}
                   placeholder={"H:\\video\nH:\\AV"}
                 />
               </label>
@@ -1813,25 +1900,31 @@ export function App() {
                 <input
                   value={inventoryArchiveRoot}
                   onChange={(event) => setInventoryArchiveRoot(event.target.value)}
-                  disabled={inventoryBusy || inventoryExecuteBusy}
+                  disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy}
                   placeholder={"D:\\mm-7a-test\\archive"}
                 />
               </label>
               <div className="daemon-actions">
-                <button type="button" onClick={pickInventoryRoots} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
+                <button type="button" onClick={pickInventoryRoots} disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
                   <FolderOpen size={16} /> 选择目录
                 </button>
-                <button type="button" onClick={pickInventoryArchiveRoot} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
+                <button type="button" onClick={pickInventoryArchiveRoot} disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
                   <FolderInput size={16} /> 选择目标
                 </button>
-                <button className="primary" type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || inventoryExecuteBusy || !hasBackend}>
+                <button className="primary" type="button" onClick={generateInventoryPreview} disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
                   <Search size={16} /> {inventoryBusy ? "盘点中" : "开始盘点"}
                 </button>
-                <button type="button" onClick={exportInventoryPreview} disabled={!inventoryReport || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || !hasBackend}>
+                <button type="button" onClick={exportInventoryPreview} disabled={!inventoryReport || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
                   <Archive size={16} /> {inventoryExportBusy ? "导出中" : "导出 JSON"}
                 </button>
-                <button type="button" onClick={executeInventoryPreview} disabled={!inventoryReport || inventoryExecutableCount === 0 || inventoryExecutionBlockedByTruncation || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || !hasBackend}>
+                <button type="button" onClick={executeInventoryPreview} disabled={!inventoryReport || inventoryExecutableCount === 0 || inventoryExecutionBlockedByTruncation || inventoryBusy || inventoryExportBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
                   <FolderInput size={16} /> {inventoryExecuteBusy ? "迁移中" : "集中迁移"}
+                </button>
+                <button type="button" onClick={generatePostMigrationReview} disabled={inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
+                  <ListChecks size={16} /> {postMigrationBusy ? "复盘中" : "复盘补迁"}
+                </button>
+                <button type="button" onClick={executePostMigrationReview} disabled={!postMigrationReport || postMigrationReadyActionCount === 0 || postMigrationReport.truncated || inventoryBusy || inventoryExecuteBusy || postMigrationBusy || postMigrationExecuteBusy || !hasBackend}>
+                  <FolderInput size={16} /> {postMigrationExecuteBusy ? "补迁中" : "执行补迁"}
                 </button>
               </div>
               <span className="inventory-status-line">
@@ -1839,10 +1932,64 @@ export function App() {
                   ? "正在递归盘点资源..."
                   : inventoryExecuteBusy
                     ? "正在集中迁移安全执行计划..."
-                    : hasBackend
-                      ? `将 ${inventoryExecutableCount} 个可自动整理作品迁移到目标目录，成功后源文件不再保留。`
-                      : "桌面后端不可用，需在 Tauri 环境中盘点真实目录。"}
+                    : postMigrationBusy
+                      ? "正在生成迁移后复盘报告..."
+                      : postMigrationExecuteBusy
+                        ? "正在执行补迁/清理动作..."
+                        : hasBackend
+                          ? `主迁移可执行 ${inventoryExecutableCount} 部作品；复盘补迁可处理 ${postMigrationReadyActionCount} 个残留动作。`
+                          : "桌面后端不可用，需在 Tauri 环境中盘点真实目录。"}
               </span>
+
+              {postMigrationReport ? (
+                <div className="inventory-execution-report">
+                  <div className="inventory-section-head">
+                    <strong>迁移后复盘</strong>
+                    <span>{formatPostMigrationSummary(postMigrationReport)}</span>
+                  </div>
+                  <div className="inventory-summary">
+                    <div>
+                      <span>隔离残留</span>
+                      <strong>{postMigrationReport.summary.quarantine_files}</strong>
+                    </div>
+                    <div>
+                      <span>多视频</span>
+                      <strong>{postMigrationReport.summary.multi_video_groups}</strong>
+                    </div>
+                    <div>
+                      <span>素材补迁</span>
+                      <strong>{postMigrationReport.summary.asset_only_groups}</strong>
+                    </div>
+                    <div>
+                      <span>恢复隔离</span>
+                      <strong>{postMigrationReport.summary.restore_candidates}</strong>
+                    </div>
+                    <div>
+                      <span>可执行</span>
+                      <strong>{postMigrationReport.summary.ready_actions}</strong>
+                    </div>
+                    <div>
+                      <span>阻断</span>
+                      <strong>{postMigrationReport.summary.blocked_actions}</strong>
+                    </div>
+                  </div>
+                  {postMigrationExecutionReport ? (
+                    <div className="inventory-report-root">
+                      <span>补迁报告</span>
+                      <strong>{postMigrationExecutionReport.report_path ?? formatPostMigrationExecutionSummary(postMigrationExecutionReport)}</strong>
+                    </div>
+                  ) : null}
+                  <div className="inventory-execution-log">
+                    {postMigrationReport.groups.slice(0, 5).map((group) => (
+                      <div className="inventory-execution-log-row" key={`${group.kind}-${group.code}-${group.source_dir}`}>
+                        <strong>{group.code}</strong>
+                        <span>{postMigrationGroupLabels[group.kind]} · {group.actions.filter((action) => !action.conflict).length} 个可执行动作</span>
+                        <small>{group.source_dir}</small>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {inventoryReport ? (
                 <>

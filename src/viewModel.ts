@@ -25,6 +25,8 @@ import type {
   InventoryReviewBucket,
   InventoryStatus,
   InventoryWorkPreview,
+  PostMigrationExecutionReport,
+  PostMigrationReviewReport,
   RebuildReport,
   RemoteScraperSettings,
   ReviewReason,
@@ -558,6 +560,18 @@ export function formatInventoryExecutionSummary(report: InventoryExecutionReport
     return `低空间整理完成：作品 ${report.executed_works}/${report.requested_works}，硬链接 ${report.linked_actions}，复制 ${report.copied_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，链接视频 ${formatBytes(report.bytes_linked)}，复制小文件 ${formatBytes(report.bytes_copied)}。`;
   }
   return `复制整理完成：作品 ${report.executed_works}/${report.requested_works}，动作 ${report.copied_actions}/${report.planned_actions}，失败 ${report.failed_actions}，回滚 ${report.rolled_back_actions}，复制 ${formatBytes(report.bytes_copied)}。`;
+}
+
+/** Format a post-migration review report for the inventory status line. */
+export function formatPostMigrationSummary(report: PostMigrationReviewReport): string {
+  const s = report.summary;
+  const suffix = report.truncated ? " 结果过多，明细最多展示 1000 项。" : "";
+  return `迁移后复盘：分组 ${s.groups}，隔离残留 ${s.quarantine_files}，多视频 ${s.multi_video_groups}，素材补迁 ${s.asset_only_groups}，恢复隔离 ${s.restore_candidates}，可执行 ${s.ready_actions}，阻断 ${s.blocked_actions}，计划处理 ${formatBytes(s.bytes_planned)}。${suffix}`;
+}
+
+/** Format post-migration execution feedback after supplemental moves or cleanup. */
+export function formatPostMigrationExecutionSummary(report: PostMigrationExecutionReport): string {
+  return `补迁执行完成：动作 ${report.executed_actions}/${report.requested_actions}，移动 ${report.moved_actions}，清理 ${report.deleted_actions}，恢复 ${report.restored_actions}，失败 ${report.failed_actions}，处理 ${formatBytes(report.bytes_moved + report.bytes_deleted + report.bytes_restored)}。`;
 }
 
 /** Return orphan resources that should remain visible for the current inventory status filter. */

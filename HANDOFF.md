@@ -61,8 +61,8 @@ media-manager：Tauri(壳) + React(UI) + Rust(核心/SQLite/管线) 的本地媒
 **阶段 7D（低空间存量整理执行）已实现并验证。** 当前工作分支：`codex/stage7d-low-space-execution`。
 阶段 7D 把 7C 的默认真实执行入口改成适合大视频库的低空间模式：前端“复制整理”改为“低空间整理”，显式调用 `low_space`；视频动作不复制内容，而是在同一文件系统内对源视频创建硬链接；NFO、poster、fanart、thumb、screenshot、GIF、image、other 等小资源继续走 7C 的临时文件 + no-clobber 复制流程。执行报告新增 `linked_actions` / `bytes_linked` 与 `linked` 日志状态，摘要会区分“硬链接视频”和“复制小文件”。硬链接失败不会 fallback 成复制视频，避免真实媒体库意外占满磁盘；源文件仍不删除、不移动，不写 SQLite，不执行人工复核项。
 
-**M1（存量资源集中迁移）已完成后端迁移执行与前端主入口。** 当前工作分支：`codex/m1-inventory-centralized-migration`。
-M1 是用户真实需求的主线修正：不再把默认目标停留在复制或硬链接，而是把散落在多个目录的视频、NFO、图片、GIF 等资源，按既定 `archive_root/CODE/` 布局直接集中迁移。当前已新增 `move` 执行模式并把“一键盘点”主按钮切到“集中迁移”：同卷使用 hard link + 校验 + 隔离删除源；跨卷逐文件复制到临时文件、size/SHA 校验、no-clobber 发布目标；删除源前先把源路径原子 rename 到同目录隔离路径，再校验隔离文件 size/SHA，最后只删除隔离文件，避免按源路径误删外部新文件；每个跨卷文件迁移前检查目标卷剩余空间；目标已存在永不覆盖。M1 仍以 `resolution.execution_plan.actions` 为唯一自动执行输入，不执行需人工复核项、不处理孤儿资源、不写 SQLite。下一步是 push，以及在用户真实环境用小样本迁移验证。
+**M1（存量资源集中迁移）已完成主迁移 + 迁移后复盘/补迁入口。** 当前工作分支：`codex/m1-inventory-centralized-migration`。
+M1 是用户真实需求的主线修正：不再把默认目标停留在复制或硬链接，而是把散落在多个目录的视频、NFO、图片、GIF 等资源，按既定 `archive_root/CODE/` 布局直接集中迁移。当前已新增 `move` 执行模式并把“一键盘点”主按钮切到“集中迁移”：同卷使用 hard link + 校验 + 隔离删除源；跨卷逐文件复制到临时文件、size/SHA 校验、no-clobber 发布目标；删除源前先把源路径原子 rename 到同目录隔离路径，再校验隔离文件 size/SHA，最后只删除隔离文件，避免按源路径误删外部新文件；每个跨卷文件迁移前检查目标卷剩余空间；目标已存在永不覆盖。基于用户 WizTree 真实目录结构，又新增“复盘补迁”：扫描主迁移后源侧残留，识别 `.mm-source-delete-*` 等隔离临时文件、多视频目录、只有素材/NFO/GIF 的残留目录；可清理隔离残留、恢复缺失目标的隔离源、补迁多视频和素材到既有 `archive_root/CODE/`。复盘补迁执行前会重新生成后端报告，不信任前端回传路径；隔离清理必须目标大小和 SHA-256 都一致。M1 主迁移仍以 `resolution.execution_plan.actions` 为唯一自动执行输入；复盘补迁是独立后续动作，不覆盖目标，不写 SQLite。
 
 验证已通过：
 
@@ -108,6 +108,13 @@ M1 完整 gate 通过：
 - `npm test`（65 tests）
 - `npx tsc --noEmit`
 - `npm run build`
+
+M1 迁移后复盘/补迁 focused 验证：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --test post_migration -j 1`（10 tests）
+- `cargo test --manifest-path src-tauri/Cargo.toml post_migration_execution_report_command_writes_report_json_under_app_data -j 1`
+- `npm test -- src/App.inventory.test.tsx`（7 tests）
+- `npx tsc --noEmit`
 
 阶段 7A 最终 reviewer follow-up 之后额外通过：
 
@@ -455,7 +462,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 
 ## 下一步
 
-当前主线是 **M1：存量资源集中迁移**。后端迁移执行、前端主入口和完整 gate 已经完成，下一步是 push 分支，然后在真实环境用小样本做集中迁移验证。不要再把默认执行路线扩展回 7D 的硬链接整理；`copy` / `low_space` 只作为兼容和保守诊断能力保留。
+当前主线是 **M1：存量资源集中迁移 + 迁移后复盘补迁**。后端迁移执行、前端主入口、迁移后复盘/补迁入口已经完成；下一步是跑完整 gate、提交/push，然后在真实环境先用小样本验证主迁移，再用真实残留目录验证“复盘补迁”。不要再把默认执行路线扩展回 7D 的硬链接整理；`copy` / `low_space` 只作为兼容和保守诊断能力保留。
 
 真实环境验证建议从小样本开始，因为 M1 成功后会删除源路径：
 
@@ -469,9 +476,11 @@ cargo run --manifest-path src-tauri/Cargo.toml --example stage3_daemon_smoke -j 
 8. 如果 `可自动整理` 大于 0 且报告未截断，可点击“集中迁移”；确认框会提示成功后源路径不再保留、同盘直接移动、跨盘复制校验后删除源文件、目标已存在不会覆盖。
 9. 迁移完成后检查：目标目录出现 `archive_root/CODE/` 布局；已迁移源文件消失；NFO/图片/GIF 等关联资源一起进入目标目录；最近集中迁移摘要显示 `moved` / 同盘 / 跨盘 / 空间不足等统计。
 10. 整理后重新点击“开始盘点”验证目标状态；如果重复执行，目标已存在应被识别为冲突并阻止覆盖。
-11. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。
+11. 如果源目录仍有残留，点击“复盘补迁”；期望显示隔离残留、多视频、素材补迁、可执行和阻断数量，不移动文件。
+12. 复核无误后点击“执行补迁”；期望素材/多视频残留进入既有 `archive_root/CODE/`，已被目标文件验证覆盖的 `.mm-source-delete-*` 才会被清理，目标缺失的隔离文件只会恢复为原文件名。
+13. 点击“导出 JSON”，导出当前 report 到 app data 的 `inventory-reports/`；如果需要后续分析，把导出的 JSON 路径或文件发给 Codex。补迁执行报告会写到 `post-migration-execution-*.json`。
 
-如果继续做 Codex 可编码工作，优先 push 当前分支并交付真实环境测试说明。迁移结果入库同步、目标库重建、人工复核项执行、孤儿资源整理、旧迁移入口清理、typed execution errors 和空目录清理放到 M1 之后。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；视觉检查由用户在自己的交互桌面环境运行。
+如果继续做 Codex 可编码工作，优先 push 当前分支并交付真实环境测试说明。迁移结果入库同步、目标库重建、人工复核项执行、孤儿资源整理、旧迁移入口清理、typed execution errors、空目录清理和更精细的多视频人工排序放到 M1 之后。仍然不要在 Codex 会话里启动 Tauri GUI 或 WebView2；视觉检查由用户在自己的交互桌面环境运行。
 
 ## 阶段 1 commit 清单
 

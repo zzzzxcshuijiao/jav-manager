@@ -503,6 +503,96 @@ export interface InventoryExecutionReport {
   logs: InventoryExecutionActionLog[];
 }
 
+export type PostMigrationGroupKind = "quarantine" | "multi_video" | "asset_only" | "external_asset";
+export type PostMigrationActionKind = "move" | "delete_quarantine" | "restore_quarantine";
+export type PostMigrationExecutionStatus = "moved" | "deleted" | "restored" | "skipped" | "failed";
+
+export interface PostMigrationResource {
+  path: string;
+  file_name: string;
+  kind: InventoryResourceKind;
+  size_bytes: number;
+  code: string;
+}
+
+export interface PostMigrationAction {
+  id: string;
+  code: string;
+  kind: PostMigrationActionKind;
+  resource_kind: InventoryResourceKind;
+  from_path: string;
+  to_path?: string | null;
+  bytes: number;
+  conflict?: string | null;
+  note: string;
+}
+
+export interface PostMigrationGroup {
+  code: string;
+  kind: PostMigrationGroupKind;
+  source_dir: string;
+  archive_dir: string;
+  resources: PostMigrationResource[];
+  actions: PostMigrationAction[];
+  warnings: string[];
+}
+
+export interface PostMigrationSummary {
+  scanned_files: number;
+  groups: number;
+  quarantine_files: number;
+  cleanup_candidates: number;
+  restore_candidates: number;
+  multi_video_groups: number;
+  asset_only_groups: number;
+  external_asset_groups: number;
+  ready_actions: number;
+  blocked_actions: number;
+  move_actions: number;
+  delete_actions: number;
+  restore_actions: number;
+  bytes_planned: number;
+}
+
+export interface PostMigrationReviewReport {
+  generated_at: string;
+  roots: string[];
+  archive_root: string;
+  summary: PostMigrationSummary;
+  groups: PostMigrationGroup[];
+  warnings: string[];
+  truncated: boolean;
+}
+
+export interface PostMigrationExecutionLog {
+  action_id: string;
+  code: string;
+  kind: PostMigrationActionKind;
+  resource_kind: InventoryResourceKind;
+  from_path: string;
+  to_path?: string | null;
+  status: PostMigrationExecutionStatus;
+  message?: string | null;
+  bytes: number;
+}
+
+export interface PostMigrationExecutionReport {
+  report_path?: string | null;
+  started_at: string;
+  finished_at: string;
+  requested_actions: number;
+  executed_actions: number;
+  moved_actions: number;
+  deleted_actions: number;
+  restored_actions: number;
+  skipped_actions: number;
+  failed_actions: number;
+  bytes_moved: number;
+  bytes_deleted: number;
+  bytes_restored: number;
+  logs: PostMigrationExecutionLog[];
+}
+
 export interface UnifiedMigrationWorkPlan {
   code: string;
   nfo_path: string | null;
@@ -634,6 +724,12 @@ export const api = {
   },
   executeInventoryPlan(report: InventoryPreviewReport, selectedCodes: string[] = [], mode: InventoryExecutionMode = "copy") {
     return command<InventoryExecutionReport>("execute_inventory_plan", { report, selectedCodes, mode });
+  },
+  previewPostMigrationReview(roots: string[], archiveRoot: string) {
+    return command<PostMigrationReviewReport>("preview_post_migration_review", { roots, archiveRoot });
+  },
+  executePostMigrationPlan(roots: string[], archiveRoot: string, selectedActionIds: string[] = []) {
+    return command<PostMigrationExecutionReport>("execute_post_migration_plan", { roots, archiveRoot, selectedActionIds });
   },
   configureMetadataProviderEnabled(enabled: boolean) {
     return command<boolean>("configure_metadata_provider_enabled", { enabled });

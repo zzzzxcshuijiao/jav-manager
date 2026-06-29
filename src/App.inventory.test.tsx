@@ -5,7 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { api } from "./api";
-import type { InventoryExecutionReport, InventoryPreviewReport } from "./api";
+import type {
+  InventoryExecutionReport,
+  InventoryPreviewReport,
+  PostMigrationExecutionReport,
+  PostMigrationReviewReport
+} from "./api";
 
 /** Creates a deferred promise so tests can observe App loading state before it settles. */
 function deferred<T>() {
@@ -132,6 +137,97 @@ function makeInventoryExecutionReport(): InventoryExecutionReport {
         bytes: 5
       }
     ]
+  };
+}
+
+/** Minimal post-migration report used to verify supplemental review wiring. */
+function makePostMigrationReport(): PostMigrationReviewReport {
+  return {
+    generated_at: "2026-06-29T12:00:00Z",
+    roots: ["D:\\inventory-inbox"],
+    archive_root: "D:\\inventory-archive",
+    summary: {
+      scanned_files: 3,
+      groups: 2,
+      quarantine_files: 1,
+      cleanup_candidates: 1,
+      restore_candidates: 0,
+      multi_video_groups: 0,
+      asset_only_groups: 1,
+      external_asset_groups: 0,
+      ready_actions: 2,
+      blocked_actions: 0,
+      move_actions: 1,
+      delete_actions: 1,
+      restore_actions: 0,
+      bytes_planned: 12
+    },
+    groups: [
+      {
+        code: "ABW-299",
+        kind: "quarantine",
+        source_dir: "D:\\inventory-inbox\\ABW-299",
+        archive_dir: "D:\\inventory-archive\\ABW-299",
+        resources: [],
+        actions: [
+          {
+            id: "delete_quarantine:D:/inventory-inbox/ABW-299/.ABW-299.mp4.mm-source-delete-1",
+            code: "ABW-299",
+            kind: "delete_quarantine",
+            resource_kind: "video",
+            from_path: "D:\\inventory-inbox\\ABW-299\\.ABW-299.mp4.mm-source-delete-1",
+            to_path: "D:\\inventory-archive\\ABW-299\\ABW-299.mp4",
+            bytes: 10,
+            conflict: null,
+            note: "目标文件已存在且大小一致，可清理源侧隔离残留"
+          }
+        ],
+        warnings: []
+      },
+      {
+        code: "ABW-299",
+        kind: "asset_only",
+        source_dir: "D:\\inventory-inbox\\ABW-299",
+        archive_dir: "D:\\inventory-archive\\ABW-299",
+        resources: [],
+        actions: [
+          {
+            id: "move:D:/inventory-inbox/ABW-299/ABW-299-cover.jpg",
+            code: "ABW-299",
+            kind: "move",
+            resource_kind: "poster",
+            from_path: "D:\\inventory-inbox\\ABW-299\\ABW-299-cover.jpg",
+            to_path: "D:\\inventory-archive\\ABW-299\\poster.jpg",
+            bytes: 2,
+            conflict: null,
+            note: "补迁到集中归档目录"
+          }
+        ],
+        warnings: []
+      }
+    ],
+    warnings: [],
+    truncated: false
+  };
+}
+
+/** Minimal post-migration execution report used to verify supplemental execution feedback. */
+function makePostMigrationExecutionReport(): PostMigrationExecutionReport {
+  return {
+    report_path: "C:\\Users\\A\\AppData\\Roaming\\local.media-manager\\inventory-reports\\post-migration-execution.json",
+    started_at: "2026-06-29T12:01:00Z",
+    finished_at: "2026-06-29T12:02:00Z",
+    requested_actions: 2,
+    executed_actions: 2,
+    moved_actions: 1,
+    deleted_actions: 1,
+    restored_actions: 0,
+    skipped_actions: 0,
+    failed_actions: 0,
+    bytes_moved: 2,
+    bytes_deleted: 10,
+    bytes_restored: 0,
+    logs: []
   };
 }
 
@@ -352,5 +448,42 @@ describe("inventory page wiring", () => {
 
     expect(buttonContaining("集中迁移").disabled).toBe(false);
     expect(document.body.textContent).not.toContain("报告明细已截断，不能集中迁移全部作品");
+  });
+
+  it("previews and executes post-migration supplemental actions from the inventory page", async () => {
+    const report = makePostMigrationReport();
+    const execution = makePostMigrationExecutionReport();
+    const previewSpy = vi.spyOn(api, "previewPostMigrationReview").mockResolvedValue(report);
+    const executeSpy = vi.spyOn(api, "executePostMigrationPlan").mockResolvedValue(execution);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("盘点").click();
+    });
+
+    const rootsField = document.querySelector(".inventory-roots-field textarea") as HTMLTextAreaElement;
+    const targetField = document.querySelector(".inventory-roots-field input") as HTMLInputElement;
+    await act(async () => {
+      setTextFieldValue(rootsField, "D:\\inventory-inbox");
+      setTextFieldValue(targetField, "D:\\inventory-archive");
+      buttonContaining("复盘补迁").click();
+    });
+
+    expect(previewSpy).toHaveBeenCalledWith(["D:\\inventory-inbox"], "D:\\inventory-archive");
+    expect(document.body.textContent).toContain("迁移后复盘");
+    expect(document.body.textContent).toContain("隔离残留 1");
+    expect(document.body.textContent).toContain("素材补迁 1");
+
+    await act(async () => {
+      buttonContaining("执行补迁").click();
+    });
+
+    expect(executeSpy).toHaveBeenCalledWith(["D:\\inventory-inbox"], "D:\\inventory-archive", []);
+    expect(String(confirmSpy.mock.calls[0]?.[0])).toContain("执行 2 个补迁/清理/恢复动作");
+    expect(document.body.textContent).toContain("补迁执行完成：动作 2/2，移动 1，清理 1，恢复 0，失败 0");
+    expect(document.body.textContent).toContain("post-migration-execution.json");
   });
 });

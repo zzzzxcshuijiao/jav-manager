@@ -31,6 +31,10 @@ use crate::inventory_execution::{
     execute_inventory_report, InventoryExecutionMode, InventoryExecutionReport,
     InventoryExecutionRequest,
 };
+use crate::post_migration::{
+    execute_post_migration_roots, preview_post_migration_roots, PostMigrationExecutionReport,
+    PostMigrationExecutionRequest, PostMigrationReviewReport,
+};
 use crate::provider::{DisabledProvider, ExampleProvider};
 use crate::remote_scraper::RemoteScraperSettings;
 use crate::scanner::Scanner;
@@ -1003,6 +1007,24 @@ fn persist_inventory_execution_report_to_dir(
     Ok(report)
 }
 
+/// Persist a post-migration execution report under app data and return the report with its path.
+fn persist_post_migration_execution_report_to_dir(
+    app_data_dir: &Path,
+    mut report: PostMigrationExecutionReport,
+) -> Result<PostMigrationExecutionReport, String> {
+    let export_dir = app_data_dir.join("inventory-reports");
+    fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let path = export_dir.join(format!(
+        "post-migration-execution-{timestamp}-{}.json",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    report.report_path = Some(path.to_string_lossy().to_string());
+    let text = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
 /// Build a read-only inventory preview from plain `AppState` for unit tests.
 #[cfg(test)]
 fn preview_inventory_in_state(
@@ -1070,6 +1092,59 @@ pub async fn execute_inventory_plan(
         .ok()
         .and_then(|app_data| {
             persist_inventory_execution_report_to_dir(&app_data, result.clone()).ok()
+        })
+        .unwrap_or(result);
+    Ok(CommandResult { data: result })
+}
+
+/// Preview residual files left after a centralized inventory migration.
+#[tauri::command]
+pub async fn preview_post_migration_review(
+    roots: Vec<String>,
+    archive_root: String,
+) -> Result<CommandResult<PostMigrationReviewReport>, String> {
+    let root_paths = inventory_root_paths(roots)?;
+    let archive_root = PathBuf::from(archive_root.trim());
+    if archive_root.as_os_str().is_empty() {
+        return Err("至少需要一个整理目标目录".to_string());
+    }
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        preview_post_migration_roots(&root_paths, &archive_root)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    Ok(CommandResult { data: report })
+}
+
+/// Execute a post-migration review report and persist the execution report for diagnostics.
+#[tauri::command]
+pub async fn execute_post_migration_plan(
+    app: tauri::AppHandle,
+    roots: Vec<String>,
+    archive_root: String,
+    selected_action_ids: Vec<String>,
+) -> Result<CommandResult<PostMigrationExecutionReport>, String> {
+    let root_paths = inventory_root_paths(roots)?;
+    let archive_root = PathBuf::from(archive_root.trim());
+    if archive_root.as_os_str().is_empty() {
+        return Err("至少需要一个整理目标目录".to_string());
+    }
+    let request = PostMigrationExecutionRequest {
+        selected_action_ids,
+    };
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        execute_post_migration_roots(&root_paths, &archive_root, &request)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    let result = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|app_data| {
+            persist_post_migration_execution_report_to_dir(&app_data, result.clone()).ok()
         })
         .unwrap_or(result);
     Ok(CommandResult { data: result })
@@ -2007,6 +2082,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             preview_inventory,
             export_inventory_report_command,
             execute_inventory_plan,
+            preview_post_migration_review,
+            execute_post_migration_plan,
             preview_archive_plan,
             execute_archive_plan,
             list_archive_action_logs,
@@ -2606,6 +2683,37 @@ mod tests {
         assert!(text.contains("\"report_path\""));
         assert!(text.contains("\"moved_actions\": 2"));
         assert!(text.contains("inventory-execution-"));
+    }
+
+    #[test]
+    fn post_migration_execution_report_command_writes_report_json_under_app_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = PostMigrationExecutionReport {
+            report_path: None,
+            started_at: "2026-06-29T00:00:00Z".to_string(),
+            finished_at: "2026-06-29T00:00:01Z".to_string(),
+            requested_actions: 2,
+            executed_actions: 2,
+            moved_actions: 1,
+            deleted_actions: 1,
+            restored_actions: 0,
+            skipped_actions: 0,
+            failed_actions: 0,
+            bytes_moved: 10,
+            bytes_deleted: 20,
+            bytes_restored: 0,
+            logs: Vec::new(),
+        };
+
+        let persisted = persist_post_migration_execution_report_to_dir(tmp.path(), report).unwrap();
+
+        let path = persisted.report_path.as_deref().unwrap();
+        assert!(path.ends_with(".json"));
+        assert!(path.contains("inventory-reports"));
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("\"report_path\""));
+        assert!(text.contains("\"deleted_actions\": 1"));
+        assert!(text.contains("post-migration-execution-"));
     }
 
     #[test]

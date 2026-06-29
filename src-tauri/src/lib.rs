@@ -17,6 +17,7 @@ pub mod matcher;
 pub mod migration;
 pub mod nfo;
 pub mod pipeline;
+pub mod post_migration;
 pub mod provider;
 pub mod remote_scraper;
 pub mod resource_pool;
