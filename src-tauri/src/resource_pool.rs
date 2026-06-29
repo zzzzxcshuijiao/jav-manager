@@ -21,7 +21,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const VIDEO_EXTS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts"];
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts",
+];
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 const GIF_EXT: &str = "gif";
 
@@ -70,17 +72,23 @@ pub fn scan_resource_pool(roots: &[PathBuf]) -> Result<ResourcePool> {
 
             // NFO: parse and extract code from the document's <num>/source_code.
             if ext == "nfo" {
-                let Ok(text) = fs::read_to_string(path) else { continue };
-                let Ok(document) = parse_nfo_document(&text) else { continue };
-                let Some(raw_code) = document.source_code.as_ref() else { continue };
-                let Some(code) = normalize_code(raw_code) else { continue };
+                let Ok(text) = fs::read_to_string(path) else {
+                    continue;
+                };
+                let Ok(document) = parse_nfo_document(&text) else {
+                    continue;
+                };
+                let Some(raw_code) = document.source_code.as_ref() else {
+                    continue;
+                };
+                let Some(code) = normalize_code(raw_code) else {
+                    continue;
+                };
                 total_nfos += 1;
-                let work = works
-                    .entry(code.clone())
-                    .or_insert_with(|| {
-                        order.push(code.clone());
-                        PooledWork::new(code.clone())
-                    });
+                let work = works.entry(code.clone()).or_insert_with(|| {
+                    order.push(code.clone());
+                    PooledWork::new(code.clone())
+                });
                 if work.nfo_path.is_none() {
                     work.nfo_path = Some(path.to_path_buf());
                 }
@@ -88,23 +96,20 @@ pub fn scan_resource_pool(roots: &[PathBuf]) -> Result<ResourcePool> {
             }
 
             // Video / image / gif: defer attachment until all NFOs are known.
-            let kind = file_kind(&ext);
-            if !matches!(kind, FileKind::Video | FileKind::Image { .. } | FileKind::Gif) {
+            let Some(kind) = file_kind(&ext) else {
                 continue;
-            }
+            };
             let Some(code) = code_from_stem(stem) else {
                 // No parseable code in the file name → orphan (counted, ignored).
                 match kind {
                     FileKind::Video => orphan_videos += 1,
-                    FileKind::Image { .. } | FileKind::Gif => orphan_images += 1,
-                    _ => {}
+                    FileKind::Image | FileKind::Gif => orphan_images += 1,
                 }
                 continue;
             };
             match kind {
                 FileKind::Video => total_videos += 1,
-                FileKind::Image { .. } | FileKind::Gif => total_images += 1,
-                _ => {}
+                FileKind::Image | FileKind::Gif => total_images += 1,
             }
             pending.push((code, kind, path.to_path_buf()));
         }
@@ -116,8 +121,7 @@ pub fn scan_resource_pool(roots: &[PathBuf]) -> Result<ResourcePool> {
         let Some(work) = works.get_mut(&code) else {
             match kind {
                 FileKind::Video => orphan_videos += 1,
-                FileKind::Image { .. } | FileKind::Gif => orphan_images += 1,
-                _ => {}
+                FileKind::Image | FileKind::Gif => orphan_images += 1,
             }
             continue;
         };
@@ -148,8 +152,8 @@ pub fn scan_resource_pool(roots: &[PathBuf]) -> Result<ResourcePool> {
 #[derive(Clone, Copy)]
 enum FileKind {
     Video,
-    /// Image carrying a role suffix: poster / fanart / thumb / screenshot.
-    Image { role: ImageRole },
+    /// Static image. Its poster/fanart/thumb/screenshot role is inferred from the stem.
+    Image,
     Gif,
 }
 
@@ -162,24 +166,18 @@ enum ImageRole {
     Generic,
 }
 
-fn file_kind(ext: &str) -> FileKind {
+/// Classify supported resource extensions; unsupported files are ignored by the pool scanner.
+fn file_kind(ext: &str) -> Option<FileKind> {
     if VIDEO_EXTS.contains(&ext) {
-        return FileKind::Video;
+        return Some(FileKind::Video);
     }
     if ext == GIF_EXT {
-        return FileKind::Gif;
+        return Some(FileKind::Gif);
     }
     if IMAGE_EXTS.contains(&ext) {
-        // Role inferred from the stem suffix; generic images are kept as poster fallback.
-        let _ = ();
-        // Role detection happens at attach time (we need the stem); mark generic here.
-        return FileKind::Image {
-            role: ImageRole::Generic,
-        };
+        return Some(FileKind::Image);
     }
-    FileKind::Image {
-        role: ImageRole::Generic,
-    }
+    None
 }
 
 /// Attach a classified resource file to a work, picking the right field by
@@ -188,7 +186,7 @@ fn attach_resource(work: &mut PooledWork, kind: FileKind, path: &Path) {
     match kind {
         FileKind::Video => work.videos.push(path.to_path_buf()),
         FileKind::Gif => work.gifs.push(path.to_path_buf()),
-        FileKind::Image { .. } => {
+        FileKind::Image => {
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -247,13 +245,11 @@ fn strip_version_segment(stem: &str) -> Option<String> {
     let cut = ["-v", "-cd", "_cd", "-disc", "_disc", "-part", "_part"]
         .iter()
         .find_map(|seg| {
-            lower
-                .rfind(seg)
-                .filter(|&pos| {
-                    // Segment must be followed by digits only until end.
-                    let tail = &lower[pos + seg.len()..];
-                    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())
-                })
+            lower.rfind(seg).filter(|&pos| {
+                // Segment must be followed by digits only until end.
+                let tail = &lower[pos + seg.len()..];
+                !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())
+            })
         });
 
     match cut {
@@ -283,9 +279,7 @@ mod tests {
     }
 
     fn nfo(code: &str) -> String {
-        format!(
-            "<movie><num>{code}</num><title>{code}</title></movie>"
-        )
+        format!("<movie><num>{code}</num><title>{code}</title></movie>")
     }
 
     fn tmp(tag: &str) -> PathBuf {
@@ -376,5 +370,21 @@ mod tests {
         let pool = scan_resource_pool(&[dir]).unwrap();
         let work = &pool.works[0];
         assert!(work.poster.is_some(), "bare code image becomes poster");
+    }
+
+    #[test]
+    fn unsupported_extensions_are_not_counted_as_images() {
+        let dir = tmp("unsupported");
+        touch(&dir.join("IPX-159.nfo"), &nfo("IPX-159"));
+        touch(&dir.join("IPX-159.txt"), "metadata");
+        touch(&dir.join("IPX-160.txt"), "orphan");
+
+        let pool = scan_resource_pool(&[dir]).unwrap();
+        assert_eq!(pool.total_images, 0, "text files are not image resources");
+        assert_eq!(pool.orphan_images, 0, "text files are not orphan images");
+        assert!(
+            pool.works[0].poster.is_none(),
+            "text file does not become poster"
+        );
     }
 }
