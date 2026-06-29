@@ -103,6 +103,7 @@ fn move_all_request() -> InventoryExecutionRequest {
 #[test]
 fn inventory_execution_report_serializes_move_contract() {
     let report = InventoryExecutionReport {
+        report_path: Some("C:/reports/inventory-execution.json".to_string()),
         mode: InventoryExecutionMode::Move,
         started_at: "2026-06-28T00:00:00Z".to_string(),
         finished_at: "2026-06-28T00:00:01Z".to_string(),
@@ -147,6 +148,7 @@ fn inventory_execution_report_serializes_move_contract() {
     let json = serde_json::to_value(report).unwrap();
 
     assert_eq!(json["mode"], "move");
+    assert_eq!(json["report_path"], "C:/reports/inventory-execution.json");
     assert_eq!(json["logs"][0]["status"], "moved");
     assert_eq!(json["logs"][1]["status"], "rollback_failed");
     assert_eq!(json["moved_actions"], 2);
@@ -407,7 +409,7 @@ fn inventory_move_execution_moves_sources_into_archive() {
     assert!(execution
         .logs
         .iter()
-        .all(|log| log.message.as_deref() == Some("same_volume_link_delete")));
+        .all(|log| log.message.as_deref() == Some("same_volume_rename")));
 }
 
 #[test]

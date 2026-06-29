@@ -101,6 +101,7 @@ function makeInventoryReport(): InventoryPreviewReport {
 /** Minimal M1 execution report used to verify centralized migration UI wiring. */
 function makeInventoryExecutionReport(): InventoryExecutionReport {
   return {
+    report_path: "C:\\Users\\A\\AppData\\Roaming\\local.media-manager\\inventory-reports\\inventory-execution.json",
     mode: "move",
     started_at: "2026-06-28T12:01:00Z",
     finished_at: "2026-06-28T12:02:00Z",
@@ -127,7 +128,7 @@ function makeInventoryExecutionReport(): InventoryExecutionReport {
         from_path: "D:\\inventory-inbox\\IPX-201.mp4",
         to_path: "D:\\inventory-archive\\IPX-201\\IPX-201.mp4",
         status: "moved",
-        message: "same_volume_link_delete",
+        message: "same_volume_rename",
         bytes: 5
       }
     ]
@@ -298,6 +299,7 @@ describe("inventory page wiring", () => {
     });
 
     expect(document.body.textContent).toContain("集中迁移完成：作品 1/1，迁移 1/1，失败 0，回滚 0，同盘 1，跨盘 0");
+    expect(document.body.textContent).toContain("inventory-execution.json");
     expect(document.body.textContent).toContain("已迁移");
     expect(document.body.textContent).toContain("IPX-201");
   });

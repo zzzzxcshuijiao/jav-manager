@@ -58,6 +58,8 @@ pub struct InventoryExecutionActionLog {
 /// Summary of an inventory execution run and its file-operation counters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryExecutionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
     pub mode: InventoryExecutionMode,
     pub started_at: String,
     pub finished_at: String,
@@ -282,6 +284,7 @@ pub fn execute_inventory_report_with_options(
         .count();
 
     Ok(InventoryExecutionReport {
+        report_path: None,
         mode: request.mode,
         started_at,
         finished_at: Utc::now().to_rfc3339(),
@@ -506,7 +509,7 @@ fn created_move_target(
     moved: InventoryMovedFile,
 ) -> CreatedInventoryTarget {
     let message = match moved.method {
-        InventoryMoveMethod::SameVolume => Some("same_volume_link_delete".to_string()),
+        InventoryMoveMethod::SameVolume => Some("same_volume_rename".to_string()),
         InventoryMoveMethod::CrossVolume => Some("copy_verify_delete".to_string()),
     };
     CreatedInventoryTarget {

@@ -985,6 +985,24 @@ fn export_inventory_report_to_dir(
     })
 }
 
+/// Persist an inventory execution report under app data and return the report with its path.
+fn persist_inventory_execution_report_to_dir(
+    app_data_dir: &Path,
+    mut report: InventoryExecutionReport,
+) -> Result<InventoryExecutionReport, String> {
+    let export_dir = app_data_dir.join("inventory-reports");
+    fs::create_dir_all(&export_dir).map_err(|error| error.to_string())?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let path = export_dir.join(format!(
+        "inventory-execution-{timestamp}-{}.json",
+        chrono::Utc::now().timestamp_micros()
+    ));
+    report.report_path = Some(path.to_string_lossy().to_string());
+    let text = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+    fs::write(&path, text).map_err(|error| error.to_string())?;
+    Ok(report)
+}
+
 /// Build a read-only inventory preview from plain `AppState` for unit tests.
 #[cfg(test)]
 fn preview_inventory_in_state(
@@ -1032,6 +1050,7 @@ pub fn export_inventory_report_command(
 /// Execute the safe inventory plan from a preview report in the requested file mode.
 #[tauri::command]
 pub async fn execute_inventory_plan(
+    app: tauri::AppHandle,
     report: InventoryPreviewReport,
     selected_codes: Vec<String>,
     mode: Option<InventoryExecutionMode>,
@@ -1045,6 +1064,14 @@ pub async fn execute_inventory_plan(
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?;
+    let result = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|app_data| {
+            persist_inventory_execution_report_to_dir(&app_data, result.clone()).ok()
+        })
+        .unwrap_or(result);
     Ok(CommandResult { data: result })
 }
 
@@ -2397,12 +2424,18 @@ mod tests {
             .iter()
             .find(|work| work.code == "IPX-301")
             .unwrap();
-        assert_eq!(response.data.archive_root.as_deref(), Some(archive.as_path()));
+        assert_eq!(
+            response.data.archive_root.as_deref(),
+            Some(archive.as_path())
+        );
         assert_eq!(
             work.target_dir.as_deref(),
             Some(archive.join("IPX-301").as_path())
         );
-        assert!(!archive.exists(), "inventory preview must not create target dirs");
+        assert!(
+            !archive.exists(),
+            "inventory preview must not create target dirs"
+        );
     }
 
     #[test]
@@ -2462,7 +2495,10 @@ mod tests {
             .iter()
             .find(|work| work.code == "IPX-303")
             .unwrap();
-        assert_eq!(response.data.archive_root.as_deref(), Some(archive.as_path()));
+        assert_eq!(
+            response.data.archive_root.as_deref(),
+            Some(archive.as_path())
+        );
         assert_eq!(
             work.target_dir.as_deref(),
             Some(archive.join("IPX-303").as_path())
@@ -2532,6 +2568,44 @@ mod tests {
         assert!(text.contains("\"IPX-180\""));
         assert!(text.contains("\"resolution\""));
         assert!(!text.contains("video</movie>"));
+    }
+
+    #[test]
+    fn inventory_execution_report_command_writes_report_json_under_app_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = InventoryExecutionReport {
+            report_path: None,
+            mode: InventoryExecutionMode::Move,
+            started_at: "2026-06-29T00:00:00Z".to_string(),
+            finished_at: "2026-06-29T00:00:01Z".to_string(),
+            requested_works: 2,
+            executed_works: 1,
+            skipped_works: 0,
+            planned_actions: 3,
+            linked_actions: 0,
+            copied_actions: 0,
+            moved_actions: 2,
+            failed_actions: 1,
+            rolled_back_actions: 0,
+            rollback_failed_actions: 0,
+            same_volume_actions: 2,
+            cross_volume_actions: 0,
+            space_blocked_actions: 0,
+            bytes_linked: 0,
+            bytes_copied: 0,
+            bytes_moved: 1024,
+            logs: Vec::new(),
+        };
+
+        let persisted = persist_inventory_execution_report_to_dir(tmp.path(), report).unwrap();
+
+        let path = persisted.report_path.as_deref().unwrap();
+        assert!(path.ends_with(".json"));
+        assert!(path.contains("inventory-reports"));
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("\"report_path\""));
+        assert!(text.contains("\"moved_actions\": 2"));
+        assert!(text.contains("inventory-execution-"));
     }
 
     #[test]

@@ -480,6 +480,7 @@ export interface InventoryExecutionActionLog {
 }
 
 export interface InventoryExecutionReport {
+  report_path?: string | null;
   mode: InventoryExecutionMode;
   started_at: string;
   finished_at: string;

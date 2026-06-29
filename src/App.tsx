@@ -1904,6 +1904,12 @@ export function App() {
                         <strong>最近集中迁移</strong>
                         <span>{formatInventoryExecutionSummary(inventoryExecutionReport)}</span>
                       </div>
+                      {inventoryExecutionReport.report_path ? (
+                        <div className="inventory-report-root">
+                          <span>执行报告</span>
+                          <strong>{inventoryExecutionReport.report_path}</strong>
+                        </div>
+                      ) : null}
                       <div className="inventory-execution-log">
                         {inventoryExecutionReport.logs.slice(0, 5).map((log, index) => (
                           <div className={`inventory-execution-log-row ${log.status}`} key={`${log.to_path}-${index}`}>

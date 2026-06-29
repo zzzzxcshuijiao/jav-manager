@@ -140,12 +140,12 @@ fn move_file_no_clobber_with_same_volume_attempt(
     move_cross_volume_verify_delete(from_path, to_path, strategy)
 }
 
-/// Move one same-volume file via hard link creation followed by source removal.
+/// Move one same-volume file via filesystem rename without copying file bytes.
 pub fn move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> Result<()> {
     try_move_same_volume_no_copy(from_path, to_path).map_err(SameVolumeMoveError::into_anyhow)
 }
 
-/// Try the same-volume hard-link move and preserve cross-device classification.
+/// Try the same-volume rename move and preserve cross-device classification.
 fn try_move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> SameVolumeMoveResult {
     let parent = to_path
         .parent()
@@ -173,12 +173,12 @@ fn try_move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> SameVolumeM
             ))
         })?
         .len();
-    if let Err(error) = fs::hard_link(from_path, to_path) {
+    if let Err(error) = fs::rename(from_path, to_path) {
         if hard_link_error_is_cross_volume(&error) {
             return Err(SameVolumeMoveError::CrossVolume);
         }
         return Err(SameVolumeMoveError::Failed(anyhow!(
-            "同盘集中迁移硬链接失败：{} -> {}",
+            "同盘集中迁移重命名失败：{} -> {}",
             from_path.to_string_lossy(),
             to_path.to_string_lossy()
         )));
@@ -193,28 +193,10 @@ fn try_move_same_volume_no_copy(from_path: &Path, to_path: &Path) -> SameVolumeM
         })?
         .len();
     if target_size != source_size {
-        let _ = fs::remove_file(to_path);
+        let _ = fs::rename(to_path, from_path);
         return Err(SameVolumeMoveError::Failed(anyhow!(
             "同盘集中迁移大小校验失败：{}",
             from_path.to_string_lossy()
-        )));
-    }
-    let target_sha256 = file_sha256(to_path).map_err(SameVolumeMoveError::Failed)?;
-    if let Err(error) =
-        delete_verified_source_via_quarantine(from_path, to_path, source_size, &target_sha256)
-    {
-        let moved = InventoryMovedFile {
-            from_path: from_path.to_path_buf(),
-            to_path: to_path.to_path_buf(),
-            method: InventoryMoveMethod::SameVolume,
-            bytes: source_size,
-            sha256: Some(target_sha256),
-        };
-        return Err(SameVolumeMoveError::Failed(anyhow!(
-            InventoryMoveRetainedTarget {
-                moved,
-                message: error.to_string(),
-            }
         )));
     }
     Ok(())
