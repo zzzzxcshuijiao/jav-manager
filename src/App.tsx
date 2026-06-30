@@ -42,20 +42,16 @@ import type {
   InventoryPreviewReport,
   InventoryResource,
   InventoryResourceKind,
-  MigrationPlan,
   PipelineRun,
   PostMigrationGroupKind,
   PostMigrationExecutionReport,
   PostMigrationReviewReport,
-  PooledWork,
-  ResourcePool,
   ReviewReason,
   RemoteScraperSettings,
   SelfCheckReport,
   ThumbnailCacheSummary,
   RebuildReport,
   Tag,
-  UnifiedMigrationPlan,
   WatchStatus,
   Work,
   WorkDetail,
@@ -279,19 +275,12 @@ export function App() {
   const [profileRating, setProfileRating] = useState("");
   const [profileStatus, setProfileStatus] = useState<WatchStatus>("Unwatched");
   const [thumbnailPath, setThumbnailPath] = useState<string | null>(null);
- const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheSummary | null>(null);
+  const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCacheSummary | null>(null);
   const [rebuildReport, setRebuildReport] = useState<RebuildReport | null>(null);
   const [rebuildMode, setRebuildMode] = useState<"preview" | "rebuild">("preview");
-  const [migrationNfoDir, setMigrationNfoDir] = useState("");
-  const [migrationVideoDir, setMigrationVideoDir] = useState("");
-  const [migrationTargetDir, setMigrationTargetDir] = useState("");
-  const [migrationPlan, setMigrationPlan] = useState<MigrationPlan | null>(null);
   const [resourcePoolDirs, setResourcePoolDirs] = useState("");
-  const [unifiedTargetDir, setUnifiedTargetDir] = useState("");
-  const [unifiedPlan, setUnifiedPlan] = useState<UnifiedMigrationPlan | null>(null);
-  const [resourcePool, setResourcePool] = useState<ResourcePool | null>(null);
   const [primaryLibraryDir, setPrimaryLibraryDir] = useState("");
-  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "migrate" | "cache" | "daemon">("pool");
+  const [settingsTab, setSettingsTab] = useState<"pool" | "rebuild" | "cache" | "daemon">("pool");
   const [daemonStatus, setDaemonStatus] = useState<DaemonControlStatus | null>(null);
   const [daemonChannel, setDaemonChannel] = useState<DaemonControlChannel>("none");
   const [daemonReport, setDaemonReport] = useState<DaemonRunOnceReport | null>(null);
@@ -1266,107 +1255,17 @@ export function App() {
     }
   }
 
-  async function planMigration() {
-    if (!migrationNfoDir || !migrationVideoDir || !migrationTargetDir) {
-      setStatus("请填写 NFO 目录、视频目录和目标目录");
-      return;
-    }
-    try {
-      setStatus("正在扫描文件并生成迁移计划...");
-      const plan = await api.planCentralizedMigration(migrationNfoDir, migrationVideoDir, migrationTargetDir);
-      setMigrationPlan(plan);
-      setStatus(`迁移计划：${plan.total_nfos} 个 NFO · ${plan.matched_videos} 个视频匹配 · ${plan.unmatched_nfos} 个未匹配`);
-    } catch (error) {
-      setStatus(`生成迁移计划失败：${String(error)}`);
-    }
-  }
-
-  async function executeMigration() {
-    if (!migrationPlan) {
-      setStatus("请先生成迁移计划");
-      return;
-    }
-    if (!window.confirm(`即将迁移 ${migrationPlan.works.length} 个作品（${migrationPlan.matched_videos} 个视频）到目标目录。视频文件将被移动（不是复制），确定继续？`)) {
-      return;
-    }
-    try {
-      setStatus("正在执行迁移，请勿关闭窗口...");
-      const migrated = await api.executeCentralizedMigration(migrationPlan);
-      setStatus(`迁移完成：${migrated} 个作品`);
-      setMigrationPlan(null);
-    } catch (error) {
-      setStatus(`迁移失败：${String(error)}`);
-    }
-  }
-
   function parsedResourcePoolDirs(): string[] {
     return resourcePoolDirs.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-  }
-
-  async function scanPool() {
-    const dirs = parsedResourcePoolDirs();
-    if (dirs.length === 0) {
-      setStatus("请填写至少一个资源池目录");
-      return;
-    }
-    const pool = await runBusy<ResourcePool>("正在扫描资源池...", () => api.scanResourcePool(dirs));
-    if (pool) {
-      setResourcePool(pool);
-      setStatus(`资源池：${pool.total_nfos} 个 NFO · ${pool.total_videos} 个视频 · ${pool.total_images} 张图片 · ${pool.orphan_videos + pool.orphan_images} 个未匹配`);
-    }
-  }
-
-  async function planUnifiedMigration() {
-    const dirs = parsedResourcePoolDirs();
-    if (dirs.length === 0) {
-      setStatus("请填写至少一个资源池目录");
-      return;
-    }
-    if (!unifiedTargetDir) {
-      setStatus("请填写目标目录");
-      return;
-    }
-    const plan = await runBusy<UnifiedMigrationPlan>("正在扫描资源池并生成迁移计划...", () => api.planUnifiedMigration(dirs, unifiedTargetDir));
-    if (plan) {
-      setUnifiedPlan(plan);
-      setStatus(`迁移计划：${plan.total_works} 个作品 · ${plan.total_videos} 个视频 · ${plan.total_images} 张图片`);
-    }
-  }
-
-  async function executeUnifiedMigration() {
-    if (!unifiedPlan) {
-      setStatus("请先生成迁移计划");
-      return;
-    }
-    if (!window.confirm(`即将迁移 ${unifiedPlan.total_works} 个作品（${unifiedPlan.total_videos} 个视频将被移动，${unifiedPlan.total_images} 张图片将被复制）到目标目录，确定继续？`)) {
-      return;
-    }
-    const migrated = await runBusy<number>("正在执行智能迁移，请勿关闭窗口...", () => api.executeUnifiedMigration(unifiedPlan));
-    if (migrated === null) return;
-    setUnifiedPlan(null);
-    setStatus(`智能迁移完成：${migrated} 个作品`);
-    // Auto-add the migration target to the resource pool so the next scan/ rebuild
-    // picks up the newly consolidated self-contained work directories.
-    const current = parsedResourcePoolDirs();
-    const target = unifiedTargetDir.trim();
-    if (target && !current.includes(target)) {
-      const next = [...current, target];
-      setResourcePoolDirs(next.join("\n"));
-      try {
-        await api.configureResourcePoolDirs(next);
-      } catch {
-        // best-effort persist; the textarea is already updated
-      }
-    }
   }
 
   async function saveResourcePool() {
     const dirs = parsedResourcePoolDirs();
     try {
       await api.configureResourcePoolDirs(dirs);
-      setStatus(`已保存资源池目录（${dirs.length} 个）`);
+      setStatus(`已保存索引来源目录（${dirs.length} 个）`);
     } catch (error) {
-      setStatus(`保存资源池失败：${String(error)}`);
+      setStatus(`保存索引来源失败：${String(error)}`);
     }
   }
 
@@ -1374,13 +1273,13 @@ export function App() {
     if (busy) return;
     const dirs = parsedResourcePoolDirs();
     if (dirs.length === 0) {
-      setStatus("请填写至少一个资源池目录");
+      setStatus("请填写至少一个索引来源目录");
       return;
     }
-    if (!window.confirm("将从资源池重新解析作品库，确定继续？")) {
+    if (!window.confirm("将从索引来源目录重新解析作品库，确定继续？")) {
       return;
     }
-    const report = await runBusy<RebuildReport>("正在扫描资源池并重建作品库，请稍候…", () => api.rebuildLibraryFromPool(dirs));
+    const report = await runBusy<RebuildReport>("正在读取索引来源并重建作品库，请稍候…", () => api.rebuildLibraryFromPool(dirs));
     if (!report) return;
     setRebuildMode("rebuild");
     setRebuildReport(report);
@@ -1406,7 +1305,7 @@ export function App() {
     if (busy) return;
     const dirs = parsedResourcePoolDirs();
     if (dirs.length === 0) {
-      setStatus("请填写至少一个资源池目录");
+      setStatus("请填写至少一个索引来源目录");
       return;
     }
     const primary = primaryLibraryDir.trim();
@@ -1414,7 +1313,7 @@ export function App() {
       setStatus("请先设置主库目录");
       return;
     }
-    const report = await runBusy<RebuildReport>("正在扫描资源池并增量同步到主库，请稍候…", () => api.incrementalSync(dirs, primary));
+    const report = await runBusy<RebuildReport>("正在读取索引来源并增量同步到主库，请稍候…", () => api.incrementalSync(dirs, primary));
     if (!report) return;
     setRebuildMode("rebuild");
     setRebuildReport(report);
@@ -2290,9 +2189,8 @@ export function App() {
         {activeView === "settings" ? (
           <section className="settings-panel">
             <div className="settings-tabs">
-              <button type="button" className={settingsTab === "pool" ? "active" : ""} onClick={() => setSettingsTab("pool")}>目录与资源池</button>
+              <button type="button" className={settingsTab === "pool" ? "active" : ""} onClick={() => setSettingsTab("pool")}>目录配置</button>
               <button type="button" className={settingsTab === "rebuild" ? "active" : ""} onClick={() => setSettingsTab("rebuild")}>作品库</button>
-              <button type="button" className={settingsTab === "migrate" ? "active" : ""} onClick={() => setSettingsTab("migrate")}>迁移</button>
               <button type="button" className={settingsTab === "daemon" ? "active" : ""} onClick={() => setSettingsTab("daemon")}>自动管线</button>
               <button type="button" className={settingsTab === "cache" ? "active" : ""} onClick={() => setSettingsTab("cache")}>缓存</button>
             </div>
@@ -2314,27 +2212,16 @@ export function App() {
                 </div>
                 <div className="rebuild-tools">
                   <div>
-                    <strong>资源池目录</strong>
-                    <span>每行一个目录。所有目录视为统一资源池，自动按番号匹配 NFO、视频、封面、剧照、GIF。</span>
+                    <strong>索引来源目录</strong>
+                    <span>每行一个目录。供作品库重建、增量同步和自动管线读取；存量集中迁移请从一键盘点进入。</span>
                   </div>
                   <button type="button" className="primary" onClick={saveResourcePool}>
-                    <CheckCircle2 size={16} /> 保存资源池
-                  </button>
-                  <button type="button" onClick={scanPool}>
-                    <Search size={16} /> 扫描资源池
+                    <CheckCircle2 size={16} /> 保存目录
                   </button>
                 </div>
                 <div className="migration-form">
                   <textarea value={resourcePoolDirs} onChange={(e) => setResourcePoolDirs(e.target.value)} placeholder="例如&#10;H:\CineMingle-1.3.0\JAV_output&#10;H:\bucket&#10;G:\软件\98tang\Img\Poster&#10;G:\软件\98tang\Img\ScreenShot" />
                 </div>
-                {resourcePool ? (
-                  <div className="rebuild-report">
-                    <span>
-                      资源池扫描：{resourcePool.total_nfos} 个 NFO · {resourcePool.total_videos} 个视频 · {resourcePool.total_images} 张图片 · 作品 {resourcePool.works.length} 个
-                      · 孤儿视频 {resourcePool.orphan_videos} · 孤儿图片 {resourcePool.orphan_images}
-                    </span>
-                  </div>
-                ) : null}
               </>
             ) : null}
 
@@ -2343,7 +2230,7 @@ export function App() {
                 <div className="rebuild-tools">
                   <div>
                     <strong>作品库重建（全量）</strong>
-                    <span>清空作品库，从资源池全量重新解析。仅首次建库或元数据大改时用。</span>
+                    <span>清空作品库，从索引来源目录全量重新解析。仅首次建库或元数据大改时用。</span>
                   </div>
                   <button type="button" className="primary" onClick={runRebuildFromPool} disabled={busy}>
                     <Database size={16} /> 执行重建
@@ -2352,7 +2239,7 @@ export function App() {
                 <div className="rebuild-tools">
                   <div>
                     <strong>增量同步（日常推荐）</strong>
-                    <span>主库目录是唯一库；扫描资源池把缺的视频/图片复制进主库对应作品，新番号自动新增，已有作品保留。无需重设目录。</span>
+                    <span>主库目录是唯一库；读取索引来源把缺的视频/图片复制进主库对应作品，新番号自动新增，已有作品保留。无需重设目录。</span>
                   </div>
                   <button type="button" onClick={savePrimaryLibrary}>
                     <CheckCircle2 size={16} /> 保存主库
@@ -2379,42 +2266,6 @@ export function App() {
                         {rebuildReport.errors.slice(0, 5).map((error, index) => (
                           <li key={index}>{error.nfo_path}：{error.message}</li>
                         ))}
-                      </ul>
-                    ) : null}
-                  </div>
-                ) : null}
-              </>
-            ) : null}
-
-            {settingsTab === "migrate" ? (
-              <>
-                <div className="migration-tools">
-                  <div>
-                    <strong>智能迁移（自包含作品目录）</strong>
-                    <span>从资源池扫描，按番号匹配 NFO+视频+图片，整合到作品目录（番号/番号.nfo + 番号.mp4 + 番号-v2.mp4 + poster.jpg + screenshots/）。视频移动、图片复制。</span>
-                  </div>
-                  <div className="migration-form">
-                    <label>目标目录</label>
-                    <input value={unifiedTargetDir} onChange={(e) => setUnifiedTargetDir(e.target.value)} placeholder="例如 H:\consolidated" />
-                  </div>
-                  <button type="button" onClick={planUnifiedMigration}>
-                    <Search size={16} /> 生成迁移计划
-                  </button>
-                  <button type="button" className="primary" onClick={executeUnifiedMigration} disabled={!unifiedPlan}>
-                    <Archive size={16} /> 执行迁移
-                  </button>
-                </div>
-                {unifiedPlan ? (
-                  <div className="rebuild-report">
-                    <span>
-                      迁移计划：{unifiedPlan.total_works} 个作品 · {unifiedPlan.total_videos} 个视频 · {unifiedPlan.total_images} 张图片
-                    </span>
-                    {unifiedPlan.works.length > 0 ? (
-                      <ul>
-                        {unifiedPlan.works.slice(0, 5).map((work) => (
-                          <li key={work.code}>{work.code}：{work.videos.length} 视频 + {(work.poster ? 1 : 0) + (work.fanart ? 1 : 0) + work.screenshots.length + work.gifs.length} 图片 → {work.target_dir}</li>
-                        ))}
-                        {unifiedPlan.works.length > 5 ? <li>...还有 {unifiedPlan.works.length - 5} 个作品</li> : null}
                       </ul>
                     ) : null}
                   </div>
@@ -2625,7 +2476,7 @@ export function App() {
                       <strong>{daemonStatus.source_roots.length}</strong>
                     </div>
                     <div className="metric-card">
-                      <span>资源池目录</span>
+                      <span>索引来源目录</span>
                       <strong>{daemonStatus.asset_roots.length}</strong>
                     </div>
                     <div className="metric-card">

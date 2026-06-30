@@ -1837,29 +1837,6 @@ pub fn clear_thumbnail_cache(
 }
 
 #[tauri::command]
-pub fn plan_centralized_migration(
-    nfo_dir: String,
-    video_dir: String,
-    target_dir: String,
-) -> Result<CommandResult<crate::domain::MigrationPlan>, String> {
-    let plan = crate::migration::plan_migration(
-        Path::new(&nfo_dir),
-        Path::new(&video_dir),
-        Path::new(&target_dir),
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(CommandResult { data: plan })
-}
-
-#[tauri::command]
-pub fn execute_centralized_migration(
-    plan: crate::domain::MigrationPlan,
-) -> Result<CommandResult<usize>, String> {
-    let migrated = crate::migration::execute_migration(&plan).map_err(|error| error.to_string())?;
-    Ok(CommandResult { data: migrated })
-}
-
-#[tauri::command]
 pub fn configure_resource_pool_dirs(
     dirs: Vec<String>,
     state: State<'_, AppState>,
@@ -1890,54 +1867,6 @@ pub fn get_resource_pool_dirs(
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     Ok(CommandResult { data: strings })
-}
-
-#[tauri::command]
-pub async fn scan_resource_pool(
-    dirs: Vec<String>,
-) -> Result<CommandResult<crate::domain::ResourcePool>, String> {
-    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
-    // Run the recursive walk + NFO parsing off the main thread so the WebView
-    // stays responsive while scanning hundreds of NFOs.
-    let pool = tauri::async_runtime::spawn_blocking(move || {
-        crate::resource_pool::scan_resource_pool(&roots)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|error| error.to_string())?;
-    Ok(CommandResult { data: pool })
-}
-
-#[tauri::command]
-pub async fn plan_unified_migration(
-    dirs: Vec<String>,
-    target_dir: String,
-) -> Result<CommandResult<crate::domain::UnifiedMigrationPlan>, String> {
-    let roots: Vec<PathBuf> = dirs.into_iter().map(PathBuf::from).collect();
-    let plan = tauri::async_runtime::spawn_blocking(move || {
-        let pool = crate::resource_pool::scan_resource_pool(&roots)?;
-        Ok::<_, anyhow::Error>(crate::migration::plan_unified_migration(
-            &pool,
-            Path::new(&target_dir),
-        ))
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|error| error.to_string())?;
-    Ok(CommandResult { data: plan })
-}
-
-#[tauri::command]
-pub async fn execute_unified_migration(
-    plan: crate::domain::UnifiedMigrationPlan,
-) -> Result<CommandResult<usize>, String> {
-    let migrated = tauri::async_runtime::spawn_blocking(move || {
-        crate::migration::execute_unified_migration(&plan)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|error| error.to_string())?;
-    Ok(CommandResult { data: migrated })
 }
 
 #[tauri::command]
@@ -2013,7 +1942,7 @@ pub async fn incremental_sync(
         // Physical fill happens here so the (locked) DB step below only upserts.
         for work in &pool.works {
             let work_dir = primary.join(&work.code);
-            let _ = crate::migration::sync_work_into_primary(work, &work_dir, &primary);
+            let _ = crate::primary_sync::sync_work_into_primary(work, &work_dir, &primary);
         }
         Ok(pool)
     })
@@ -2099,13 +2028,8 @@ pub fn build_app() -> Builder<tauri::Wry> {
             get_or_create_thumbnail,
             get_thumbnail_cache_summary,
             clear_thumbnail_cache,
-            plan_centralized_migration,
-            execute_centralized_migration,
             configure_resource_pool_dirs,
             get_resource_pool_dirs,
-            scan_resource_pool,
-            plan_unified_migration,
-            execute_unified_migration,
             rebuild_library_from_pool,
             configure_primary_library_dir,
             get_primary_library_dir,

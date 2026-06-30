@@ -486,4 +486,31 @@ describe("inventory page wiring", () => {
     expect(document.body.textContent).toContain("补迁执行完成：动作 2/2，移动 1，清理 1，恢复 0，失败 0");
     expect(document.body.textContent).toContain("post-migration-execution.json");
   });
+
+  it("keeps settings focused on configuration and hides retired migration entry points", async () => {
+    await act(async () => {
+      root?.render(<App />);
+    });
+    await act(async () => {
+      buttonContaining("设置").click();
+    });
+
+    expect(document.body.textContent).toContain("目录配置");
+    expect(document.body.textContent).toContain("保存目录");
+    expect(document.body.textContent).not.toContain("扫描资源池");
+    expect(document.body.textContent).not.toContain("智能迁移");
+    expect(document.body.textContent).not.toContain("生成迁移计划");
+
+    const settingsLibraryTab = Array.from(document.querySelectorAll(".settings-tabs button")).find((candidate) =>
+      candidate.textContent?.includes("作品库")
+    );
+    expect(settingsLibraryTab).toBeInstanceOf(HTMLButtonElement);
+    await act(async () => {
+      (settingsLibraryTab as HTMLButtonElement).click();
+    });
+
+    expect(document.body.textContent).toContain("作品库重建");
+    expect(document.body.textContent).toContain("增量同步");
+    expect(document.body.textContent).not.toContain("执行迁移");
+  });
 });

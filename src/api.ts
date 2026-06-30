@@ -307,40 +307,6 @@ export interface DimensionCount {
   work_count: number;
 }
 
-export interface MigrationWorkPlan {
-  code: string;
-  nfo_path: string;
-  video_paths: string[];
-  target_dir: string;
-}
-
-export interface MigrationPlan {
-  works: MigrationWorkPlan[];
-  total_nfos: number;
-  matched_videos: number;
-  unmatched_nfos: number;
-}
-
-export interface PooledWork {
-  code: string;
-  nfo_path: string | null;
-  videos: string[];
-  poster: string | null;
-  fanart: string | null;
-  thumb: string | null;
-  screenshots: string[];
-  gifs: string[];
-}
-
-export interface ResourcePool {
-  works: PooledWork[];
-  total_nfos: number;
-  total_videos: number;
-  total_images: number;
-  orphan_videos: number;
-  orphan_images: number;
-}
-
 export type InventoryResourceKind = "video" | "nfo" | "poster" | "fanart" | "thumb" | "screenshot" | "gif" | "image" | "other";
 export type InventoryStatus =
   | "ready"
@@ -591,25 +557,6 @@ export interface PostMigrationExecutionReport {
   bytes_deleted: number;
   bytes_restored: number;
   logs: PostMigrationExecutionLog[];
-}
-
-export interface UnifiedMigrationWorkPlan {
-  code: string;
-  nfo_path: string | null;
-  videos: string[];
-  poster: string | null;
-  fanart: string | null;
-  thumb: string | null;
-  screenshots: string[];
-  gifs: string[];
-  target_dir: string;
-}
-
-export interface UnifiedMigrationPlan {
-  works: UnifiedMigrationWorkPlan[];
-  total_works: number;
-  total_videos: number;
-  total_images: number;
 }
 
 export interface FileVersion {
@@ -884,26 +831,11 @@ export const api = {
   listLabels() {
     return command<DimensionCount[]>("list_labels");
   },
-  planCentralizedMigration(nfoDir: string, videoDir: string, targetDir: string) {
-    return command<MigrationPlan>("plan_centralized_migration", { nfoDir, videoDir, targetDir });
-  },
-  executeCentralizedMigration(plan: MigrationPlan) {
-    return command<number>("execute_centralized_migration", { plan });
-  },
   configureResourcePoolDirs(dirs: string[]) {
     return command<string[]>("configure_resource_pool_dirs", { dirs });
   },
   getResourcePoolDirs() {
     return command<string[]>("get_resource_pool_dirs");
-  },
-  scanResourcePool(dirs: string[]) {
-    return command<ResourcePool>("scan_resource_pool", { dirs });
-  },
-  planUnifiedMigration(dirs: string[], targetDir: string) {
-    return command<UnifiedMigrationPlan>("plan_unified_migration", { dirs, targetDir });
-  },
-  executeUnifiedMigration(plan: UnifiedMigrationPlan) {
-    return command<number>("execute_unified_migration", { plan });
   },
   rebuildLibraryFromPool(dirs: string[]) {
     return command<RebuildReport>("rebuild_library_from_pool", { dirs });

@@ -2470,7 +2470,7 @@ impl Repository {
         for work in &pool.works {
             let work_dir = primary_dir.join(&work.code);
             std::fs::create_dir_all(&work_dir).ok();
-            copied += crate::migration::sync_work_into_primary(work, &work_dir, primary_dir)?;
+            copied += crate::primary_sync::sync_work_into_primary(work, &work_dir, primary_dir)?;
         }
 
         // 2. Scan the primary dir only — it is now the complete authority.
